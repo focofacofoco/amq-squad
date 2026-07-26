@@ -2,9 +2,11 @@ package cli
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
@@ -390,11 +392,11 @@ func TestReadinessGroupsSubdirectoriesOfOneCheckoutAsCollision(t *testing.T) {
 	}
 	// Both subdirectories resolve to the same index, as they would in a checkout.
 	sharedIndex := filepath.Join(project, ".git", "index")
-	withIsolationIndexProbe(t, func(dir string) (string, bool) {
+	withIsolationIndexProbe(t, func(dir string) (string, isolationObservation) {
 		if strings.HasPrefix(dir, canonicalFilesystemPath(project)) {
-			return sharedIndex, true
+			return sharedIndex, isolationObserved
 		}
-		return "", false
+		return "", isolationNotACheckout
 	})
 
 	tm := team.Team{Project: project, Members: []team.Member{
@@ -414,7 +416,7 @@ func TestReadinessGroupsSubdirectoriesOfOneCheckoutAsCollision(t *testing.T) {
 func TestReadinessProxiesPlannedDirectoriesAndDisclosesIt(t *testing.T) {
 	project := t.TempDir()
 	planned := filepath.Join(project, "not-created-yet")
-	withIsolationIndexProbe(t, func(string) (string, bool) { return "", false })
+	withIsolationIndexProbe(t, func(string) (string, isolationObservation) { return "", isolationNotACheckout })
 
 	tm := team.Team{Project: project, Members: []team.Member{
 		{Role: "dev-1", Binary: "claude", Handle: "dev-1", ActorMode: team.ActorModeImplementation, CWD: planned},
@@ -441,8 +443,8 @@ func TestObservedCollisionIsNotDisclosedAsProxy(t *testing.T) {
 	if err := os.MkdirAll(shared, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	withIsolationIndexProbe(t, func(string) (string, bool) {
-		return filepath.Join(project, ".git", "index"), true
+	withIsolationIndexProbe(t, func(string) (string, isolationObservation) {
+		return filepath.Join(project, ".git", "index"), isolationObserved
 	})
 	tm := team.Team{Project: project, Members: []team.Member{
 		{Role: "dev-1", Binary: "claude", Handle: "dev-1", ActorMode: team.ActorModeImplementation, CWD: shared},
@@ -457,9 +459,103 @@ func TestObservedCollisionIsNotDisclosedAsProxy(t *testing.T) {
 	}
 }
 
-func withIsolationIndexProbe(t *testing.T, probe func(string) (string, bool)) {
+func withIsolationIndexProbe(t *testing.T, probe func(string) (string, isolationObservation)) {
 	t.Helper()
 	orig := worktreeIsolationIndexProbe
 	t.Cleanup(func() { worktreeIsolationIndexProbe = orig })
 	worktreeIsolationIndexProbe = probe
+}
+
+// #538 F4 round 4: an observation FAILURE is not a negative result.
+//
+// The probe previously treated every git error as "no index here", so if git were
+// missing or failing, two subdirectories of one checkout would fall back to
+// distinct directory keys and readiness would report READY -- resurrecting the
+// exact divergence F4 exists to prevent, this time caused by infrastructure. Under
+// #497 an unverifiable isolation claim is a blocker.
+func TestUnobservableGitBlocksReadinessInsteadOfSilentlyProxying(t *testing.T) {
+	project := t.TempDir()
+	shared := filepath.Join(project, "shared")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withIsolationIndexProbe(t, func(string) (string, isolationObservation) {
+		return "", isolationUnobservable
+	})
+
+	// Deliberately a roster that would look FINE under the old silent fallback:
+	// two distinct directories, so directory-keyed grouping reports no collision.
+	tm := team.Team{Project: project, Members: []team.Member{
+		{Role: "dev-1", Binary: "claude", Handle: "dev-1", ActorMode: team.ActorModeImplementation, CWD: filepath.Join(project, "a")},
+		{Role: "dev-2", Binary: "codex", Handle: "dev-2", ActorMode: team.ActorModeImplementation, CWD: filepath.Join(project, "b")},
+	}}
+	row := worktreeIsolationReadinessRow(tm, "squad")
+	if row.Status != "blocked" {
+		t.Fatalf("unverifiable isolation must block, not pass; got %s (%s)", row.Status, row.Evidence)
+	}
+	if !strings.Contains(row.Evidence, "cannot verify") {
+		t.Fatalf("evidence must name the observation failure; got: %s", row.Evidence)
+	}
+	// It must NOT be presented as a collision that isn't there, nor as a proxy.
+	if strings.Contains(row.Evidence, "share one working directory") {
+		t.Fatalf("must not claim a collision it did not observe; got: %s", row.Evidence)
+	}
+	if strings.Contains(row.Evidence, "planned directory") {
+		t.Fatalf("an observation failure is not a proxy; got: %s", row.Evidence)
+	}
+	if !strings.Contains(row.Fix, "git") {
+		t.Fatalf("fix must tell the operator to repair git; got: %s", row.Fix)
+	}
+}
+
+// A REAL git failure, not a stubbed one: point the probe at a directory while git
+// is unavailable on PATH, and confirm the production probe classifies it as
+// unobservable rather than as a clean negative.
+func TestProductionProbeTreatsMissingGitAsUnobservable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", t.TempDir()) // no git here
+	_, obs := worktreeIsolationIndexProbe(dir)
+	if obs != isolationUnobservable {
+		t.Fatalf("git missing from PATH must be unobservable, got %v", obs)
+	}
+}
+
+// A directory that does not exist is a CLEAN negative (the planned-worktree case),
+// which must stay distinguishable from infrastructure failure.
+func TestProductionProbeTreatsMissingDirectoryAsCleanNegative(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-created-yet")
+	_, obs := worktreeIsolationIndexProbe(missing)
+	if obs != isolationNotACheckout {
+		t.Fatalf("a nonexistent planned directory must be a clean negative, got %v", obs)
+	}
+}
+
+// A real directory that is genuinely not a checkout must also be a clean negative,
+// so the proxy path still works where it should.
+func TestProductionProbeTreatsNonCheckoutAsCleanNegative(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable; this case needs a working git to answer 'not a repository'")
+	}
+	// t.TempDir() is under /var/folders, outside any checkout.
+	_, obs := worktreeIsolationIndexProbe(dir)
+	if obs == isolationUnobservable {
+		t.Fatal("a real non-checkout directory must be a clean negative, not an observation failure")
+	}
+}
+
+// The exec must be bounded so a hung git cannot hang preparation, and the timeout
+// must be classified as an observation failure.
+func TestProbeTimeoutIsAnObservationFailure(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	orig := worktreeIsolationIndexProbeTimeout
+	t.Cleanup(func() { worktreeIsolationIndexProbeTimeout = orig })
+	// A timeout this small cannot complete a real exec.
+	worktreeIsolationIndexProbeTimeout = 1 * time.Nanosecond
+	_, obs := worktreeIsolationIndexProbe(t.TempDir())
+	if obs != isolationUnobservable {
+		t.Fatalf("a timed-out probe must be an observation failure, got %v", obs)
+	}
 }

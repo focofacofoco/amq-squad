@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
@@ -60,20 +63,40 @@ func worktreeIsolationReadinessRow(t team.Team, profile string) runReadinessRow 
 	groups := map[string][]string{}
 	groupDisplay := map[string]string{}
 	proxied := map[string]bool{}
+	var unobservable []string
 	for _, m := range t.Members {
 		if team.EffectiveActorMode(t, m) != team.ActorModeImplementation {
 			continue
 		}
 		cwd := m.EffectiveCWD(t.Project)
-		key, observed := memberIsolationKey(cwd)
+		key, obs := memberIsolationKey(cwd)
+		if obs == isolationUnobservable {
+			// #538 F4 round 4: git missing, hung, or failing is NOT "no index
+			// here". Silently proxying it would let two subdirectories of one
+			// checkout group as distinct and report ready -- the very divergence
+			// this check exists to prevent, caused by infrastructure rather than
+			// configuration. Under #497 an unverifiable isolation claim is a
+			// blocker, so fail closed and say why.
+			unobservable = append(unobservable, fmt.Sprintf("%s: %s", m.Role, cwd))
+			continue
+		}
 		// Display the path as recorded; group by the observable (or its proxy).
 		if _, seen := groupDisplay[key]; !seen {
 			groupDisplay[key] = cwd
 		}
-		if !observed {
+		if obs == isolationNotACheckout {
 			proxied[key] = true
 		}
 		groups[key] = append(groups[key], m.Role)
+	}
+	if len(unobservable) > 0 {
+		sort.Strings(unobservable)
+		return runReadinessRow{
+			Artifact: "worktree_isolation",
+			Status:   "blocked",
+			Evidence: fmt.Sprintf("cannot verify working-directory isolation for %s", strings.Join(unobservable, "; ")),
+			Fix:      "install/repair git so 'git rev-parse --git-path index' runs in each member working directory, then re-run preparation. Isolation cannot be confirmed without it, and an unverifiable claim is treated as a blocker (#497)",
+		}
 	}
 	var collisions []string
 	for key, roles := range groups {
@@ -163,56 +186,114 @@ func sharedCwdCollisionRoles(groups map[string][]string) []string {
 	return out
 }
 
+// isolationObservation is the outcome of trying to observe a member cwd's Git
+// index. The three cases are deliberately distinct: #538 F4 round 4 found that
+// collapsing "not a checkout" and "could not run git" into one boolean made
+// INFRASTRUCTURE FAILURE look like a clean answer, so two subdirectories of one
+// checkout fell back to distinct directory keys and readiness reported ready --
+// resurrecting the exact divergence F4 was about.
+type isolationObservation int
+
+const (
+	// isolationObserved: git ran and resolved an index path. Authoritative.
+	isolationObserved isolationObservation = iota
+	// isolationNotACheckout: git ran and reported this is not a checkout, or the
+	// directory does not exist yet. A clean, trustworthy negative -> proxy.
+	isolationNotACheckout
+	// isolationUnobservable: git is missing, failed to execute, timed out, or
+	// returned an error we cannot interpret. NOT a negative result. Readiness must
+	// fail closed, because "cannot verify isolation" is a blocker under #497, not
+	// a pass.
+	isolationUnobservable
+)
+
 // memberIsolationKey returns the grouping key for a member working directory and
-// whether it was OBSERVED rather than proxied.
+// how that key was obtained.
 //
 // #538 F4: doctor groups by resolved Git index path, so grouping by directory
 // string made the two checks disagree on the condition itself. Two counterexamples
-// drove the final shape:
+// drove the shape:
 //
 //   - two SUBDIRECTORIES of one checkout are distinct directories but ONE index,
 //     so a directory-only key misses a real collision;
 //   - a planned worktree that does not exist yet has NO index, so an index-only
-//     key cannot classify it at all (doctor excludes such members; preparation
-//     must not, since predicting the collision is the whole point pre-launch).
+//     key cannot classify it (doctor excludes such members; preparation must not,
+//     since predicting the collision is the point pre-launch).
 //
-// Hence the hybrid: observe the index when there is one to observe, and fall back
-// to the canonical directory as a declared proxy when there is not. Callers must
-// surface the proxy case rather than presenting it as an observation.
-func memberIsolationKey(cwd string) (key string, observed bool) {
+// Hence: observe the index when it can be observed, fall back to canonical
+// directory as a DECLARED proxy on a clean negative, and refuse to answer at all
+// when the observation itself failed.
+func memberIsolationKey(cwd string) (key string, obs isolationObservation) {
 	canonical := canonicalFilesystemPath(cwd)
 	if canonical == "" {
 		canonical = strings.TrimSpace(cwd)
 	}
-	if index, ok := worktreeIsolationIndexProbe(canonical); ok {
+	index, obs := worktreeIsolationIndexProbe(canonical)
+	switch obs {
+	case isolationObserved:
 		if resolved := canonicalFilesystemPath(index); resolved != "" {
-			return resolved, true
+			return resolved, isolationObserved
 		}
+		// git answered but the path did not canonicalize; treat as unobservable
+		// rather than quietly downgrading to the proxy.
+		return canonical, isolationUnobservable
+	case isolationUnobservable:
+		return canonical, isolationUnobservable
+	default:
+		return canonical, isolationNotACheckout
 	}
-	return canonical, false
 }
+
+// worktreeIsolationIndexProbeTimeout bounds the git call so a hung git cannot hang
+// preparation. Exceeding it is an observation FAILURE, never a negative result.
+var worktreeIsolationIndexProbeTimeout = 5 * time.Second
 
 // worktreeIsolationIndexProbe resolves a directory's Git index path using the same
 // observable doctor uses (git rev-parse --git-path index). It is a seam so tests
-// can exercise both branches without constructing real checkouts. A directory that
-// does not exist, or is not inside a checkout, reports ok=false.
-var worktreeIsolationIndexProbe = func(dir string) (string, bool) {
+// can drive all three outcomes without constructing real checkouts or removing git
+// from PATH.
+var worktreeIsolationIndexProbe = func(dir string) (string, isolationObservation) {
 	if dir == "" {
-		return "", false
+		return "", isolationNotACheckout
 	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return "", false
+	// A directory that does not exist yet is a clean negative: there is genuinely
+	// no index to observe, which is the planned-worktree case.
+	if info, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return "", isolationNotACheckout
+		}
+		return "", isolationUnobservable
+	} else if !info.IsDir() {
+		return "", isolationNotACheckout
 	}
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--git-path", "index").Output()
+	// git absent from PATH is infrastructure failure, not a negative answer.
+	if _, err := exec.LookPath("git"); err != nil {
+		return "", isolationUnobservable
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), worktreeIsolationIndexProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--git-path", "index")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", isolationUnobservable
+	}
 	if err != nil {
-		return "", false
+		// The ONE error we can interpret as a clean negative: git ran and told us
+		// this is not a repository. Anything else is uninterpretable and must fail
+		// closed rather than masquerade as "no index here".
+		if strings.Contains(strings.ToLower(stderr.String()), "not a git repository") {
+			return "", isolationNotACheckout
+		}
+		return "", isolationUnobservable
 	}
 	path := strings.TrimSpace(string(out))
 	if path == "" {
-		return "", false
+		return "", isolationUnobservable
 	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(dir, path)
 	}
-	return filepath.Clean(path), true
+	return filepath.Clean(path), isolationObserved
 }
