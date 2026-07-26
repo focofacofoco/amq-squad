@@ -864,7 +864,12 @@ func provePreparedRunStagedTargetAbsent(project, profile, session, handle string
 		if wake.PID <= 0 {
 			return fmt.Errorf("wake consumer record has no valid PID")
 		}
-		if defaultDuplicateLaunchProbe.PIDAlive(wake.PID) {
+		expectedRoot := absoluteAMQRoot(project, env.Root)
+		if strings.TrimSpace(wake.Root) != "" {
+			expectedRoot = wake.Root
+		}
+		if defaultDuplicateLaunchProbe.PIDAlive(wake.PID) &&
+			defaultDuplicateLaunchProbe.ProcessMatch(wake.PID, wakeProcessMatcher(handle, expectedRoot)) {
 			return fmt.Errorf("target has live wake consumer PID %d", wake.PID)
 		}
 	} else if !os.IsNotExist(wakeErr) {
