@@ -2554,7 +2554,7 @@ func TestExecuteStatusJSONRechecksExternalLeadPaneForVisibility(t *testing.T) {
 		ExecutionMode: executionModeProjectLead,
 	})
 	seedAgentRecord(t, base, "v2-11-0", "release-lead", launch.Record{
-		Binary: "codex", Handle: "release-lead", Role: "release-lead",
+		Binary: "codex", Handle: "release-lead", Role: "release-lead", Session: "v2-11-0",
 		External: true, AdoptionMode: adoptionModeExternalProjectLead, LauncherPaneID: "%1",
 		Tmux: &launch.TmuxInfo{Session: "root", WindowID: "@1", PaneID: "%1", Target: "external"},
 	})
@@ -2565,7 +2565,7 @@ func TestExecuteStatusJSONRechecksExternalLeadPaneForVisibility(t *testing.T) {
 	statusPaneInspector = func(id string) (tmuxpane.TmuxPane, bool) {
 		inspectCalls++
 		if id == "%1" && inspectCalls >= 2 {
-			return tmuxpane.TmuxPane{PaneID: "%1", WindowID: "@1", Session: "root"}, true
+			return tmuxpane.TmuxPane{PaneID: "%1", WindowID: "@1", Session: "root", Title: "amq:v2-11-0:release-lead"}, true
 		}
 		return tmuxpane.TmuxPane{}, false
 	}

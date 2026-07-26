@@ -79,10 +79,11 @@ type agentLaunchPreflight struct {
 // duplicateLaunchProbe abstracts liveness and process-inspection checks so
 // tests can substitute deterministic implementations.
 type duplicateLaunchProbe struct {
-	PIDAlive     func(pid int) bool
-	ProcessMatch func(pid int, predicate func(args string) bool) bool
-	ProcessTTY   func(pid int) (string, bool)
-	Now          func() time.Time
+	PIDAlive         func(pid int) bool
+	ProcessMatch     func(pid int, predicate func(args string) bool) bool
+	ProcessTTY       func(pid int) (string, bool)
+	ProcessStartTime func(pid int) (time.Time, bool)
+	Now              func() time.Time
 }
 
 // defaultDuplicateLaunchProbe is the production probe. PID liveness and process
@@ -91,10 +92,11 @@ type duplicateLaunchProbe struct {
 // internal/state's board + NOC snapshots) reads liveness identically and cannot
 // disagree about whether a PID is alive (#87).
 var defaultDuplicateLaunchProbe = duplicateLaunchProbe{
-	PIDAlive:     procinfo.Alive,
-	ProcessMatch: procinfo.Match,
-	ProcessTTY:   procinfo.TTY,
-	Now:          time.Now,
+	PIDAlive:         procinfo.Alive,
+	ProcessMatch:     procinfo.Match,
+	ProcessTTY:       procinfo.TTY,
+	ProcessStartTime: procinfo.StartTime,
+	Now:              time.Now,
 }
 
 // check inspects wake locks, prior launch records, and presence. It returns

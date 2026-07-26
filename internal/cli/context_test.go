@@ -11,6 +11,7 @@ import (
 
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	"github.com/omriariav/amq-squad/v2/internal/team"
+	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 )
 
 // contextCommandScopeInventory is the audited top-level command map for #463.
@@ -132,10 +133,11 @@ func TestResolveCanonicalContextPrecedenceMatrix(t *testing.T) {
 
 	liveRoot := filepath.Join(project, ".agent-mail", "live", "live-s")
 	contextPIDAlive = func(pid int) bool { return pid == 101 }
+	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
 		return []launch.Entry{{
 			AgentDir: filepath.Join(liveRoot, "agents", "lead"),
-			Record:   launch.Record{AgentPID: 101, TeamProfile: "live", Session: "live-s", Handle: "lead", Root: liveRoot, BaseRoot: liveRoot},
+			Record:   launch.Record{AgentPID: 101, Binary: "codex", TeamProfile: "live", Session: "live-s", Handle: "lead", Root: liveRoot, BaseRoot: liveRoot},
 		}}, nil
 	}
 	t.Run("live launch", func(t *testing.T) {
@@ -200,11 +202,12 @@ func TestContextExplainExplicitProfileRejectsConflictingTuples(t *testing.T) {
 	t.Setenv("AM_ME", "env-agent")
 	liveRoot := filepath.Join(project, ".agent-mail", "liveprof", "livesession")
 	contextPIDAlive = func(int) bool { return true }
+	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
 		return []launch.Entry{{
 			AgentDir: filepath.Join(liveRoot, "agents", "live-agent"),
 			Record: launch.Record{
-				AgentPID: 1, TeamProfile: "liveprof", Session: "livesession", Handle: "live-agent",
+				AgentPID: 1, Binary: "codex", TeamProfile: "liveprof", Session: "livesession", Handle: "live-agent",
 				Root: liveRoot, BaseRoot: liveRoot,
 			},
 		}}, nil
@@ -322,10 +325,11 @@ func TestResolveCanonicalContextAmbiguousLaunchesReportEveryProvenance(t *testin
 	isolateCanonicalContextTest(t, project)
 	writeContextAMQRC(t, project, filepath.Join(".agent-mail", "configured"))
 	contextPIDAlive = func(int) bool { return true }
+	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
 		return []launch.Entry{
-			{AgentDir: filepath.Join(project, ".agent-mail", "alpha", "s", "agents", "a"), Record: launch.Record{AgentPID: 1, TeamProfile: "alpha", Session: "s", Handle: "a"}},
-			{AgentDir: filepath.Join(project, ".agent-mail", "beta", "s", "agents", "b"), Record: launch.Record{AgentPID: 2, TeamProfile: "beta", Session: "s", Handle: "b"}},
+			{AgentDir: filepath.Join(project, ".agent-mail", "alpha", "s", "agents", "a"), Record: launch.Record{AgentPID: 1, Binary: "codex", TeamProfile: "alpha", Session: "s", Handle: "a"}},
+			{AgentDir: filepath.Join(project, ".agent-mail", "beta", "s", "agents", "b"), Record: launch.Record{AgentPID: 2, Binary: "codex", TeamProfile: "beta", Session: "s", Handle: "b"}},
 		}, nil
 	}
 	_, err := resolveCanonicalContext(contextResolveOptions{})
@@ -448,7 +452,7 @@ func TestContextRejectsSameBinaryPIDReuseWithSameOrUnknownTTY(t *testing.T) {
 	contextPIDAlive = func(int) bool { return true }
 	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextProcessStartTime = func(int) (time.Time, bool) {
-		return recordedAt.Add(time.Second), true
+		return recordedAt.Add(launchProcessStartSkewEpsilon + time.Nanosecond), true
 	}
 	contextProcessTTY = func(int) (string, bool) { return "/dev/ttys007", true }
 
@@ -556,6 +560,34 @@ func TestContextCleanupPreservesCanonicalWakeLiveRecord(t *testing.T) {
 	}
 }
 
+func TestContextCleanupRejectsReusedExternalPaneIDThroughCanonicalClassifier(t *testing.T) {
+	project := t.TempDir()
+	root := filepath.Join(project, ".agent-mail", "review", "s")
+	agentDir := filepath.Join(root, "agents", "worker")
+	if err := launch.Write(agentDir, launch.Record{
+		TeamHome: project, TeamProfile: "review", Session: "s", Role: "worker", Handle: "worker",
+		Root: root, CWD: project, Binary: "codex", External: true,
+		Tmux: &launch.TmuxInfo{PaneID: "%7"}, StartedAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldInspector := statusPaneInspector
+	statusPaneInspector = func(id string) (tmuxpane.TmuxPane, bool) {
+		return tmuxpane.TmuxPane{Pane: id, Title: "amq:s:someone-else"}, id == "%7"
+	}
+	t.Cleanup(func() { statusPaneInspector = oldInspector })
+
+	var out strings.Builder
+	if err := runContextCleanupWithDeps([]string{"--project", project, "--yes"}, contextCleanupDeps{
+		Scan: launch.ScanEntries, Out: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := launch.Read(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("reused external pane record survived canonical cleanup: %v\n%s", err, out.String())
+	}
+}
+
 func TestContextCleanupPreservesRecordThatBecomesLiveAfterPreview(t *testing.T) {
 	project := t.TempDir()
 	agentDir := filepath.Join(project, ".agent-mail", "old", "s", "agents", "worker")
@@ -611,13 +643,14 @@ func TestResolveCanonicalContextSharedTupleDoesNotRequireHandle(t *testing.T) {
 	isolateCanonicalContextTest(t, project)
 	root := filepath.Join(project, ".agent-mail", "release", "shared")
 	contextPIDAlive = func(int) bool { return true }
+	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextPaneTitle = func(paneID string) (string, bool) {
 		return "amq:shared:cto", paneID == "%7"
 	}
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
 		return []launch.Entry{
-			{AgentDir: filepath.Join(root, "agents", "cto"), Record: launch.Record{AgentPID: 1, TeamProfile: "release", Session: "shared", Handle: "cto", Root: root, BaseRoot: root, Tmux: &launch.TmuxInfo{PaneID: "%7"}}},
-			{AgentDir: filepath.Join(root, "agents", "qa"), Record: launch.Record{AgentPID: 2, TeamProfile: "release", Session: "shared", Handle: "qa", Root: root, BaseRoot: root}},
+			{AgentDir: filepath.Join(root, "agents", "cto"), Record: launch.Record{AgentPID: 1, Binary: "codex", TeamProfile: "release", Session: "shared", Handle: "cto", Root: root, BaseRoot: root, Tmux: &launch.TmuxInfo{PaneID: "%7"}}},
+			{AgentDir: filepath.Join(root, "agents", "qa"), Record: launch.Record{AgentPID: 2, Binary: "codex", TeamProfile: "release", Session: "shared", Handle: "qa", Root: root, BaseRoot: root}},
 		}, nil
 	}
 	if err := team.WriteProfile(project, "release", team.Team{Members: []team.Member{
@@ -891,8 +924,9 @@ func TestOrdinaryEntrypointsEmitAllContextCandidates(t *testing.T) {
 	t.Setenv("AM_ME", "env-agent")
 	liveRoot := filepath.Join(project, ".agent-mail", "live", "live-s")
 	contextPIDAlive = func(int) bool { return true }
+	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
-		return []launch.Entry{{AgentDir: filepath.Join(liveRoot, "agents", "live-agent"), Record: launch.Record{AgentPID: 1, TeamProfile: "live", Session: "live-s", Handle: "live-agent", Root: liveRoot, BaseRoot: liveRoot}}}, nil
+		return []launch.Entry{{AgentDir: filepath.Join(liveRoot, "agents", "live-agent"), Record: launch.Record{AgentPID: 1, Binary: "codex", TeamProfile: "live", Session: "live-s", Handle: "live-agent", Root: liveRoot, BaseRoot: liveRoot}}}, nil
 	}
 
 	previousResolve, previousRun := resolveAMQEnvForAMQCommand, runAMQCommand
@@ -947,11 +981,12 @@ func TestOrdinaryCommandsDoNotSpliceConflictingTuples(t *testing.T) {
 	t.Setenv("AM_ME", "env-agent")
 	liveRoot := filepath.Join(project, ".agent-mail", "liveprof", "livesession")
 	contextPIDAlive = func(int) bool { return true }
+	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
 		return []launch.Entry{{
 			AgentDir: filepath.Join(liveRoot, "agents", "live-agent"),
 			Record: launch.Record{
-				AgentPID: 1, TeamProfile: "liveprof", Session: "livesession", Handle: "live-agent",
+				AgentPID: 1, Binary: "codex", TeamProfile: "liveprof", Session: "livesession", Handle: "live-agent",
 				Root: liveRoot, BaseRoot: liveRoot,
 			},
 		}}, nil

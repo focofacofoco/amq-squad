@@ -111,6 +111,7 @@ func classifyAgentLiveness(agentDir, root, expectedProfile, handle, role, binary
 
 func classifyAgentLivenessWithReplacementResolver(agentDir, root, expectedProfile, handle, role, binary, workstream, cwd string, probe duplicateLaunchProbe, replacement replacementPaneResolver) agentLiveness {
 	out := agentLiveness{}
+	var launchIdentity launchRuntimeIdentity
 
 	launchRec, launchErr := launch.Read(agentDir)
 	if launchErr == nil {
@@ -124,6 +125,7 @@ func classifyAgentLivenessWithReplacementResolver(agentDir, root, expectedProfil
 			out.Detail = fmt.Sprintf("launch record profile %q does not match requested profile %q", squadnamespace.NormalizeProfile(launchRec.TeamProfile), squadnamespace.NormalizeProfile(expectedProfile))
 			return out
 		}
+		launchIdentity = classifyLaunchRuntimeIdentity(launchRec, binary, "", launchRuntimeProbeFromDuplicate(probe))
 		if launchRec.StoppedAt != nil && !launchRec.StoppedAt.IsZero() {
 			out.Tmux = nil
 			out.Verdict = livenessStale
@@ -140,16 +142,8 @@ func classifyAgentLivenessWithReplacementResolver(agentDir, root, expectedProfil
 
 	if hasLaunchPID {
 		out.Signals.AgentPID = launchRec.AgentPID
-		if probe.PIDAlive(launchRec.AgentPID) {
-			out.Signals.AgentAlive = true
-			b := strings.TrimSpace(launchRec.Binary)
-			if b == "" {
-				b = binary
-			}
-			if b != "" && probe.ProcessMatch(launchRec.AgentPID, agentProcessMatcher(b)) {
-				out.Signals.BinaryMatch = true
-			}
-		}
+		out.Signals.AgentAlive = launchIdentity.PIDAlive
+		out.Signals.BinaryMatch = launchIdentity.BinaryMatch
 	}
 	if hasWakePID {
 		out.Signals.WakePID = wakeLock.PID
@@ -189,19 +183,17 @@ func classifyAgentLivenessWithReplacementResolver(agentDir, root, expectedProfil
 	}
 	out.PresenceLive = presenceLive
 
-	if out.Signals.AgentAlive && out.Signals.BinaryMatch {
+	if launchIdentity.PIDLive {
 		out.Verdict = livenessAgentLive
 		out.Status = statusStateLive
 		out.Detail = fmt.Sprintf("agent pid %d alive (%s)", out.Signals.AgentPID, binary)
 		return out
 	}
-	if launchErr == nil && launchRec.External && launchRec.Tmux != nil && strings.TrimSpace(launchRec.Tmux.PaneID) != "" {
-		if _, ok := statusPaneInspector(launchRec.Tmux.PaneID); ok {
-			out.Verdict = livenessAgentLive
-			out.Status = statusStateLive
-			out.Detail = fmt.Sprintf("external pane %s live (registered lead)", launchRec.Tmux.PaneID)
-			return out
-		}
+	if launchIdentity.PaneLive {
+		out.Verdict = livenessAgentLive
+		out.Status = statusStateLive
+		out.Detail = fmt.Sprintf("external pane %s live (registered lead)", launchRec.Tmux.PaneID)
+		return out
 	}
 	if presenceLive {
 		out.Verdict = livenessPresenceLive
@@ -248,7 +240,10 @@ func classifyAgentLivenessWithReplacementResolver(agentDir, root, expectedProfil
 
 func replacementPaneAllowedForRecord(launchErr error, rec launch.Record) bool {
 	if launchErr != nil || rec.Terminal == nil {
-		return true
+		return launchErr != nil || !rec.External
+	}
+	if rec.External {
+		return false
 	}
 	switch strings.TrimSpace(rec.Terminal.Backend) {
 	case "", runtimecontrol.BackendTmux:

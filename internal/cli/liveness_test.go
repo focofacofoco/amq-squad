@@ -51,6 +51,34 @@ func TestStoppedLaunchRecordOverridesReusedLivePID(t *testing.T) {
 	}
 }
 
+func TestCanonicalClassifierRejectsReusedExternalPaneID(t *testing.T) {
+	base := setupFakeAMQSessionRoots(t)
+	dir := seedTeam(t, team.Team{
+		Workstream: "pane-reuse",
+		Members:    []team.Member{{Role: "cto", Binary: "codex", Handle: "cto", Session: "pane-reuse"}},
+	})
+	writeMemberLaunchRecord(t, base, "pane-reuse", "cto", launch.Record{
+		CWD: dir, Binary: "codex", Role: "cto", Handle: "cto", Session: "pane-reuse",
+		External: true, Tmux: &launch.TmuxInfo{PaneID: "%7"},
+		StartedAt: time.Now().Add(-time.Hour),
+	})
+	agentDir := filepath.Join(base, "pane-reuse", "agents", "cto")
+	oldInspector := statusPaneInspector
+	statusPaneInspector = func(id string) (tmuxpane.TmuxPane, bool) {
+		return tmuxpane.TmuxPane{Pane: id, Title: "amq:pane-reuse:someone-else"}, id == "%7"
+	}
+	t.Cleanup(func() { statusPaneInspector = oldInspector })
+
+	live := classifyAgentLiveness(
+		agentDir, filepath.Join(base, "pane-reuse"), team.DefaultProfile,
+		"cto", "cto", "codex", "pane-reuse", dir,
+		livenessProbe(nil, nil, time.Now()),
+	)
+	if live.Live() || live.Status == statusStateLive || live.Status == statusStateWakeLive {
+		t.Fatalf("reused external pane id classified live: %+v", live)
+	}
+}
+
 // TestStatusAndResumeAgreeOnStaleAgent is the core #79 regression: a genuinely
 // stale agent on disk (dead launch AgentPID + dead/unrelated wake PID, with no
 // fresh active presence and no live replacement pane) must be deemed stale by

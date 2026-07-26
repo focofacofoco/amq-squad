@@ -462,9 +462,12 @@ amq-squad rm issue-96
 it non-live. PID-backed identity requires the recorded binary and a process
 birth time compatible with the launch record; pane-backed identity requires
 the exact `amq:<session>:<role>` title, so reused PIDs and pane numbers cannot
-silently restore stale context. `context cleanup` is the explicit recovery path
-for older orphaned records: it previews project-matching records that the
-shared status/resume liveness classifier finds non-live, requires confirmation,
+silently restore stale context. Process birth-time comparison allows a bounded
+two-second clock/reconstruction skew, while binary and TTY checks still apply.
+One runtime-identity classifier supplies context selection (including implicit
+project bootstrap), status/resume, and cleanup. `context cleanup` is the
+explicit recovery path for older orphaned records: it previews
+project-matching records that classifier finds non-live, requires confirmation,
 and rechecks each record under its writer lock before removal. Wake, presence,
 and replacement-pane liveness all preserve a record, as does any record that
 became live or changed after preview.

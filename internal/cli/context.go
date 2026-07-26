@@ -664,12 +664,8 @@ func projectFromInjectedLaunch(cwd string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	active := rec.AgentPID > 0 && contextPIDAlive(rec.AgentPID)
 	pane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
-	if !active && pane != "" && rec.Tmux != nil && rec.Tmux.PaneID == pane {
-		active = true
-	}
-	if !active {
+	if !contextLaunchRecordRuntimeLive(rec, pane) {
 		return "", false
 	}
 	for _, candidate := range []string{rec.TeamHome, rec.CWD} {
@@ -847,65 +843,27 @@ func matchingLiveLaunchContexts(projectDir string, opts contextResolveOptions, e
 }
 
 func contextLaunchRecordWins(rec launch.Record, currentPane string) bool {
-	if rec.StoppedAt != nil && !rec.StoppedAt.IsZero() {
-		return false
-	}
 	return contextLaunchRecordRuntimeLive(rec, currentPane)
 }
 
-// contextLaunchRecordRuntimeLive is deliberately stricter than signal-0.
-// A reused PID must also match the recorded binary and, when both sides expose
-// a controlling TTY, the exact launch TTY. Pane identity covers records whose
-// launcher could not capture an agent PID, including external leads.
+// contextLaunchRecordRuntimeLive is the context adapter for the shared runtime
+// identity predicate used by status/resume and cleanup.
 func contextLaunchRecordRuntimeLive(rec launch.Record, currentPane string) bool {
-	if rec.AgentPID > 0 && contextPIDAlive(rec.AgentPID) {
-		binary := strings.TrimSpace(rec.Binary)
-		if binary == "" || contextProcessMatch(rec.AgentPID, agentProcessMatcher(binary)) {
-			reusedPID := false
-			if !rec.StartedAt.IsZero() && contextProcessStartTime != nil {
-				if processStartedAt, ok := contextProcessStartTime(rec.AgentPID); ok && processStartedAt.After(rec.StartedAt) {
-					reusedPID = true
-				}
-			}
-			if !reusedPID {
-				recordedTTY := strings.TrimSpace(rec.AgentTTY)
-				if recordedTTY == "" || recordedTTY == "unknown" {
-					return true
-				}
-				if observedTTY, ok := contextProcessTTY(rec.AgentPID); !ok || sameResolvedDir(recordedTTY, observedTTY) {
-					return true
-				}
-			}
-		}
+	return classifyLaunchRuntimeIdentity(rec, rec.Binary, currentPane, contextLaunchRuntimeProbe()).Live
+}
+
+func contextLaunchRuntimeProbe() launchRuntimeProbe {
+	return launchRuntimeProbe{
+		PIDAlive:         contextPIDAlive,
+		ProcessMatch:     contextProcessMatch,
+		ProcessTTY:       contextProcessTTY,
+		ProcessStartTime: contextProcessStartTime,
+		PaneTitle:        contextPaneTitle,
 	}
-	if rec.Tmux == nil || strings.TrimSpace(rec.Tmux.PaneID) == "" {
-		return false
-	}
-	paneID := strings.TrimSpace(rec.Tmux.PaneID)
-	// Managed stop intentionally preserves panes so their final output remains
-	// readable; a leftover or reused pane ID is not identity evidence. Both the
-	// current-pane and external-record paths require the launcher's exact
-	// amq:<session>:<role> title, so tmux pane-number reuse cannot win context.
-	if paneID != strings.TrimSpace(currentPane) && !rec.External {
-		return false
-	}
-	return contextLaunchRecordPaneIdentityMatches(rec, paneID)
 }
 
 func contextLaunchRecordPaneIdentityMatches(rec launch.Record, paneID string) bool {
-	if rec.Tmux == nil || strings.TrimSpace(rec.Tmux.PaneID) != strings.TrimSpace(paneID) {
-		return false
-	}
-	role := strings.TrimSpace(rec.Role)
-	if role == "" {
-		role = strings.TrimSpace(rec.Handle)
-	}
-	session := strings.TrimSpace(rec.Session)
-	if role == "" || session == "" {
-		return false
-	}
-	title, ok := contextPaneTitle(paneID)
-	return ok && strings.TrimSpace(title) == paneTitleToken(session, role)
+	return classifyLaunchRuntimeIdentity(rec, rec.Binary, paneID, launchRuntimeProbe{PaneTitle: contextPaneTitle}).PaneLive
 }
 
 func launchRecordMatchesProject(rec launch.Record, projectDir string) bool {

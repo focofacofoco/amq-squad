@@ -424,7 +424,7 @@ func TestLeadRegisterPreservesExistingNativeGoalBinding(t *testing.T) {
 	prevInspector := statusPaneInspector
 	statusPaneInspector = func(id string) (tmuxpane.TmuxPane, bool) {
 		if id == "%5" {
-			return tmuxpane.TmuxPane{PaneID: "%5"}, true
+			return tmuxpane.TmuxPane{PaneID: "%5", Title: "amq:issue-96:cto"}, true
 		}
 		return tmuxpane.TmuxPane{}, false
 	}
@@ -1523,6 +1523,7 @@ func TestStatusTreatsExternalLeadPaneAsLiveAndActionable(t *testing.T) {
 		Binary:   "codex",
 		Handle:   "cto",
 		Role:     "cto",
+		Session:  "issue-96",
 		External: true,
 		Tmux:     &launch.TmuxInfo{Session: "tmux-main", WindowID: "@7", WindowName: "lead", PaneID: "%5", Target: "external"},
 	})
@@ -1531,7 +1532,7 @@ func TestStatusTreatsExternalLeadPaneAsLiveAndActionable(t *testing.T) {
 	statusPaneLister = func() ([]tmuxpane.TmuxPane, error) { return nil, nil }
 	statusPaneInspector = func(id string) (tmuxpane.TmuxPane, bool) {
 		if id == "%5" {
-			return tmuxpane.TmuxPane{Session: "tmux-main", PaneID: "%5", WindowID: "@7", WindowName: "lead"}, true
+			return tmuxpane.TmuxPane{Session: "tmux-main", PaneID: "%5", WindowID: "@7", WindowName: "lead", Title: "amq:issue-96:cto"}, true
 		}
 		return tmuxpane.TmuxPane{}, false
 	}

@@ -197,7 +197,7 @@ func runDownExec(t *testing.T, d downExecution) (string, error) {
 	return buf.String(), err
 }
 
-func TestExecuteDownStoppedRecordCannotWinCanonicalContext(t *testing.T) {
+func TestExecuteDownStoppedRecordCannotBootstrapImplicitProject(t *testing.T) {
 	setupFakeAMQSessionRoots(t)
 	project := t.TempDir()
 	chdir(t, project)
@@ -236,6 +236,12 @@ func TestExecuteDownStoppedRecordCannotWinCanonicalContext(t *testing.T) {
 	}
 
 	isolateCanonicalContextTest(t, project)
+	outside := t.TempDir()
+	resumeChdir(t, outside)
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_BASE_ROOT", baseRoot)
+	t.Setenv("AM_SESSION", session)
+	t.Setenv("AM_ME", "worker")
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
 		return []launch.Entry{{Record: stopped, AgentDir: agentDir, Source: launch.FileName}}, nil
 	}
@@ -244,12 +250,12 @@ func TestExecuteDownStoppedRecordCannotWinCanonicalContext(t *testing.T) {
 	contextPIDAlive = func(int) bool { return true }
 	contextProcessMatch = func(int, func(string) bool) bool { return true }
 	contextProcessStartTime = func(int) (time.Time, bool) { return startedAt.Add(-time.Second), true }
-	ctx, err := resolveCanonicalContext(contextResolveOptions{ProjectFlag: project, ProjectExplicit: true})
+	ctx, err := resolveCanonicalContext(contextResolveOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ctx.Profile == profile || ctx.Sources["profile"] == contextSourceLaunch {
-		t.Fatalf("stopped record won canonical context: %#v", ctx)
+	if !sameResolvedDir(ctx.ProjectDir, outside) || sameResolvedDir(ctx.ProjectDir, project) {
+		t.Fatalf("stopped record bootstrapped TeamHome as project: %#v", ctx)
 	}
 }
 
