@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -279,13 +280,22 @@ PREVIEW only -- nothing launched. Re-run with --go to open the window.
 	if _, err := exec.LookPath("tmux"); err != nil {
 		return usageErrorf("tmux not found on PATH")
 	}
-	paneOutput, err := orchestrateTmuxOutput("new-window", "-P", "-F", "#{pane_id}", "-c", controlRoot, "-n", *name)
+	paneOutput, err := orchestrateTmuxOutput("new-window", "-P", "-F", "#{pane_id}\t#{pane_pid}", "-c", controlRoot, "-n", *name)
 	if err != nil {
 		return fmt.Errorf("tmux new-window failed: %w", err)
 	}
-	paneID := strings.TrimSpace(paneOutput)
+	paneFields := strings.Split(strings.TrimSpace(paneOutput), "\t")
+	if len(paneFields) != 2 {
+		return fmt.Errorf("tmux new-window returned incomplete pane/process identity %q", strings.TrimSpace(paneOutput))
+	}
+	paneID := strings.TrimSpace(paneFields[0])
 	if _, err := exactTmuxPaneID(paneID); err != nil {
 		return fmt.Errorf("tmux new-window returned invalid pane identity: %w", err)
+	}
+	panePID, err := strconv.Atoi(strings.TrimSpace(paneFields[1]))
+	if err != nil || panePID <= 0 {
+		_ = orchestrateTmuxRun("kill-window", "-t", paneID)
+		return fmt.Errorf("tmux new-window returned invalid pane PID %q", strings.TrimSpace(paneFields[1]))
 	}
 	identity, err := globalNOCPaneIdentityFor(paneID)
 	if err != nil {
@@ -296,15 +306,31 @@ PREVIEW only -- nothing launched. Re-run with --go to open the window.
 		_ = orchestrateTmuxRun("kill-window", "-t", paneID)
 		return fmt.Errorf("stamp NOC pane %s: %w", paneID, err)
 	}
-	if _, err := beginGlobalNOCLaunch(controlRoot, launchID, *agent, strings.TrimSpace(*model), identity, bootstrapDigest, backstop, now); err != nil {
+	preparedAt := globalNOCNow().UTC()
+	if defaultDuplicateLaunchProbe.ProcessStartTime != nil {
+		if processStartedAt, ok := defaultDuplicateLaunchProbe.ProcessStartTime(panePID); ok {
+			preparedAt = processStartedAt.UTC()
+		}
+	}
+	prepared, err := beginGlobalNOCLaunch(controlRoot, launchID, *agent, strings.TrimSpace(*model), panePID, identity, bootstrapDigest, backstop, preparedAt)
+	if err != nil {
 		_ = orchestrateTmuxRun("kill-window", "-t", paneID)
 		return fmt.Errorf("persist prepared NOC launch generation: %w", err)
 	}
-	command := shellCommand(agentArgv[0], agentArgv[1:]...)
+	// exec preserves tmux's pane PID while replacing the bootstrap shell with
+	// the agent process. The registry can therefore bind a positive PID before
+	// dispatch and activate only after the canonical PID classifier observes
+	// the expected binary.
+	command := "exec " + shellCommand(agentArgv[0], agentArgv[1:]...)
 	if err := orchestrateTmuxRun("send-keys", "-t", paneID, command, "C-m"); err != nil {
 		_ = transitionGlobalNOCLaunch(controlRoot, launchID, globalNOCLaunchFailed, "agent command dispatch failed: "+err.Error(), globalNOCNow().UTC())
 		_ = orchestrateTmuxRun("kill-window", "-t", paneID)
 		return fmt.Errorf("launch NOC agent command: %w", err)
+	}
+	if err := waitForGlobalNOCPIDIdentity(prepared.Record); err != nil {
+		_ = transitionGlobalNOCLaunch(controlRoot, launchID, globalNOCLaunchFailed, "agent runtime identity verification failed: "+err.Error(), globalNOCNow().UTC())
+		_ = orchestrateTmuxRun("kill-window", "-t", paneID)
+		return err
 	}
 	if err := transitionGlobalNOCLaunch(controlRoot, launchID, globalNOCLaunchActive, "native NOC bootstrap dispatched to stamped pane", globalNOCNow().UTC()); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: NOC agent launched but active registry publication failed: %v\n", err)

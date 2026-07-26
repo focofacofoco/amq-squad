@@ -82,9 +82,10 @@ func withStubbedTmux(t *testing.T) *[][]string {
 	prevRun := orchestrateTmuxRun
 	prevOutput := orchestrateTmuxOutput
 	prevIdentity := globalNOCPaneIdentityFor
+	prevRuntimeIdentity := globalNOCRuntimeIdentity
 	orchestrateTmuxOutput = func(args ...string) (string, error) {
 		calls = append(calls, append([]string{}, args...))
-		return "%900\n", nil
+		return "%900\t4242\n", nil
 	}
 	orchestrateTmuxRun = func(args ...string) error {
 		calls = append(calls, append([]string{}, args...))
@@ -93,10 +94,14 @@ func withStubbedTmux(t *testing.T) *[][]string {
 	globalNOCPaneIdentityFor = func(paneID string) (*tmuxpane.PaneIdentity, error) {
 		return &tmuxpane.PaneIdentity{Session: "tmux-main", WindowID: "@90", WindowName: "global-orch", PaneID: paneID}, nil
 	}
+	globalNOCRuntimeIdentity = func(rec launch.Record, _ string) launchRuntimeIdentity {
+		return launchRuntimeIdentity{Live: rec.AgentPID == 4242, PIDLive: rec.AgentPID == 4242}
+	}
 	t.Cleanup(func() {
 		orchestrateTmuxRun = prevRun
 		orchestrateTmuxOutput = prevOutput
 		globalNOCPaneIdentityFor = prevIdentity
+		globalNOCRuntimeIdentity = prevRuntimeIdentity
 	})
 	return &calls
 }
@@ -200,13 +205,13 @@ func TestGlobalStartGoLaunchesTmuxWithAgentArgv(t *testing.T) {
 		t.Fatalf("canonical root: %v", canonicalErr)
 	}
 	create := strings.Join((*calls)[0], " ")
-	for _, want := range []string{"new-window", "-P", "-F #{pane_id}", "-c " + canonicalRoot, "-n global-orch"} {
+	for _, want := range []string{"new-window", "-P", "-F #{pane_id}\t#{pane_pid}", "-c " + canonicalRoot, "-n global-orch"} {
 		if !strings.Contains(create, want) {
 			t.Fatalf("tmux create argv %q missing %q", create, want)
 		}
 	}
 	dispatch := strings.Join((*calls)[1], " ")
-	for _, want := range []string{"send-keys", "-t %900", "codex", "--model", "gpt-5", "--enable", "goals", "Step 1", "C-m"} {
+	for _, want := range []string{"send-keys", "-t %900", "exec codex", "--model", "gpt-5", "--enable", "goals", "Step 1", "C-m"} {
 		if !strings.Contains(dispatch, want) {
 			t.Fatalf("tmux dispatch argv missing %q:\n%s", want, dispatch)
 		}
@@ -215,7 +220,10 @@ func TestGlobalStartGoLaunchesTmuxWithAgentArgv(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("read NOC registry: %v", readErr)
 	}
-	if len(registry.Launches) != 1 || registry.Launches[0].State != globalNOCLaunchActive || registry.Launches[0].Record.Tmux.PaneID != "%900" {
+	if len(registry.Launches) != 1 || registry.Launches[0].State != globalNOCLaunchActive ||
+		registry.Launches[0].Record.Tmux.PaneID != "%900" ||
+		registry.Launches[0].Record.AgentPID != 4242 ||
+		registry.Launches[0].BootstrapVersion != globalNOCBootstrapVersion {
 		t.Fatalf("NOC launch registry = %+v", registry)
 	}
 }

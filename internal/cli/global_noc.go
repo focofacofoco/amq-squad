@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	globalNOCRegistrySchema = 1
-	globalNOCRegistryDir    = "noc"
-	globalNOCRegistryFile   = "registry.json"
-	globalNOCRole           = "noc"
+	globalNOCRegistrySchema   = 1
+	globalNOCBootstrapVersion = 1
+	globalNOCRegistryDir      = "noc"
+	globalNOCRegistryFile     = "registry.json"
+	globalNOCRole             = "noc"
 
 	globalNOCLaunchPrepared = "prepared"
 	globalNOCLaunchActive   = "active"
@@ -48,15 +49,16 @@ func (b globalNOCBackstop) validate() error {
 }
 
 type globalNOCLaunch struct {
-	ID              string            `json:"id"`
-	Generation      uint64            `json:"generation"`
-	State           string            `json:"state"`
-	Record          launch.Record     `json:"launch_record"`
-	BootstrapDigest string            `json:"bootstrap_digest"`
-	Backstop        globalNOCBackstop `json:"stall_backstop"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
-	Detail          string            `json:"detail,omitempty"`
+	ID               string            `json:"id"`
+	Generation       uint64            `json:"generation"`
+	State            string            `json:"state"`
+	Record           launch.Record     `json:"launch_record"`
+	BootstrapVersion int               `json:"bootstrap_version"`
+	BootstrapDigest  string            `json:"bootstrap_digest"`
+	Backstop         globalNOCBackstop `json:"stall_backstop"`
+	CreatedAt        time.Time         `json:"created_at"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+	Detail           string            `json:"detail,omitempty"`
 }
 
 type globalNOCRun struct {
@@ -100,6 +102,17 @@ var globalNOCNow = time.Now
 var globalNOCCurrentPaneIdentity = currentPaneIdentity
 var globalNOCPaneIdentityFor = tmuxpane.PaneIdentityFor
 var globalNOCPaneInspection = tmuxpane.InspectPaneExactByID
+var globalNOCProcessWaitTimeout = 5 * time.Second
+var globalNOCProcessWaitInterval = 50 * time.Millisecond
+var globalNOCProcessWaitSleep = time.Sleep
+var globalNOCRuntimeIdentity = func(rec launch.Record, currentPane string) launchRuntimeIdentity {
+	return classifyLaunchRuntimeIdentity(
+		rec,
+		rec.Binary,
+		currentPane,
+		launchRuntimeProbeFromDuplicate(defaultDuplicateLaunchProbe),
+	)
+}
 
 func resolveGlobalNOCRegistrationPlan(explicitHandle string, explicit, optOut bool) (globalNOCRegistrationPlan, error) {
 	if explicit && optOut {
@@ -253,7 +266,13 @@ func validateGlobalNOCRegistry(registry globalNOCRegistry, expectedRoot string) 
 	if registry.SchemaVersion != globalNOCRegistrySchema {
 		return fmt.Errorf("unsupported NOC registry schema %d", registry.SchemaVersion)
 	}
-	if !sameFilesystemPath(registry.ControlRoot, expectedRoot) {
+	// ControlRoot is canonicalized exactly once when the registry is created.
+	// Treat the stored value as immutable authority bytes after that: resolving
+	// it again would let a later symlink swap transfer authority to a different
+	// directory.
+	if registry.ControlRoot == "" || !filepath.IsAbs(registry.ControlRoot) ||
+		registry.ControlRoot != filepath.Clean(registry.ControlRoot) ||
+		registry.ControlRoot != expectedRoot {
 		return fmt.Errorf("NOC registry control root mismatch")
 	}
 	if registry.CurrentGeneration != uint64(len(registry.Launches)) {
@@ -272,6 +291,15 @@ func validateGlobalNOCRegistry(registry globalNOCRegistry, expectedRoot string) 
 		if item.Record.Tmux == nil || strings.TrimSpace(item.Record.Tmux.PaneID) == "" ||
 			strings.TrimSpace(item.Record.Session) == "" || strings.TrimSpace(item.Record.Role) == "" {
 			return fmt.Errorf("NOC launch generation %d has incomplete stamped runtime identity", wantGeneration)
+		}
+		if item.Record.CWD != registry.ControlRoot {
+			return fmt.Errorf("NOC launch generation %d control root binding mismatch", wantGeneration)
+		}
+		if item.Record.AgentPID <= 0 {
+			return fmt.Errorf("NOC launch generation %d has no positive agent PID", wantGeneration)
+		}
+		if item.BootstrapVersion != globalNOCBootstrapVersion {
+			return fmt.Errorf("NOC launch generation %d has unsupported bootstrap version %d", wantGeneration, item.BootstrapVersion)
 		}
 		if err := item.Backstop.validate(); err != nil {
 			return fmt.Errorf("NOC launch generation %d: %w", wantGeneration, err)
@@ -312,9 +340,12 @@ func globalNOCBootstrapDigest(prompt string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func beginGlobalNOCLaunch(root, id, binary, model string, identity *tmuxpane.PaneIdentity, bootstrapDigest string, backstop globalNOCBackstop, now time.Time) (globalNOCLaunch, error) {
+func beginGlobalNOCLaunch(root, id, binary, model string, agentPID int, identity *tmuxpane.PaneIdentity, bootstrapDigest string, backstop globalNOCBackstop, now time.Time) (globalNOCLaunch, error) {
 	if identity == nil || strings.TrimSpace(identity.PaneID) == "" {
 		return globalNOCLaunch{}, fmt.Errorf("NOC launch requires exact tmux pane identity")
+	}
+	if agentPID <= 0 {
+		return globalNOCLaunch{}, fmt.Errorf("NOC launch requires a positive pane/agent PID")
 	}
 	now = now.UTC()
 	var created globalNOCLaunch
@@ -322,15 +353,21 @@ func beginGlobalNOCLaunch(root, id, binary, model string, identity *tmuxpane.Pan
 		if len(registry.Launches) > 0 {
 			current := &registry.Launches[len(registry.Launches)-1]
 			if current.State == globalNOCLaunchPrepared {
-				return fmt.Errorf("NOC launch generation %d is still prepared for pane %s; inspect or close that exact pane before replacing it", current.Generation, current.Record.Tmux.PaneID)
+				inspection := globalNOCPaneInspection(current.Record.Tmux.PaneID)
+				if inspection.State != tmuxpane.PaneInspectionGone {
+					return fmt.Errorf("NOC launch generation %d is still prepared for pane %s; inspect or close that exact pane before replacing it", current.Generation, current.Record.Tmux.PaneID)
+				}
+				current.State = globalNOCLaunchStopped
+				current.UpdatedAt = now
+				current.Detail = "stale prepared generation re-armed after its exact pane was confirmed gone"
 			}
 			if current.State == globalNOCLaunchActive {
 				inspection := globalNOCPaneInspection(current.Record.Tmux.PaneID)
-				runtimeIdentity := classifyLaunchRuntimeIdentity(current.Record, current.Record.Binary, "", launchRuntimeProbeFromDuplicate(defaultDuplicateLaunchProbe))
+				runtimeIdentity := globalNOCRuntimeIdentity(current.Record, "")
 				if inspection.State != tmuxpane.PaneInspectionGone {
 					detail := strings.TrimSpace(inspection.Detail)
-					if runtimeIdentity.Live {
-						detail = "canonical launch runtime identity is live"
+					if runtimeIdentity.PIDLive {
+						detail = "canonical launch PID runtime identity is live"
 					} else if detail == "" {
 						detail = "exact pane state or stamped launch identity is unverified"
 					}
@@ -350,6 +387,7 @@ func beginGlobalNOCLaunch(root, id, binary, model string, identity *tmuxpane.Pan
 			Handle:    globalNOCRole,
 			Role:      globalNOCRole,
 			External:  true,
+			AgentPID:  agentPID,
 			StartedAt: now,
 			Tmux: &launch.TmuxInfo{
 				Session: identity.Session, WindowID: identity.WindowID,
@@ -359,7 +397,8 @@ func beginGlobalNOCLaunch(root, id, binary, model string, identity *tmuxpane.Pan
 		rec.Terminal = launch.TerminalInfoFromTmux(rec.Tmux)
 		created = globalNOCLaunch{
 			ID: id, Generation: generation, State: globalNOCLaunchPrepared,
-			Record: rec, BootstrapDigest: bootstrapDigest, Backstop: backstop,
+			Record: rec, BootstrapVersion: globalNOCBootstrapVersion,
+			BootstrapDigest: bootstrapDigest, Backstop: backstop,
 			CreatedAt: now, UpdatedAt: now,
 		}
 		registry.CurrentGeneration = generation
@@ -368,6 +407,20 @@ func beginGlobalNOCLaunch(root, id, binary, model string, identity *tmuxpane.Pan
 		return nil
 	})
 	return created, err
+}
+
+func waitForGlobalNOCPIDIdentity(rec launch.Record) error {
+	deadline := time.Now().Add(globalNOCProcessWaitTimeout)
+	for {
+		identity := globalNOCRuntimeIdentity(rec, "")
+		if identity.PIDLive {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("NOC agent PID %d did not establish canonical %s runtime identity within %s", rec.AgentPID, rec.Binary, globalNOCProcessWaitTimeout)
+		}
+		globalNOCProcessWaitSleep(globalNOCProcessWaitInterval)
+	}
 }
 
 func transitionGlobalNOCLaunch(root, id, state, detail string, now time.Time) error {
@@ -417,8 +470,8 @@ func detectRegisteredGlobalNOC(root string) (*globalNOCContext, error) {
 		pane.WindowID != current.Record.Tmux.WindowID || pane.Session != current.Record.Tmux.Session {
 		return nil, nil
 	}
-	identity := classifyLaunchRuntimeIdentity(current.Record, current.Record.Binary, pane.PaneID, launchRuntimeProbeFromDuplicate(defaultDuplicateLaunchProbe))
-	if !identity.Live || !identity.PaneLive {
+	identity := globalNOCRuntimeIdentity(current.Record, pane.PaneID)
+	if !identity.PIDLive || !identity.PaneLive {
 		return nil, fmt.Errorf("current pane matches NOC generation %d but its stamped canonical runtime identity is unverified", current.Generation)
 	}
 	return &globalNOCContext{ControlRoot: registry.ControlRoot, Launch: current}, nil
@@ -489,6 +542,7 @@ func finishGlobalNOCRun(ctx *globalNOCContext, runID, state, detail string, regi
 func buildGlobalNOCBootstrap(root, launchID, registryPath string, backstop globalNOCBackstop) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are the amq-squad global/NOC orchestrator for neutral control root %s.\n\n", root)
+	fmt.Fprintf(&b, "NOC bootstrap contract version: %d\n", globalNOCBootstrapVersion)
 	fmt.Fprintf(&b, "Durable NOC launch id: %s\nRegistry: %s\n", launchID, registryPath)
 	fmt.Fprintf(&b, "Stall backstop: interval=%ds timeout=%ds max_ticks=%d. Every sweep is bounded; never author an unbounded watch or polling loop.\n\n", backstop.IntervalSeconds, backstop.TimeoutSeconds, backstop.MaxTicks)
 	b.WriteString("Step 1 — Preview and bind scope\n")
