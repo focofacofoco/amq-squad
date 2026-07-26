@@ -398,15 +398,30 @@ func TestGeneratedToolPoliciesFailClosedWithoutPartialWrites(t *testing.T) {
 }
 
 func TestGeneratedToolPoliciesRejectUnsupportedCodexCapabilitySyntax(t *testing.T) {
-	codexHome := t.TempDir()
-	t.Setenv("CODEX_HOME", codexHome)
-	seedTeam(t, team.Team{Members: []team.Member{{Role: "backend", Binary: "codex", Handle: "backend", Session: "s"}}})
-	writeFile(t, filepath.Join(codexHome, "config.toml"), "mcp_servers = { github = { command = \"gh\" } }\n")
-	_, _, err := captureOutput(t, func() error {
-		return runTeamOverlay([]string{"init", "--role", "backend", "--tool-profile", "coding"})
-	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported inline Codex capability syntax") {
-		t.Fatalf("unsupported config must fail closed: %v", err)
+	for _, tt := range []struct {
+		name   string
+		config string
+	}{
+		{name: "inline table", config: "mcp_servers = { github = { command = \"gh\" } }\n"},
+		{name: "dotted assignment", config: "mcp_servers.github.command = \"gh\"\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			t.Setenv("CODEX_HOME", codexHome)
+			seedTeam(t, team.Team{Members: []team.Member{{Role: "backend", Binary: "codex", Handle: "backend", Session: "s"}}})
+			writeFile(t, filepath.Join(codexHome, "config.toml"), tt.config)
+			_, _, err := captureOutput(t, func() error {
+				return runTeamOverlay([]string{"init", "--role", "backend", "--tool-profile", "coding"})
+			})
+			if err == nil {
+				t.Fatal("unsupported config must fail closed")
+			}
+			for _, want := range []string{"unsupported inline or dotted Codex capability syntax", "use a [mcp_servers.github] table header"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("unsupported config error %q missing %q", err, want)
+				}
+			}
+		})
 	}
 }
 
@@ -436,6 +451,7 @@ func TestDiscoverCodexCapabilitiesParsesTOMLDottedTableKeys(t *testing.T) {
 		{name: "malformed bare key", config: "[mcp_servers.git!hub]\n", wantErr: true},
 		{name: "unterminated quoted key", config: "[mcp_servers.\"github]\n", wantErr: true},
 		{name: "inline syntax remains rejected", config: "mcp_servers = { github = { command = \"gh\" } }\n", wantErr: true},
+		{name: "dotted assignment remains rejected", config: "mcp_servers.github.command = \"gh\"\n", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

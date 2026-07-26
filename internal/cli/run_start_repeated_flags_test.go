@@ -66,6 +66,57 @@ func TestRunStartRepeatedRoleMapFlagsReachPreparationAsOneMap(t *testing.T) {
 	}
 }
 
+func TestRunStartWizardPrefillAccumulatesEveryRepeatedRoleMapFlag(t *testing.T) {
+	spec, err := parseRunStartWizardPrefill([]string{
+		"--binary", "cto=codex",
+		"--binary", "qa=claude",
+		"--model", "cto=gpt-5.6-sol",
+		"--model", "qa=claude-opus-4-1",
+		"--effort", "cto=high",
+		"--effort", "qa=max",
+		"--tool-profile", "cto=full",
+		"--tool-profile", "qa=coding",
+	})
+	if err != nil {
+		t.Fatalf("parse interactive prefill: %v", err)
+	}
+	for name, got := range map[string]string{
+		"binary":       spec.Binary,
+		"model":        spec.Model,
+		"effort":       spec.Effort,
+		"tool-profile": spec.ToolProfile,
+	} {
+		wantByName := map[string]string{
+			"binary":       "cto=codex,qa=claude",
+			"model":        "cto=gpt-5.6-sol,qa=claude-opus-4-1",
+			"effort":       "cto=high,qa=max",
+			"tool-profile": "cto=full,qa=coding",
+		}
+		if got != wantByName[name] {
+			t.Fatalf("interactive --%s = %q, want %q", name, got, wantByName[name])
+		}
+	}
+}
+
+func TestRunStartWizardPrefillRejectsRepeatedDuplicateRoleWithBothValues(t *testing.T) {
+	for _, name := range []string{"binary", "model", "effort", "tool-profile"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseRunStartWizardPrefill([]string{
+				"--" + name, "qa=first",
+				"--" + name, "QA=second",
+			})
+			if err == nil {
+				t.Fatalf("interactive duplicate --%s role must fail", name)
+			}
+			for _, want := range []string{"--" + name, "qa", "first", "second"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("interactive duplicate --%s error %q missing %q", name, err, want)
+				}
+			}
+		})
+	}
+}
+
 func TestRunStartRepeatedRoleMapFlagsRejectDuplicateRoleWithBothValues(t *testing.T) {
 	for _, name := range []string{"binary", "model", "effort", "tool-profile"} {
 		t.Run(name, func(t *testing.T) {

@@ -567,7 +567,11 @@ func discoverCodexCapabilities(path string) ([]string, bool, error) {
 	for _, raw := range strings.Split(string(b), "\n") {
 		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "mcp_servers") || strings.HasPrefix(line, "plugins") {
-			return nil, true, fmt.Errorf("unsupported inline Codex capability syntax in %s: %s", path, line)
+			rewrite := "[mcp_servers.github]"
+			if strings.HasPrefix(line, "plugins") {
+				rewrite = "[plugins.example]"
+			}
+			return nil, true, fmt.Errorf("unsupported inline or dotted Codex capability syntax in %s: %s; use a %s table header", path, line, rewrite)
 		}
 		if !strings.HasPrefix(line, "[") {
 			continue
