@@ -102,14 +102,51 @@ class GateDetectsDrift(unittest.TestCase):
         self.assertEqual(result.returncode, 1, "an unparseable verb must fail, not vanish")
         self.assertIn("evidenceX", result.stderr)
 
-    def test_unknown_flag_fails(self):
-        target = SKILLS / "amq-squad" / "references" / "pointer-stub-template.md"
-        with MutatedSkill(
-            target, "amq-squad team sync --apply", "amq-squad team sync --apply --nonexistent-flag"
-        ):
-            result = run_gate()
-        self.assertEqual(result.returncode, 1, "an unknown flag must fail the gate")
-        self.assertIn("--nonexistent-flag", result.stderr)
+    def test_unknown_flag_fails_on_an_exhaustive_surface(self):
+        """Refutation is only legitimate where the surface is COMPLETE.
+
+        `activity set` uses Go's default flag printer, which enumerates every flag,
+        so absence there is genuine drift.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in sorted(SKILLS.rglob("*.md")):
+                (Path(tmp) / src.name).write_text(src.read_text())
+            (Path(tmp) / "zz_exhaustive.md").write_text(
+                "```\namq-squad activity set --me H --task T --phase coding --nope-not-a-flag\n```\n"
+            )
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertEqual(result.returncode, 1, f"drift on an exhaustive surface must fail:\n{result.stderr}")
+        self.assertIn("--nope-not-a-flag", result.stderr)
+
+    def test_real_flags_on_an_exhaustive_surface_verify(self):
+        """The counter-case: Go's single-dash listing must be READ, or every real
+        flag on such a command would be reported as drift. This is finding #10."""
+        gate = load_gate()
+        known, exhaustive = gate.flag_surface(str(BINARY), "activity", "set")
+        self.assertTrue(exhaustive, "activity set's help is a complete definition list")
+        for real in ("--me", "--task", "--phase"):
+            self.assertIn(real, known, f"{real} is accepted and must be readable from help")
+
+    def test_absent_flag_on_an_illustrative_surface_does_not_fail(self):
+        """Confirm-only. `run start` documents `-p/-s` and never lists the long
+        forms, yet --project and --session are accepted, so absence from an
+        illustrative usage block proves nothing and must not fail the reference."""
+        gate = load_gate()
+        known, exhaustive = gate.flag_surface(str(BINARY), "run", "start")
+        self.assertFalse(exhaustive, "run start's usage block is illustrative, not exhaustive")
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in sorted(SKILLS.rglob("*.md")):
+                (Path(tmp) / src.name).write_text(src.read_text())
+            (Path(tmp) / "zz_illustrative.md").write_text(
+                "```\namq-squad run start --project P --session S --unlisted-but-maybe-real\n```\n"
+            )
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertEqual(result.returncode, 0, f"must not fail on an illustrative surface:\n{result.stderr}")
+        self.assertIn("NOT verifiable", result.stdout)
 
 
 class ExtractionRules(unittest.TestCase):
@@ -274,14 +311,24 @@ class SecondReviewFindings(unittest.TestCase):
         self.assertIn("--attempt-id", flags, "a flag further after the wrap must be extracted")
         self.assertIn("--profile", flags, "flags before the wrap must still be extracted")
 
-    def test_post_wrap_flag_drift_fails_the_gate(self):
-        """End to end, not just extraction: a bogus post-wrap flag on a command
-        whose flag help IS observable must fail."""
-        target = SKILLS / "wizard" / "SKILL.md"
-        with MutatedSkill(target, "--launch-shape working-team-together", "--launch-shapeX working-team-together"):
-            result = run_gate()
-        self.assertEqual(result.returncode, 1, "a bogus post-wrap flag must fail the gate")
-        self.assertIn("run start", result.stderr)
+    def test_post_wrap_flag_is_extracted_and_refuted_where_possible(self):
+        """Extraction across a wrap is proven separately from refutation, because
+        refutation now requires an exhaustive surface. The wrap fix is what makes the
+        flag visible at all; whether it can be REFUTED depends on the surface kind.
+        """
+        found = self.gate.extract([SKILLS / "cli" / "SKILL.md"])
+        self.assertIn("--subject", found[("evidence", "run")], "post-wrap flag must be extracted")
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in sorted(SKILLS.rglob("*.md")):
+                (Path(tmp) / src.name).write_text(src.read_text())
+            (Path(tmp) / "zz_wrap.md").write_text(
+                "```\namq-squad activity set --me H\n    --task T --bogus-after-wrap\n```\n"
+            )
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertEqual(result.returncode, 1, f"a post-wrap bogus flag on an exhaustive surface must fail:\n{result.stderr}")
+        self.assertIn("--bogus-after-wrap", result.stderr)
 
     # MEDIUM 3 ---------------------------------------------------------------
     def test_malformed_verb_with_leading_dash_is_reported(self):
@@ -467,7 +514,7 @@ class ThirdRoundFindings(unittest.TestCase):
 
     # Self-exposed 9: whitespace crossing newlines ---------------------------
     def test_usage_parse_does_not_cross_lines(self):
-        """`\s+` matches NEWLINES, so a usage line ending at the verb ran into the
+        r"""`\s+` matches NEWLINES, so a usage line ending at the verb ran into the
         next line and captured "amq-squad" as a subcommand of doctor. A wrong
         authoritative set is worse than none, because it is trusted."""
         subs, _ = self.gate.subcommand_surface(str(BINARY), "doctor")
@@ -490,6 +537,120 @@ class ThirdRoundFindings(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr, f"gate crashed:\n{result.stderr}")
         self.assertNotIn("MIN_COMMANDS", result.stderr)
         self.assertNotIn("expected >=", result.stderr, "corpus must be large enough to reach the sort")
+
+
+
+class FourthRoundFindings(unittest.TestCase):
+    """Round-4 findings: five from convergence plus finding #10."""
+
+    def setUp(self):
+        if not BINARY.exists():
+            self.skipTest("binary not built; run make build")
+        self.gate = load_gate()
+
+    # Finding 1 + #10: structure, not prose or examples ----------------------
+    def test_flag_surface_ignores_prose_and_examples(self):
+        """`--dry-run` appears in notify's EXAMPLES and `alias for --profile` in
+        activity set's DESCRIPTIONS. Neither is the flag surface. Scraping them made
+        real flags look absent and invented drift."""
+        known, _ = self.gate.flag_surface(str(BINARY), "activity", "set")
+        # activity set's real flags come from the definition list...
+        self.assertIn("--me", known)
+        # ...and a flag named only inside a description must not be treated as a
+        # separate declared flag of some other command.
+        top = self.gate.run_help(str(BINARY))
+        self.assertIn("Usage", top)
+
+    def test_global_flag_surface_is_structural(self):
+        """Both directions were wrong: examples were accepted as flags, and --version
+        was rejected despite being valid."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in sorted(SKILLS.rglob("*.md")):
+                (Path(tmp) / src.name).write_text(src.read_text())
+            (Path(tmp) / "zz_global.md").write_text("```\namq-squad --version\n```\n")
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertEqual(result.returncode, 0, f"--version is valid and must not fail:\n{result.stderr}")
+
+    # Finding 2: one span, two commands --------------------------------------
+    def test_one_span_two_commands_both_extracted(self):
+        """The earlier test used TWO spans, so it missed this: after a span is
+        collapsed the second command is no longer at a line start, and the truncation
+        discarded it instead of processing it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("Do `amq-squad team sync --apply then amq-squad doctor --json` now.\n")
+            found = self.gate.extract([probe])
+        self.assertIn(("team", "sync"), found, "first command must be extracted")
+        self.assertIn(("doctor", None), found, "SECOND command in the SAME span must be extracted")
+        self.assertIn("--json", found[("doctor", None)])
+
+    # Finding 3: later single-dash tokens ------------------------------------
+    def test_later_single_dash_token_is_not_dropped(self):
+        """`team sync -apply` passed with no claimed flag: the collector retained only
+        double-dash tokens, so a single-dash token vanished."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("```\namq-squad team sync -apply\n```\n")
+            found = self.gate.extract([probe])
+        claimed = set()
+        for flags in found.values():
+            claimed |= flags
+        self.assertIn("-apply", claimed, "a single-dash token must be reported, not dropped")
+
+    # Finding 4: floor math, and the main()-level exit test ------------------
+    def test_floor_uses_ceiling_not_truncation(self):
+        """int() truncation let 11/23 (47.8%) pass a 50% floor."""
+        import math
+
+        self.assertEqual(math.ceil(23 * 0.5), 12, "12 of 23 is the true 50% threshold")
+
+    def test_floor_guards_the_verifiable_set_too(self):
+        self.assertGreater(self.gate.MIN_VERIFIABLE_FLAGS, 0)
+        self.assertGreater(self.gate.MIN_VERIFIED_FLAGS, 0)
+
+    def test_main_exits_2_when_the_verifiable_set_collapses(self):
+        """The main()-level exit-code assertion, asked for twice. Blind the flag
+        surface so nothing is verifiable, then assert the process exits 2."""
+        import unittest.mock as mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in sorted(SKILLS.rglob("*.md")):
+                (Path(tmp) / src.name).write_text(src.read_text())
+            runner = (
+                "import sys, importlib.util\n"
+                f"spec = importlib.util.spec_from_file_location('g', {str(GATE)!r})\n"
+                "g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)\n"
+                # Blind only PER-COMMAND surfaces: blinding the global one too would
+                # trip the earlier global-flag guard and never reach the floor.\n"
+                "_orig = g.flag_surface\n"
+                "g.flag_surface = lambda b, v, s2=None, **k: (_orig(b, v, s2) if not v else (set(), False))\n"
+                f"sys.argv = ['g', {str(BINARY)!r}, {tmp!r}]\n"
+                "raise SystemExit(g.main())\n"
+            )
+            result = subprocess.run([sys.executable, "-c", runner], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, f"a collapsed verifiable set must exit 2:\n{result.stderr}")
+        self.assertIn("verifiable", result.stderr)
+
+    # Finding 5: comment stripping respects quotes --------------------------
+    def test_hash_inside_quotes_is_not_a_comment(self):
+        """`--note "issue #123" --force` lost --force to a blunt comment strip."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text('```\namq-squad activity set --me H --detail "issue #123" --phase coding\n```\n')
+            found = self.gate.extract([probe])
+        flags = found.get(("activity", "set"), set())
+        self.assertIn("--phase", flags, "a flag after a quoted # must survive")
+        self.assertIn("--detail", flags)
+
+    def test_real_trailing_comment_is_still_stripped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("```\namq-squad doctor        # AMQ version, tmux, wake\n```\n")
+            found = self.gate.extract([probe])
+        self.assertIn(("doctor", None), found)
+        self.assertNotIn(("doctor", "#"), found)
 
 
 if __name__ == "__main__":

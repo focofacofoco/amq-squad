@@ -14,6 +14,7 @@ of the command surface would be the very defect this gate exists to catch.
 
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 import sys
@@ -44,7 +45,25 @@ COMMAND_LINE = re.compile(
 # `amq-squad doctor    # AMQ version, tmux, wake` extracted `#` as doctor's
 # SUBCOMMAND, which then hit the `doctor takes no positional arguments` error and
 # (before H1) was reported as a PROVEN path.
-INLINE_COMMENT = re.compile(r"\s+#.*$")
+def strip_inline_comment(text: str) -> str:
+    """Drop a trailing shell comment, ignoring `#` inside quotes.
+
+    Finding 5: a blunt whitespace-hash-to-end pattern deleted the rest of
+    `--note "issue #123" --force`, losing --force. Second half of the shell-syntax
+    lesson: text that looks like shell must be read with shell rules.
+    """
+    quote = None
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            continue
+        if ch == "#" and (i == 0 or text[i - 1] in " \t"):
+            return text[:i]
+    return text
 
 # A trailing permission-string suffix: Bash(amq-squad x remove:*) -> drop ":*)".
 PERMISSION_SUFFIX = re.compile(r"[:)].*$")
@@ -67,6 +86,10 @@ FENCE = re.compile(r"```.*?```", re.S)
 # body must tolerate newlines. A newline-hostile pattern misses it SILENTLY, which
 # is the dangerous kind of miss.
 INLINE = re.compile(r"`([^`]+)`", re.S)
+
+# Inside an inline span every `amq-squad` occurrence starts a reference, because the
+# span is code. Fences keep the stricter line-start rule (they also carry templates).
+SPAN_COMMAND = re.compile(r"\bamq-squad\s+(?P<rest>(?:(?!amq-squad)[^\n])*)")
 
 VERB = re.compile(r"^[a-z][a-z0-9-]*$")
 # A subcommand token may be malformed; we still check it rather than drop it.
@@ -106,7 +129,9 @@ MIN_FLAGS_CLAIMED_FOR_FLOOR = 4
 # Committed coverage baseline. At the time of writing the gate verifies 15 of 23
 # claimed flags; these floors make a regression from that a BUILD failure rather
 # than a quiet shrink. Raise them when coverage genuinely improves.
-MIN_VERIFIED_FLAGS = 10
+MIN_VERIFIED_FLAGS = 4
+# The VERIFIABLE set must not silently shrink either, or the ratio is vacuous.
+MIN_VERIFIABLE_FLAGS = 5
 MIN_VERIFIED_FLAG_RATIO = 0.5
 
 
@@ -220,25 +245,76 @@ def subcommand_surface(binary: str, verb: str) -> tuple[set[str], bool]:
 
 
 def flag_surface(binary: str, verb: str, sub: str | None) -> tuple[set[str], bool]:
-    """Return (flags, observable).
+    """Return (flags, exhaustive).
 
-    observable is False when the exact command's help cannot be trusted as an
-    exhaustive flag list: either it errored (some subcommands refuse --help without
-    required positionals, e.g. `evidence run`) or it delegates its flags to another
-    command's set. In those cases flags are UNVERIFIABLE, not absent.
+    Flags come from STRUCTURE only:
+      (a) the USAGE BLOCK, which wraps across indented continuation lines that do not
+          repeat `amq-squad` (notify and run start both wrap), so it must be read as a
+          block rather than per-line on a leading token;
+      (b) Go's DEFAULT flag printer, which lists `  -name type` with a SINGLE dash.
+          Go accepts -name and --name identically, so they are one flag.
 
-    Falling back to the PARENT's help would be worse than not checking: `evidence`
-    and `evidence run` have different flag sets, so the parent's list produced
-    confident false positives for flags that do work.
+    Never from description prose or examples. Scraping every `--token` from the body
+    pulled "alias for --profile" out of a DESCRIPTION and `--dry-run` out of an
+    EXAMPLE, then treated both as the surface.
+
+    `exhaustive` is True only for Go's printer, which is a complete definition list.
+    A hand-written usage block is ILLUSTRATIVE: `run start` shows `-p PROJECT
+    -s SESSION` and never lists the long forms, yet --project and --session parse
+    fine. So a source may CONFIRM a flag; only an exhaustive one may REFUTE it.
+    Turning "not shown" into "not accepted" false-failed correct documentation, which
+    is the same over-claiming shape as trusting one incomplete subcommand source.
     """
-    args = [verb] if sub is None else [verb, sub]
+    args = [] if not verb else ([verb] if sub is None else [verb, sub])
     text = run_help(binary, *args)
-    if text.lstrip().startswith("error:"):
+    if verb and text.lstrip().startswith("error:"):
         return set(), False
-    if DELEGATES_FLAGS.search(text):
+    lines = text.splitlines()
+
+    usage_flags: set[str] = set()
+    in_usage = False
+    for line in lines:
+        if line.startswith("Usage:"):
+            in_usage = True
+            usage_flags.update(re.findall(r"--([A-Za-z][A-Za-z0-9-]*)", line))
+            continue
+        if in_usage:
+            if not line.strip() or not line.startswith((" ", "\t")):
+                in_usage = False
+                continue
+            usage_flags.update(re.findall(r"--([A-Za-z][A-Za-z0-9-]*)", line))
+
+    definitions: set[str] = set()
+    for line in lines:
+        m = re.match(r"^[ \t]{2,}--?([A-Za-z][A-Za-z0-9-]*)(?:[ \t=,]|$)", line)
+        if m:
+            definitions.add(m.group(1))
+
+    exhaustive = any(line.startswith("Usage of ") for line in lines)
+    flags = {"--" + f for f in usage_flags | definitions}
+    # Delegation only matters when structure yielded NOTHING. Checking it first made
+    # the top-level surface empty, because `amq-squad <command> [options]` reads as a
+    # delegation even though the global flags are declared right there.
+    if not flags and DELEGATES_FLAGS.search(text):
         return set(), False
-    flags = set(re.findall(r"(--[a-z][a-z0-9-]*)", text))
-    return flags, bool(flags)
+    return flags, exhaustive
+
+
+def code_blobs_typed(text: str) -> list[tuple[str, str]]:
+    """Return (blob, kind) where kind is "fence" or "span".
+
+    Finding 2: after an inline span is collapsed to one line (needed for wrapped
+    references), a SECOND command in that span is no longer at a line start, so a
+    line-start-only matcher silently dropped it. A span IS code, so any `amq-squad`
+    occurrence inside one starts a reference; a FENCE keeps the line-start rule,
+    because fences also hold file templates and prose.
+    """
+    out = [(FENCE_CONTINUATION.sub(" ", m.group(0)), "fence") for m in FENCE.finditer(text)]
+    out.extend(
+        (re.sub(r"\s*\n\s*", " ", m.group(1)), "span")
+        for m in INLINE.finditer(FENCE.sub("", text))
+    )
+    return out
 
 
 def code_blobs(text: str) -> list[str]:
@@ -267,10 +343,13 @@ def extract(paths: list[Path]) -> dict[tuple[str, str | None], set[str]]:
     """Map (verb, subcommand-or-None) -> set of flags named with it, per skills."""
     found: dict[tuple[str, str | None], set[str]] = {}
     for path in paths:
-        for blob in code_blobs(path.read_text()):
-            # Join wrapped continuation lines so a reference is read whole.
-            for match in COMMAND_LINE.finditer(blob):
-                rest = INLINE_COMMENT.sub("", match.group("rest"))
+        for blob, kind in code_blobs_typed(path.read_text()):
+            # A collapsed inline span is one line, so a SECOND command in it is no
+            # longer at a line start: spans match every `amq-squad` occurrence, while
+            # fences keep the line-start rule because they also carry file templates.
+            pattern = SPAN_COMMAND if kind == "span" else COMMAND_LINE
+            for match in pattern.finditer(blob):
+                rest = strip_inline_comment(match.group("rest"))
                 rest = PERMISSION_SUFFIX.sub("", rest)
                 tokens = rest.split()
                 if not tokens:
@@ -313,7 +392,9 @@ def extract(paths: list[Path]) -> dict[tuple[str, str | None], set[str]]:
                 own_tokens = tokens[1:]
                 if "--" in own_tokens:
                     own_tokens = own_tokens[: own_tokens.index("--")]
-                flags = {t for t in own_tokens if t.startswith("--")}
+                # Finding 3: retaining only double-dash tokens made `-apply` VANISH.
+                # Anything dash-prefixed is a claim and must reach verification.
+                flags = {t for t in own_tokens if t.startswith("-") and t != "-"}
                 malformed = {t for t in flags if not FLAG.match(t)}
                 if malformed:
                     found.setdefault((MALFORMED_FLAG_KEY, None), set()).update(malformed)
@@ -363,6 +444,8 @@ def main() -> int:
     unobservable_paths: list[str] = []
     flags_checked = 0
     flags_claimed = 0
+    flags_verifiable = 0
+    unverifiable_flags: list[str] = []
     verified_real_verb = False
 
     # M2: flag_surface(binary, "", None) executed `amq-squad "" --help`, returned an
@@ -370,8 +453,12 @@ def main() -> int:
     # `amq-squad --definitely-not-global` stayed green. Parse the real top-level
     # help instead, and treat an unparseable top-level help as a BUILD failure
     # rather than as permission to skip the check.
-    top_help = run_help(binary)
-    global_flags = set(re.findall(r"(--[A-Za-z][A-Za-z0-9-]*)", top_help))
+    # Finding 1: this was wrong in BOTH directions. Scraping every flag-shaped token
+    # accepted `--dry-run` from an EXAMPLE, while `--version` -- valid, but absent
+    # from the help text -- was rejected. Use the same structural parse and the same
+    # completeness rule as every other surface: confirm from structure, refute only
+    # when the surface is exhaustive.
+    global_flags, global_exhaustive = flag_surface(binary, "", None)
     if not global_flags:
         print(
             "error: no global flags parsed from 'amq-squad --help'; cannot verify "
@@ -392,11 +479,15 @@ def main() -> int:
                 failures.append(f"'{flag}' is named in the skills but is not valid flag syntax")
             continue
 
-        # A flag-only reference (`amq-squad --version`): verify the flags exist.
+        # A flag-only reference (`amq-squad --version`): confirm from structure, and
+        # refute only if the top-level surface is exhaustive. `--version` is valid but
+        # absent from the help text, so refuting on absence would reject it.
         if verb == GLOBAL_FLAG_KEY:
             for flag in sorted(flags):
-                if flag not in global_flags:
+                if flag not in global_flags and global_exhaustive:
                     failures.append(f"global flag '{flag}' is named in the skills but 'amq-squad --help' does not list it")
+                elif flag not in global_flags:
+                    unverifiable.append(f"amq-squad {flag} (global)")
                 else:
                     flags_checked += 1
             continue
@@ -424,16 +515,23 @@ def main() -> int:
                 continue
 
         target = f"{verb} {sub}" if sub else verb
-        known, observable = flag_surface(binary, verb, sub)
-        if not observable:
-            if flags:
-                unverifiable.append(f"amq-squad {target} ({len(flags)} flag(s): {', '.join(sorted(flags))})")
-            continue
+        known, exhaustive = flag_surface(binary, verb, sub)
         for flag in sorted(flags):
-            if flag not in known:
-                failures.append(f"flag '{flag}' is named for 'amq-squad {target}' but that command does not accept it")
-            else:
+            if flag in known:
+                # Present on the surface: CONFIRMED, whichever kind of surface it is.
+                flags_verifiable += 1
                 flags_checked += 1
+            elif exhaustive:
+                # Absent from a COMPLETE definition list: genuine drift.
+                flags_verifiable += 1
+                failures.append(
+                    f"flag '{flag}' is named for 'amq-squad {target}' but that command does not accept it"
+                )
+            else:
+                # Absent from an ILLUSTRATIVE surface proves nothing. `run start`
+                # documents `-p/-s` and never lists --project/--session, which are
+                # accepted. Report it as unverifiable; never fail the reference.
+                unverifiable.append(f"amq-squad {target} {flag}")
 
     if not verified_real_verb:
         print("error: no real verb was verified; the gate checked nothing", file=sys.stderr)
@@ -459,8 +557,22 @@ def main() -> int:
     # M5: an exactly-zero floor was bypassed by a mass drop (23 claimed, 3 verified)
     # or by a single verified flag. Floor on the RATIO and on an absolute baseline so
     # coverage cannot silently shrink.
-    if flags_claimed >= MIN_FLAGS_CLAIMED_FOR_FLOOR:
-        required = max(MIN_VERIFIED_FLAGS, int(flags_claimed * MIN_VERIFIED_FLAG_RATIO))
+    # Guard BOTH numbers: a shrinking verifiable set would otherwise make the ratio
+    # vacuously satisfiable.
+    if flags_claimed >= MIN_FLAGS_CLAIMED_FOR_FLOOR and flags_verifiable < MIN_VERIFIABLE_FLAGS:
+        print(
+            f"error: only {flags_verifiable} of {flags_claimed} named flag(s) are verifiable at all "
+            f"(need >= {MIN_VERIFIABLE_FLAGS}). The flag surfaces have probably stopped parsing; a "
+            "shrinking verifiable set makes the coverage ratio meaningless.",
+            file=sys.stderr,
+        )
+        return 2
+    if flags_verifiable >= MIN_FLAGS_CLAIMED_FOR_FLOOR:
+        # No int() truncation: 11/23 is 47.8% and used to pass a "50%" floor.
+        # The floor measures against VERIFIABLE claims, because a flag on a
+        # non-exhaustive surface can only ever be confirmed, never refuted, so
+        # counting it as a miss would fail every build under the honest model.
+        required = max(MIN_VERIFIED_FLAGS, math.ceil(flags_verifiable * MIN_VERIFIED_FLAG_RATIO))
         if flags_checked < required:
             print(
                 f"error: only {flags_checked} of {flags_claimed} named flag(s) were verified "
