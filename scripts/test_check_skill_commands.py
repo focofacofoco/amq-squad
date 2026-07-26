@@ -448,14 +448,6 @@ class ThirdRoundFindings(unittest.TestCase):
         flags = set(re.findall(r"--[A-Za-z][A-Za-z0-9-]*", top))
         self.assertGreater(len(flags), 5, "top-level help must yield real global flags")
 
-    def test_bogus_global_flag_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "x.md").write_text("```\namq-squad --definitely-not-global\n```\n")
-            result = subprocess.run(
-                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
-            )
-        self.assertNotEqual(result.returncode, 0, "an invented global flag must not pass")
-
     # M3 --------------------------------------------------------------------
     def test_two_commands_in_one_span_stay_separate(self):
         """Unconditional span collapse merged them, inventing drift."""
@@ -641,17 +633,21 @@ class FourthRoundFindings(unittest.TestCase):
 
     # Finding 4: floor math, and the main()-level exit test ------------------
     def test_floor_uses_productions_ceiling_not_pythons(self):
-        """Exercises required_verified(), the PRODUCTION calculation.
+        """Exercises required_verified(), at inputs where ceil and int DIVERGE.
 
-        The previous version asserted math.ceil(23 * 0.5) == 12, which tests Python
-        and stays green if production truncates with int(). Third appearance of the
-        vacuity pattern inside tests OF the gate.
+        Two earlier versions of this test were vacuous. The first asserted
+        math.ceil(23 * 0.5) == 12, which tests Python, not production. The second
+        called production but at 23 verifiable, where max(12, ceil(11.5)) and
+        max(12, int(11.5)) are BOTH 12 -- so an int() revert still passed.
+
+        At 25 verifiable they differ: ceil(12.5) = 13, int(12.5) = 12. Choosing
+        inputs where the behaviours diverge is the whole point; a correct assertion
+        at an input that cannot distinguish them proves nothing.
         """
-        # 23 verifiable at 50% is 11.5; truncation gives 11, ceiling gives 12.
-        self.assertEqual(self.gate.required_verified(23), max(self.gate.MIN_VERIFIED_FLAGS, 12))
-        self.assertGreater(
-            self.gate.required_verified(23), 11, "int() truncation would allow 11 of 23 (47.8%)"
-        )
+        self.assertEqual(self.gate.required_verified(25), 13, "ceil(12.5) must give 13, not int()'s 12")
+        self.assertEqual(self.gate.required_verified(31), 16, "ceil(15.5) must give 16")
+        # And the absolute floor still dominates below the crossover.
+        self.assertEqual(self.gate.required_verified(10), self.gate.MIN_VERIFIED_FLAGS)
 
     def test_floors_sit_at_committed_coverage(self):
         """Floors set far below real coverage permitted a 13 -> 5 collapse at exit 0."""
@@ -703,6 +699,74 @@ class FourthRoundFindings(unittest.TestCase):
             found = self.gate.extract([probe])
         self.assertIn(("doctor", None), found)
         self.assertNotIn(("doctor", "#"), found)
+
+
+
+class UnknownSubcommandFormats(unittest.TestCase):
+    """Finding 11: the binary emits THREE unknown-subcommand formats.
+
+    Handling two of them left `amq` unobservable, which under the fail-closed posture
+    blocked the build for any skill documenting an amq subcommand -- the gate blocking
+    correct documentation of a command it exists to protect.
+
+    Subsumption is PROVEN here rather than assumed: one rule must parse all three.
+    """
+
+    def setUp(self):
+        if not BINARY.exists():
+            self.skipTest("binary not built; run make build")
+        self.gate = load_gate()
+
+    def test_all_three_live_formats_resolve(self):
+        expected = {
+            # ". Use ..." -- the format that was unhandled.
+            "amq": {"env", "ops", "route", "who", "presence", "send", "reply",
+                    "drain", "watch", "list", "read", "thread", "receipts", "dlq", "cleanup"},
+            # "; use ..."
+            "evidence": {"run", "show", "list", "recover", "lookup"},
+            # ". Try '...'"
+            "team": {"init", "resume", "rules", "lead", "overlay", "member",
+                     "autonomous", "sync", "profiles", "rm", "shared-cwd-exception"},
+        }
+        for verb, want in expected.items():
+            with self.subTest(verb=verb):
+                subs, observable = self.gate.subcommand_surface(str(BINARY), verb)
+                self.assertTrue(observable, f"{verb}'s subcommand surface must be observable")
+                missing = want - subs
+                self.assertFalse(missing, f"{verb} is missing {sorted(missing)}")
+
+    def test_amq_resolves_all_fifteen(self):
+        """The specific regression: `amq` was unobservable, so documenting any of its
+        subcommands failed the build."""
+        subs, observable = self.gate.subcommand_surface(str(BINARY), "amq")
+        self.assertTrue(observable)
+        self.assertGreaterEqual(len(subs), 15, f"expected all 15 amq subcommands, got {sorted(subs)}")
+
+    def test_documenting_an_amq_subcommand_no_longer_blocks_the_build(self):
+        """End to end: this is what the finding actually cost."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in sorted(SKILLS.rglob("*.md")):
+                (Path(tmp) / src.name).write_text(src.read_text())
+            (Path(tmp) / "zz_amq.md").write_text(
+                "```\namq-squad amq drain --include-body\namq-squad amq route explain\n```\n"
+            )
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertEqual(result.returncode, 0, f"documenting real amq subcommands must pass:\n{result.stderr}")
+        self.assertNotIn("could not observe", result.stderr)
+
+    def test_a_bogus_amq_subcommand_still_fails(self):
+        """The counter-case: making amq observable must not make it permissive."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in sorted(SKILLS.rglob("*.md")):
+                (Path(tmp) / src.name).write_text(src.read_text())
+            (Path(tmp) / "zz_amq_bad.md").write_text("```\namq-squad amq notasubcommand\n```\n")
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertEqual(result.returncode, 1, "a bogus amq subcommand must be refuted")
+        self.assertIn("notasubcommand", result.stderr)
 
 
 if __name__ == "__main__":

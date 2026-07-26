@@ -202,8 +202,23 @@ SUB_PROBE = "__amq_squad_probe_invalid__"
 # check rather than a per-path guess. That replaces an earlier prober that returned
 # "exists" for every response except the recognized negative -- fail-open in a
 # verifier, which made `amq-squad doctor totallybogus` verify clean.
-UNKNOWN_SUB_USE = re.compile(r"unknown\s+\S+\s+subcommand[^;]*;\s*use\s+(?P<list>[^\n.]+)", re.I)
-UNKNOWN_SUB_TRY = re.compile(r"unknown\s+'[^']+'\s+subcommand[^.]*\.\s*Try\s+(?P<list>[^\n.]+)", re.I)
+# ONE rule for every unknown-subcommand format the binary emits. There are three,
+# differing in separator and verb:
+#
+#   evidence  ->  unknown evidence subcommand "X"; use run, show, list, ...
+#   team      ->  unknown 'team' subcommand: "X". Try 'init', 'resume', ...
+#   amq       ->  unknown amq subcommand "X". Use env, ops, route, who, ...
+#
+# Handling only the first two left `amq` UNOBSERVABLE, which under the fail-closed
+# posture BLOCKED the build for any skill documenting an amq subcommand -- i.e. the
+# gate blocking correct documentation of a command it is meant to protect.
+#
+# Collapsing them into one rule rather than adding a third branch also REDUCES the
+# wording coupling: one rule plus the Go printer, instead of three regexes to keep in
+# step. (Normalizing the binary's own error wording is the durable upstream fix.)
+UNKNOWN_SUBCOMMAND_LIST = re.compile(
+    r"unknown\s+'?\S+?'?\s+subcommand[^;.]*[;.]\s*(?:use|try)\s+(?P<list>[^\n]+)", re.I
+)
 NO_POSITIONALS = re.compile(r"takes no positional arguments", re.I)
 SUB_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
@@ -244,7 +259,7 @@ def subcommand_surface(binary: str, verb: str) -> tuple[set[str], bool]:
     # autonomous, shared-cwd-exception appear only in the error). Using the usage
     # block alone produced FALSE FAILURES for valid subcommands, so take the UNION.
     text = run_help(binary, verb, SUB_PROBE)
-    match = UNKNOWN_SUB_USE.search(text) or UNKNOWN_SUB_TRY.search(text)
+    match = UNKNOWN_SUBCOMMAND_LIST.search(text)
     listed: set[str] = set()
     if match:
         listed = {n for n in SUB_NAME.findall(match.group("list")) if n.lower() not in {"or", "and"}}
