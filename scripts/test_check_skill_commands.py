@@ -136,11 +136,18 @@ class ExtractionRules(unittest.TestCase):
         self.assertIn("--profile", found[("evidence", "run")])
 
     def test_leading_flag_is_not_treated_as_a_verb(self):
+        """`amq-squad --version` names no verb.
+
+        It is recorded under the global-flag key rather than discarded, so the flag
+        itself can be verified against `amq-squad --help` (MEDIUM 3): discarding it
+        was how a documented-but-nonexistent global flag would have gone unchecked.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             probe = Path(tmp) / "probe.md"
             probe.write_text("```\namq-squad --version\n```\n")
             found = self.gate.extract([probe])
-        self.assertEqual(found, {}, "`amq-squad --version` names no verb")
+        self.assertNotIn(("--version", None), found, "a flag must not occupy the verb position")
+        self.assertEqual(set(found), {(self.gate.GLOBAL_FLAG_KEY, None)})
 
 
 class AntiVacuity(unittest.TestCase):
@@ -223,6 +230,123 @@ class NotACommandListIsNotStale(unittest.TestCase):
         gate = load_gate()
         for entry, reason in gate.NOT_A_COMMAND.items():
             self.assertTrue(reason.strip(), f"exemption '{entry}' has no documented reason")
+
+
+
+class SecondReviewFindings(unittest.TestCase):
+    """The five drift classes the second review found, each pinned.
+
+    Every one was a hole the gate would have missed forever: it reported agreement
+    about text it either never read or never checked.
+    """
+
+    def setUp(self):
+        if not BINARY.exists():
+            self.skipTest("binary not built; run make build")
+        self.gate = load_gate()
+
+    # HIGH 1 -----------------------------------------------------------------
+    def test_unknown_subcommand_fails(self):
+        """Only the top-level verb used to be verified, so `team syncX` passed
+        because `team` resolves. Subcommands are where most renames happen."""
+        target = SKILLS / "amq-squad" / "references" / "pointer-stub-template.md"
+        for bogus in ("synchronise", "syncX"):
+            with self.subTest(sub=bogus):
+                with MutatedSkill(target, "amq-squad team sync --apply", f"amq-squad team {bogus} --apply"):
+                    result = run_gate()
+                self.assertEqual(result.returncode, 1, f"'team {bogus}' must fail the gate")
+                self.assertIn(bogus, result.stderr)
+                self.assertIn("no such subcommand", result.stderr)
+
+    def test_real_subcommand_still_passes(self):
+        """The fix must not reject valid subcommands."""
+        self.assertEqual(run_gate().returncode, 0)
+
+    # HIGH 2 -----------------------------------------------------------------
+    def test_flags_after_a_line_wrap_are_extracted(self):
+        """`rest` stopped at the first newline, so every flag after a wrap was
+        silently dropped. The wrap in cli/SKILL.md has NO leading whitespace on the
+        continuation line, so an indentation-based rule missed it too."""
+        found = self.gate.extract([SKILLS / "cli" / "SKILL.md"])
+        flags = found[("evidence", "run")]
+        self.assertIn("--subject", flags, "a flag AFTER the wrap must be extracted")
+        self.assertIn("--attempt-id", flags, "a flag further after the wrap must be extracted")
+        self.assertIn("--profile", flags, "flags before the wrap must still be extracted")
+
+    def test_post_wrap_flag_drift_fails_the_gate(self):
+        """End to end, not just extraction: a bogus post-wrap flag on a command
+        whose flag help IS observable must fail."""
+        target = SKILLS / "wizard" / "SKILL.md"
+        with MutatedSkill(target, "--launch-shape working-team-together", "--launch-shapeX working-team-together"):
+            result = run_gate()
+        self.assertEqual(result.returncode, 1, "a bogus post-wrap flag must fail the gate")
+        self.assertIn("run start", result.stderr)
+
+    # MEDIUM 3 ---------------------------------------------------------------
+    def test_malformed_verb_with_leading_dash_is_reported(self):
+        """Blanket-skipping any leading-dash token was the vanishing-reference class
+        surviving in the flag branch after being fixed in the verb branch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "probe.md"
+            probe.write_text("```\namq-squad -doctor\n```\n")
+            found = self.gate.extract([probe])
+        self.assertIn(("-doctor", None), found, "a malformed verb must be kept, not discarded")
+
+    def test_lone_global_flag_is_still_accepted(self):
+        """`amq-squad --version` names no verb and must not be reported as drift."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "probe.md"
+            probe.write_text("```\namq-squad --version\n```\n")
+            found = self.gate.extract([probe])
+        self.assertIn((self.gate.GLOBAL_FLAG_KEY, None), found)
+        self.assertNotIn(("--version", None), found)
+
+    # MEDIUM 4 ---------------------------------------------------------------
+    def test_bash_permission_string_is_checked(self):
+        """Bash(amq-squad review-worktree remove:*) is what an operator puts in an
+        allowlist, so a rename that breaks it must fail."""
+        target = SKILLS / "amq-squad" / "SKILL.md"
+        with MutatedSkill(
+            target, "Bash(amq-squad review-worktree remove", "Bash(amq-squad review-worktreeX remove"
+        ):
+            result = run_gate()
+        self.assertEqual(result.returncode, 1, "a rename inside a permission string must fail")
+        self.assertIn("review-worktreeX", result.stderr)
+
+    # MEDIUM 5 ---------------------------------------------------------------
+    def test_flag_coverage_floor_exists(self):
+        """Verbs were floored; flags were not, so a flag-help format change would
+        make everything unverifiable and keep the build green."""
+        self.assertGreater(self.gate.MIN_FLAGS_CLAIMED_FOR_FLOOR, 0)
+
+    def test_zero_verified_flags_fails_when_flags_were_claimed(self):
+        original = self.gate.flag_surface
+
+        def blind(binary, verb, sub):
+            return set(), False
+
+        self.gate.flag_surface = blind
+        try:
+            # Reproduce main()'s floor with flag parsing broken.
+            paths = sorted(SKILLS.rglob("*.md"))
+            found = self.gate.extract(paths)
+            claimed = sum(len(v) for k, v in found.items() if k[0] not in self.gate.NOT_A_COMMAND)
+            self.assertGreaterEqual(claimed, self.gate.MIN_FLAGS_CLAIMED_FOR_FLOOR)
+        finally:
+            self.gate.flag_surface = original
+
+    # The crash found while probing HIGH 1 ----------------------------------
+    def test_same_verb_bare_and_with_subcommand_does_not_crash(self):
+        """Sorting raw (verb, sub) tuples raised TypeError when one verb appeared
+        both bare and with a subcommand, because None is not comparable to str. A
+        gate that dies on a legitimate corpus shape is unusable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "probe.md"
+            probe.write_text("```\namq-squad team\namq-squad team sync --apply\n```\n")
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertNotIn("Traceback", result.stderr, f"gate crashed:\n{result.stderr}")
 
 
 if __name__ == "__main__":
