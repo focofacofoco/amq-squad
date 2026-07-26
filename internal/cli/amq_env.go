@@ -113,6 +113,19 @@ const minNoGitignoreAMQVersion = "0.40.0"
 // register-orchestrator invoke wake directly and must opt in.
 const minBaselineExistingAMQVersion = "0.46.0"
 
+// Historical AMQ capability boundaries remain named for archaeology even
+// though the supported 0.49.0 floor makes their below-boundary branches dead.
+// They document when persisted contracts first became available without
+// preserving pre-floor compatibility code.
+const (
+	historicalCompleteIdentityAMQVersion    = "0.42.1"
+	historicalReplyRefsAMQVersion           = "0.43.1"
+	historicalWakeRetireAMQVersion          = "0.45.0"
+	historicalOwnerBoundWakeAMQVersion      = "0.47.0"
+	historicalCoopWakeDoorbellAMQVersion    = "0.47.1"
+	historicalDoctorMailboxRepairAMQVersion = "0.48.0"
+)
+
 // amqSupportsRequireWake reports whether the amq version string from `amq env`
 // is new enough for `coop exec --require-wake`. Empty or unparseable versions
 // return false: passing an unknown flag to an old amq would fail every

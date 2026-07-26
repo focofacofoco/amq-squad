@@ -670,7 +670,7 @@ func (r reapResult) any() bool {
 }
 
 func (r reapResult) failed() bool {
-	return r.WakeSignalFailed > 0 || r.WakeRetirement == "amq_0_45_exact_refused" || r.WakeRetirement == "amq_0_45_exact_lock_remaining"
+	return r.WakeSignalFailed > 0 || r.WakeRetirement == "amq_exact_refused" || r.WakeRetirement == "amq_exact_lock_remaining"
 }
 
 func (r reapResult) summary() string {
@@ -715,10 +715,10 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 	lockPath := wakeLockPath(agentDir)
 	lockData, lockErr := os.ReadFile(lockPath)
 	exactRetired := false
-	if lockErr == nil && semverMeetsStableFloor(rec.AMQVersion, "0.45.0") && strings.TrimSpace(rec.WakeInjectVia) != "" {
-		retired, retireErr := retireWakeWithAMQ045(rec, root, handle)
+	if lockErr == nil && strings.TrimSpace(rec.WakeInjectVia) != "" {
+		retired, retireErr := retireWakeWithAMQ(rec, root, handle)
 		if retireErr != nil {
-			// AMQ >=0.45 can race a gracefully SIGTERMed wake that removes
+			// AMQ can race a gracefully SIGTERMed wake that removes
 			// its own lock before the retirer re-checks. Recognize that exact
 			// terminal state instead of reporting a spurious refusal.
 			if rec.WakePID > 0 && wakeSelfCleanedAfterRetire(lockPath, rec.WakePID, probe) {
@@ -734,14 +734,14 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 					result.WakeSignalFailed = rec.WakePID
 				}
 				result.WakeSignalError = retireErr.Error()
-				result.WakeRetirement = "amq_0_45_exact_refused"
+				result.WakeRetirement = "amq_exact_refused"
 				result.RetirementDetail = retireErr.Error()
 				return result
 			}
 		} else {
 			result.WakeKilled = retired.PID
 			result.WakeSignalName = "amq wake retire"
-			result.WakeRetirement = "amq_0_45_exact"
+			result.WakeRetirement = "amq_exact"
 			result.RetirementDetail = retired.Reason
 			exactRetired = true
 			if _, statErr := os.Stat(lockPath); os.IsNotExist(statErr) {
@@ -749,18 +749,13 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 			} else {
 				result.WakeSignalFailed = retired.PID
 				result.WakeSignalError = "native retirement returned success but the wake lock is still present; legacy signaling suppressed"
-				result.WakeRetirement = "amq_0_45_exact_lock_remaining"
+				result.WakeRetirement = "amq_exact_lock_remaining"
 				result.RetirementDetail = result.WakeSignalError
 			}
 		}
 	} else if lockErr == nil {
-		result.WakeRetirement = "legacy_signal_fallback"
-		switch {
-		case strings.TrimSpace(rec.WakeInjectVia) == "":
-			result.RetirementDetail = "wake is raw or has no persisted inject-via identity"
-		default:
-			result.RetirementDetail = "recorded AMQ " + versionOrUnknown(rec.AMQVersion) + " predates wake retire"
-		}
+		result.WakeRetirement = "raw_signal_fallback"
+		result.RetirementDetail = "wake is raw or has no persisted inject-via identity"
 	}
 	// canRemoveLock tracks whether we've confirmed the lock is safe to
 	// remove: confirmed stale (dead PID / PID-reused / corrupt), or we
@@ -856,9 +851,9 @@ type nativeWakeRetireResult struct {
 	Reason string `json:"reason"`
 }
 
-const nativeWakeRetireSelfCleaned = "amq_0_45_exact_self_cleaned"
+const nativeWakeRetireSelfCleaned = "amq_exact_self_cleaned"
 
-func retireWakeWithAMQ045(rec launch.Record, root, handle string) (nativeWakeRetireResult, error) {
+func retireWakeWithAMQ(rec launch.Record, root, handle string) (nativeWakeRetireResult, error) {
 	args := []string{"wake", "retire", "--root", root, "--me", handle, "--inject-via", rec.WakeInjectVia}
 	for _, arg := range rec.WakeInjectArgs {
 		args = append(args, "--inject-arg", arg)
@@ -868,18 +863,18 @@ func retireWakeWithAMQ045(rec launch.Record, root, handle string) (nativeWakeRet
 	var result nativeWakeRetireResult
 	if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
 		if err != nil {
-			return result, fmt.Errorf("amq 0.45 exact wake retirement: %w", err)
+			return result, fmt.Errorf("amq exact wake retirement: %w", err)
 		}
-		return result, fmt.Errorf("amq 0.45 exact wake retirement returned invalid JSON: %w", jsonErr)
+		return result, fmt.Errorf("amq exact wake retirement returned invalid JSON: %w", jsonErr)
 	}
 	if err != nil {
-		return result, fmt.Errorf("amq 0.45 exact wake retirement status %s: %w", result.Status, err)
+		return result, fmt.Errorf("amq exact wake retirement status %s: %w", result.Status, err)
 	}
 	if result.Status != "retired" || result.Agent != handle || !rootsMatch(result.Root, root) {
-		return result, fmt.Errorf("amq 0.45 exact wake retirement returned mismatched result status=%s agent=%s root=%s", result.Status, result.Agent, result.Root)
+		return result, fmt.Errorf("amq exact wake retirement returned mismatched result status=%s agent=%s root=%s", result.Status, result.Agent, result.Root)
 	}
 	if rec.WakePID <= 0 || result.PID != rec.WakePID {
-		return result, fmt.Errorf("amq 0.45 exact wake retirement returned mismatched pid=%d, want persisted wake pid=%d", result.PID, rec.WakePID)
+		return result, fmt.Errorf("amq exact wake retirement returned mismatched pid=%d, want persisted wake pid=%d", result.PID, rec.WakePID)
 	}
 	return result, nil
 }

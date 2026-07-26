@@ -11,12 +11,12 @@ import sys
 
 VERSION_RE = re.compile(r"^v?([0-9]+\.[0-9]+\.[0-9]+)$")
 SKILL_MARKER_RE = re.compile(r"Skill version:\s*([0-9]+\.[0-9]+\.[0-9]+)")
-AMQ_MIN_VERSION = "0.42.1"
-AMQ_TESTED_CURRENT_VERSION = "0.45.0"
+AMQ_MIN_VERSION = "0.49.0"
+AMQ_TESTED_CURRENT_VERSION = "0.49.0"
 AMQ_COMPATIBILITY_POLICY = (
-    f"The minimum {AMQ_MIN_VERSION} compatibility floor is unchanged. "
-    f"This release is explicitly validated against pinned {AMQ_TESTED_CURRENT_VERSION}; "
-    "latest remains a forward-compatibility canary."
+    f"AMQ {AMQ_MIN_VERSION} is the sole supported release. "
+    f"Both real-AMQ matrices validate pinned v{AMQ_TESTED_CURRENT_VERSION} and latest; "
+    "latest remains only a canary for any unexpected post-final release."
 )
 
 
@@ -97,7 +97,7 @@ def main() -> int:
 
     readme = os.path.join(root, "README.md")
     fail_if_missing(readme, f"go install github.com/omriariav/amq-squad/v2/cmd/amq-squad@{tag}", failures)
-    fail_if_missing(readme, f"- `amq` {AMQ_MIN_VERSION}+ on `PATH`", failures)
+    fail_if_missing(readme, f"- `amq` {AMQ_MIN_VERSION} on `PATH`", failures)
     for rel in (
         "README.md",
         "docs/skills.md",
@@ -113,7 +113,7 @@ def main() -> int:
         fail_if_missing(readme_html, f"github.com/omriariav/amq-squad/v2/cmd/amq-squad@{tag}", failures)
         fail_if_missing(
             readme_html,
-            f"<li><code>amq</code> {AMQ_MIN_VERSION}+ on <code>PATH</code></li>",
+            f"<li><code>amq</code> {AMQ_MIN_VERSION} on <code>PATH</code></li>",
             failures,
         )
         fail_if_missing_normalized(readme_html, AMQ_COMPATIBILITY_POLICY, failures)
