@@ -484,7 +484,11 @@ func buildGeneratedPolicyPlan(t team.Team, idx int, opts generatedToolPolicyOpti
 	}
 	after.ToolProfile = opts.Profile
 	after.ToolBlocklist = dedupeSortedStrings(block)
-	after.ToolPolicySources = dedupeSortedStrings(sources)
+	// #539: capability sources are recorded absolute, so `team overlay init` and
+	// `run start --prepare` produce byte-identical records for identical inputs
+	// no matter which representation of the project each was given. Recording
+	// stops at absolute on purpose; the comparator canonicalizes further.
+	after.ToolPolicySources = absoluteFilesystemPaths(sources)
 	return generatedPolicyPlan{Index: idx, Force: opts.Force, Before: before, After: after, Files: files}, nil
 }
 
@@ -945,10 +949,43 @@ func validateMemberOverlayPaths(t team.Team, members []team.Member) error {
 	return nil
 }
 
+// toolPolicyCheckScope selects how much of the shared tool-policy predicate
+// applies at a given call site.
+//
+// #539 was an "accepted at readiness, dead at spawn" failure: readiness emitted
+// an unconditional `tool_policy:<role> ready` row while spawn ran a real check,
+// so the two could disagree. They now run the SAME predicate; the scope only
+// controls whether the on-disk materialization comparison is part of it, which
+// is the one clause that is meaningless before the policy files are written.
+type toolPolicyCheckScope int
+
+const (
+	// toolPolicyCheckFull validates the recorded capability-source set, the
+	// inherited-capability coverage, and that the materialized policy files
+	// match the audited effective policy. This is what spawn enforces, and what
+	// readiness enforces for a role whose policy is being preserved as-is.
+	toolPolicyCheckFull toolPolicyCheckScope = iota
+	// toolPolicyCheckRecordOnly validates everything that depends only on the
+	// member record plus the discoverable host/project config, and skips the
+	// materialization comparison. Readiness uses this for a role whose policy
+	// files this preparation is planning to write: those files do not exist yet,
+	// so comparing them would fail for a reason that is not drift. Every other
+	// clause -- including the capability-source-set comparison that produced
+	// #539 -- still applies and still fails closed.
+	toolPolicyCheckRecordOnly
+)
+
+// validateMemberToolPolicyDrift is the spawn-time entry point. It enforces the
+// full predicate, including materialization.
 func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
+	return validateMemberToolPolicy(t, m, toolPolicyCheckFull)
+}
+
+func validateMemberToolPolicy(t team.Team, m team.Member, scope toolPolicyCheckScope) error {
 	if m.ToolPolicySource() != "member_generated_profile" {
 		return nil
 	}
+	checkMaterialization := scope == toolPolicyCheckFull
 	var discovered, sources []string
 	switch normalizedAgentBinary(m.Binary) {
 	case "claude":
@@ -968,40 +1005,42 @@ func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
 		if err != nil {
 			return fmt.Errorf("member %s: tool policy drift/not-ready: %w", m.Role, err)
 		}
-		overlay := claudeSettingsOverlay{EnabledPlugins: map[string]bool{}, DisableAllHooks: m.ToolDisableAllHooks}
-		for _, entry := range m.ToolAllowlist {
-			if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
-				overlay.EnabledPlugins[id] = true
-			}
-		}
-		for _, entry := range m.ToolBlocklist {
-			if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
-				overlay.EnabledPlugins[id] = false
-			}
-		}
-		expectedSettings, marshalErr := json.MarshalIndent(overlay, "", "  ")
-		if marshalErr != nil {
-			return marshalErr
-		}
-		expectedSettings = append(expectedSettings, '\n')
-		for label, ref := range map[string]string{"settings": m.ToolConfig, "strict MCP": m.ToolMCPConfig} {
-			path := ref
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(m.EffectiveCWD(t.Project), path)
-			}
-			actual, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return fmt.Errorf("member %s: tool policy drift/not-ready: read Claude %s materialization: %w", m.Role, label, readErr)
-			}
-			expected := expectedSettings
-			if label == "strict MCP" {
-				expected, marshalErr = renderClaudeStrictMCP(m.ToolAllowlist, defs)
-				if marshalErr != nil {
-					return marshalErr
+		if checkMaterialization {
+			overlay := claudeSettingsOverlay{EnabledPlugins: map[string]bool{}, DisableAllHooks: m.ToolDisableAllHooks}
+			for _, entry := range m.ToolAllowlist {
+				if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
+					overlay.EnabledPlugins[id] = true
 				}
 			}
-			if string(actual) != string(expected) {
-				return fmt.Errorf("member %s: tool policy drift/not-ready: Claude %s materialization differs from audited effective policy", m.Role, label)
+			for _, entry := range m.ToolBlocklist {
+				if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
+					overlay.EnabledPlugins[id] = false
+				}
+			}
+			expectedSettings, marshalErr := json.MarshalIndent(overlay, "", "  ")
+			if marshalErr != nil {
+				return marshalErr
+			}
+			expectedSettings = append(expectedSettings, '\n')
+			for label, ref := range map[string]string{"settings": m.ToolConfig, "strict MCP": m.ToolMCPConfig} {
+				path := ref
+				if !filepath.IsAbs(path) {
+					path = filepath.Join(m.EffectiveCWD(t.Project), path)
+				}
+				actual, readErr := os.ReadFile(path)
+				if readErr != nil {
+					return fmt.Errorf("member %s: tool policy drift/not-ready: read Claude %s materialization: %w", m.Role, label, readErr)
+				}
+				expected := expectedSettings
+				if label == "strict MCP" {
+					expected, marshalErr = renderClaudeStrictMCP(m.ToolAllowlist, defs)
+					if marshalErr != nil {
+						return marshalErr
+					}
+				}
+				if string(actual) != string(expected) {
+					return fmt.Errorf("member %s: tool policy drift/not-ready: Claude %s materialization differs from audited effective policy", m.Role, label)
+				}
 			}
 		}
 	case "codex":
@@ -1019,17 +1058,19 @@ func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
 				sources = append(sources, path)
 			}
 		}
-		paths := codexConfigPaths(m.ToolArgs())
-		if len(paths) == 0 {
-			return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile path is unresolved", m.Role)
-		}
-		actual, err := os.ReadFile(paths[0])
-		if err != nil {
-			return fmt.Errorf("member %s: tool policy drift/not-ready: %w", m.Role, err)
-		}
-		expected := renderCodexToolProfile(m.EffectiveToolProfile(), m.ToolAllowlist, m.ToolBlocklist)
-		if string(actual) != string(expected) {
-			return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile content differs from audited effective policy", m.Role)
+		if checkMaterialization {
+			paths := codexConfigPaths(m.ToolArgs())
+			if len(paths) == 0 {
+				return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile path is unresolved", m.Role)
+			}
+			actual, err := os.ReadFile(paths[0])
+			if err != nil {
+				return fmt.Errorf("member %s: tool policy drift/not-ready: %w", m.Role, err)
+			}
+			expected := renderCodexToolProfile(m.EffectiveToolProfile(), m.ToolAllowlist, m.ToolBlocklist)
+			if string(actual) != string(expected) {
+				return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile content differs from audited effective policy", m.Role)
+			}
 		}
 	}
 	covered := map[string]bool{}
@@ -1041,8 +1082,20 @@ func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
 			return fmt.Errorf("member %s: tool policy drift/not-ready: inherited capability %q is neither enabled nor revoked; regenerate policy", m.Role, entry)
 		}
 	}
-	if !reflect.DeepEqual(dedupeSortedStrings(sources), dedupeSortedStrings(m.ToolPolicySources)) {
-		return fmt.Errorf("member %s: tool policy drift/not-ready: capability source set changed from %v to %v; regenerate policy", m.Role, m.ToolPolicySources, sources)
+	// #539: compare capability sources as a canonicalized set. A stored relative
+	// path that names the same file as a discovered absolute one is not drift.
+	// Canonicalizing both sides also removes the ordering artifact, where a
+	// leading "." sorted differently from the absolute form and made an
+	// identical three-file set compare unequal.
+	//
+	// Anchoring is to t.Project, NOT to the process working directory: a
+	// team.json written by <=v2.24.0 still holds the project-relative
+	// ".claude/settings.local.json", and this check must reach the same verdict
+	// whether it runs from inside the repo or from anywhere else with --project.
+	recorded := canonicalFilesystemPathsIn(t.Project, m.ToolPolicySources)
+	discoveredSources := canonicalFilesystemPathsIn(t.Project, sources)
+	if !reflect.DeepEqual(discoveredSources, recorded) {
+		return fmt.Errorf("member %s: tool policy drift/not-ready: capability source set changed from %v to %v; regenerate policy", m.Role, recorded, discoveredSources)
 	}
 	return nil
 }
