@@ -216,9 +216,25 @@ SUB_PROBE = "__amq_squad_probe_invalid__"
 # Collapsing them into one rule rather than adding a third branch also REDUCES the
 # wording coupling: one rule plus the Go printer, instead of three regexes to keep in
 # step. (Normalizing the binary's own error wording is the durable upstream fix.)
+# ANCHORED to the real error structure, and BOUND to the probed verb.
+#
+# The first generalization was unanchored, which opened the inverse of finding 11: a
+# false-observation door. Prose such as
+#     "Note: an unknown fake subcommand is recoverable. Use help for examples"
+# yielded subcommands {help, for, examples}, and a "; use --json, --verbose" list
+# yielded flag-named subcommands {json, verbose}.
+#
+# Three defences, because one is not enough:
+#   1. anchor at a line-leading `error:` so prose in a description cannot match;
+#   2. capture the verb the error names and require it to EQUAL the verb we probed,
+#      so an error about something else cannot populate this verb's surface;
+#   3. drop flag-shaped entries from the list, since a flag is not a subcommand.
 UNKNOWN_SUBCOMMAND_LIST = re.compile(
-    r"unknown\s+'?\S+?'?\s+subcommand[^;.]*[;.]\s*(?:use|try)\s+(?P<list>[^\n]+)", re.I
+    r"^[ \t]*error:\s*unknown\s+'?(?P<verb>[A-Za-z][A-Za-z0-9-]*)'?\s+subcommand"
+    r"[^;.]*[;.]\s*(?:use|try)\s+(?P<list>[^\n]+)",
+    re.I | re.M,
 )
+
 NO_POSITIONALS = re.compile(r"takes no positional arguments", re.I)
 SUB_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
 
@@ -261,8 +277,17 @@ def subcommand_surface(binary: str, verb: str) -> tuple[set[str], bool]:
     text = run_help(binary, verb, SUB_PROBE)
     match = UNKNOWN_SUBCOMMAND_LIST.search(text)
     listed: set[str] = set()
-    if match:
-        listed = {n for n in SUB_NAME.findall(match.group("list")) if n.lower() not in {"or", "and"}}
+    if match and match.group("verb").lower() == verb.lower():
+        # Drop flag-shaped entries before extracting names: a list of flags is not a
+        # list of subcommands, and `--json` would otherwise become the subcommand
+        # `json`.
+        candidates = [tok for tok in re.split(r"[,\s]+", match.group("list")) if tok and not tok.lstrip("'\"").startswith("-")]
+        listed = {
+            n
+            for tok in candidates
+            for n in SUB_NAME.findall(tok)
+            if n.lower() not in {"or", "and"}
+        }
 
     combined = usage | listed
     if combined:

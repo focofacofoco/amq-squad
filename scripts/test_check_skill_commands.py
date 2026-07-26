@@ -717,23 +717,90 @@ class UnknownSubcommandFormats(unittest.TestCase):
             self.skipTest("binary not built; run make build")
         self.gate = load_gate()
 
-    def test_all_three_live_formats_resolve(self):
-        expected = {
-            # ". Use ..." -- the format that was unhandled.
-            "amq": {"env", "ops", "route", "who", "presence", "send", "reply",
-                    "drain", "watch", "list", "read", "thread", "receipts", "dlq", "cleanup"},
+    def test_each_format_resolves_from_the_LIST_PARSER_alone(self):
+        """Per-format proof with the USAGE source disabled.
+
+        The union masked the component: `evidence`'s usage block also lists all five
+        subcommands, so the "; use" subtest stayed green even with the list parser
+        broken. That is the confounded-proof pattern again — the test could not tell
+        WHICH source answered. Here the usage block is removed from the input, so only
+        the list parser can produce a result.
+        """
+        cases = {
+            # ". Use ..." -- the format finding 11 was about
+            "amq": (
+                'error: unknown amq subcommand "x". Use env, ops, route, or cleanup',
+                {"env", "ops", "route", "cleanup"},
+            ),
             # "; use ..."
-            "evidence": {"run", "show", "list", "recover", "lookup"},
+            "evidence": (
+                'error: unknown evidence subcommand "x"; use run, show, list, recover, or lookup',
+                {"run", "show", "list", "recover", "lookup"},
+            ),
             # ". Try '...'"
-            "team": {"init", "resume", "rules", "lead", "overlay", "member",
-                     "autonomous", "sync", "profiles", "rm", "shared-cwd-exception"},
+            "team": (
+                "error: unknown 'team' subcommand: \"x\". Try 'init', 'sync', or 'rm'.",
+                {"init", "sync", "rm"},
+            ),
         }
-        for verb, want in expected.items():
+        for verb, (error_text, want) in cases.items():
             with self.subTest(verb=verb):
-                subs, observable = self.gate.subcommand_surface(str(BINARY), verb)
-                self.assertTrue(observable, f"{verb}'s subcommand surface must be observable")
-                missing = want - subs
-                self.assertFalse(missing, f"{verb} is missing {sorted(missing)}")
+                self.gate._SUB_SURFACE_CACHE.clear()
+                original = self.gate.run_help
+                # No usage block anywhere in the response, so the usage parse yields
+                # nothing and only the list parser can answer.
+                self.gate.run_help = lambda *a, **k: error_text
+                try:
+                    subs, observable = self.gate.subcommand_surface("binary", verb)
+                finally:
+                    self.gate.run_help = original
+                    self.gate._SUB_SURFACE_CACHE.clear()
+                self.assertTrue(observable, f"{verb}: the list parser alone must answer")
+                self.assertEqual(subs, want, f"{verb}: parsed {sorted(subs)}")
+
+    def test_prose_mentioning_a_subcommand_is_not_an_authoritative_list(self):
+        """The false-observation door the first generalization opened.
+
+        Unanchored, this yielded subcommands {help, for, examples}.
+        """
+        self.gate._SUB_SURFACE_CACHE.clear()
+        original = self.gate.run_help
+        self.gate.run_help = lambda *a, **k: (
+            "Note: an unknown fake subcommand is recoverable. Use help for examples"
+        )
+        try:
+            subs, observable = self.gate.subcommand_surface("binary", "fake")
+        finally:
+            self.gate.run_help = original
+            self.gate._SUB_SURFACE_CACHE.clear()
+        self.assertFalse(observable, "prose must not be read as an authoritative list")
+        self.assertEqual(subs, set())
+
+    def test_a_flag_list_is_not_a_subcommand_list(self):
+        """"; use --json, --verbose" yielded subcommands {json, verbose}."""
+        self.gate._SUB_SURFACE_CACHE.clear()
+        original = self.gate.run_help
+        self.gate.run_help = lambda *a, **k: 'error: unknown fake subcommand "x"; use --json, --verbose'
+        try:
+            subs, _ = self.gate.subcommand_surface("binary", "fake")
+        finally:
+            self.gate.run_help = original
+            self.gate._SUB_SURFACE_CACHE.clear()
+        self.assertNotIn("json", subs, "a flag must not become a subcommand")
+        self.assertNotIn("verbose", subs)
+
+    def test_an_error_about_a_different_verb_does_not_populate_this_verb(self):
+        """Verb binding: the error names its verb, so it must match the probed one."""
+        self.gate._SUB_SURFACE_CACHE.clear()
+        original = self.gate.run_help
+        self.gate.run_help = lambda *a, **k: 'error: unknown other subcommand "x"; use alpha, beta'
+        try:
+            subs, observable = self.gate.subcommand_surface("binary", "fake")
+        finally:
+            self.gate.run_help = original
+            self.gate._SUB_SURFACE_CACHE.clear()
+        self.assertNotIn("alpha", subs, "another verb's error must not populate this surface")
+        self.assertFalse(observable)
 
     def test_amq_resolves_all_fifteen(self):
         """The specific regression: `amq` was unobservable, so documenting any of its
