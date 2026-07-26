@@ -600,36 +600,29 @@ func printRunPreparationProposal(proposal runPreparationProposal) {
 // preparationRollbackGuidance explains what the transactional rollback did to the
 // profile, and therefore which remedy is actually runnable now.
 //
-// #538 F3: preparation rolls back on readiness failure. Which advice is TRUE
-// depends on whether this transaction created the profile:
+// #538 F3: which advice is TRUE depends on whether THIS run created the profile:
 //
-//   - created (no pre-existing file): rollback removes it, so `team member update`
-//     and `team shared-cwd-exception set` have nothing to act on, and the operator
-//     must apply the fix at creation time.
-//   - pre-existing: rollback RESTORES it, so those commands work as printed, and
-//     `new profile NAME` would fail because the profile already exists.
+//   - created: rollback leaves no profile, so `team member update` and
+//     `team shared-cwd-exception set` have nothing to act on and the fix must be
+//     applied at creation time.
+//   - pre-existing: the profile is still there, those commands work as printed,
+//     and `new profile NAME` would fail because it already exists.
 //
-// Emitting the fresh-profile text unconditionally made the message false in the
-// second case, which is worse than silence: it sends the operator to a command
-// that cannot work while telling them the working one is unavailable.
-func preparationRollbackGuidance(snapshots []runPreparationFileSnapshot, profilePath string) string {
-	profilePath = filepath.Clean(strings.TrimSpace(profilePath))
-	existedBefore := false
-	tracked := false
-	for _, snap := range snapshots {
-		if snap.Path != profilePath {
-			continue
-		}
-		tracked = true
-		existedBefore = snap.Exists
-		break
+// The flag comes from preflight's pre-run observation, NOT from the preparation
+// snapshot. An earlier version derived it from the snapshot and was wrong in both
+// directions: the profile was not in that snapshot set at all (so every case got
+// the fallback wording), and even if it had been, the roster is created BEFORE
+// preparation snapshots, so a freshly created profile would have looked
+// pre-existing. Emitting the wrong branch here is worse than silence: it sends the
+// operator to a command that cannot work while telling them the working one is
+// unavailable.
+func preparationRollbackGuidance(profileExistedBeforeRun bool) string {
+	if profileExistedBeforeRun {
+		return "Preparation is transactional, so this profile is unchanged from its pre-preparation state; " +
+			"it still exists and the blocked row's commands apply to it as printed. Fix the reported rows, then re-run --prepare."
 	}
-	if tracked && !existedBefore {
-		return "Preparation is transactional and it CREATED this profile, so the rollback removed it: " +
-			"commands that modify an existing profile (for example 'amq-squad team shared-cwd-exception set') " +
-			"have nothing to act on yet. Apply the blocked row's fix at creation time instead " +
-			"('amq-squad new profile NAME --cwd \"role=path,...\"' or 'amq-squad new profile NAME --shared-cwd-exception \"<reason>\"'), then re-run --prepare."
-	}
-	return "Preparation is transactional, so this profile has been RESTORED to its pre-preparation state; " +
-		"it still exists and the blocked row's commands apply to it as printed. Fix the reported rows, then re-run --prepare."
+	return "Preparation is transactional and this run CREATED the profile, so the rollback removed it: " +
+		"commands that modify an existing profile (for example 'amq-squad team shared-cwd-exception set') " +
+		"have nothing to act on yet. Apply the blocked row's fix at creation time instead " +
+		"('amq-squad new profile NAME --cwd \"role=path,...\"' or 'amq-squad new profile NAME --shared-cwd-exception \"<reason>\"'), then re-run --prepare."
 }

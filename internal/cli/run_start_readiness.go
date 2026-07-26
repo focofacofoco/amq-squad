@@ -1941,7 +1941,7 @@ func displayRoleList(roles []string) string {
 
 var buildPreparedRunManifestForPreparation = buildPreparedRunManifest
 
-func prepareRunArtifacts(project, profile, session, shape, stagedRaw, goal, goalSource, goalDigest, seed string, context acceptedRunContext) (result runReadinessResult, err error) {
+func prepareRunArtifacts(project, profile, session, shape, stagedRaw, goal, goalSource, goalDigest, seed string, context acceptedRunContext, profileExistedBeforeRun bool) (result runReadinessResult, err error) {
 	profile = squadnamespace.NormalizeProfile(profile)
 	if err := revalidateRunPreparationPointerPlans(context.PointerPlans); err != nil {
 		return runReadinessResult{}, fmt.Errorf("revalidate accepted pointer plan before preparation writes: %w", err)
@@ -2046,7 +2046,7 @@ func prepareRunArtifacts(project, profile, session, shape, stagedRaw, goal, goal
 		// existed, rollback RESTORES it, those commands work fine, and telling the
 		// operator otherwise would be false. Decide from the snapshot rather than
 		// assuming the fresh-profile case.
-		return result, fmt.Errorf("artifact readiness failed after preparation. %s", preparationRollbackGuidance(snapshots, team.ProfilePath(project, profile)))
+		return result, fmt.Errorf("artifact readiness failed after preparation. %s", preparationRollbackGuidance(profileExistedBeforeRun))
 	}
 	committed = true
 	return result, nil

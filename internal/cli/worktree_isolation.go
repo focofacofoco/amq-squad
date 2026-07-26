@@ -2,6 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -18,9 +21,25 @@ import (
 // AGREEMENT WITH doctor's shared-index-collision (#538 acceptance criterion 4,
 // and the reason the two texts are NOT identical):
 //
-// Both checks detect the SAME condition -- 2+ mutation-capable members resolving
-// to one Git index -- and honour the SAME exception (SharedCwdException clears
-// it), using the same vocabulary. What differs is deliberate and lifecycle-bound:
+// Both checks honour the SAME exception (SharedCwdException clears it) and use the
+// same vocabulary. On the CONDITION the claim is deliberately QUALIFIED, because
+// an unqualified "same condition" was false and was caught in review twice:
+//
+//   - WHERE OBSERVABLE, this check uses doctor's own observable: a member cwd that
+//     exists inside a Git checkout is grouped by its resolved index path
+//     (git rev-parse --git-path index). That is what makes two SUBDIRECTORIES of
+//     one checkout collide here as they do at runtime -- comparing directories
+//     alone would call them distinct.
+//   - WHERE NOT OBSERVABLE, a planned cwd that does not exist yet has no index to
+//     resolve, so it is grouped by canonical directory as a declared PROXY: at
+//     preparation the best available predictor of a distinct future index is a
+//     distinct planned directory. doctor excludes such members entirely, because
+//     at runtime a nonexistent worktree is a different finding.
+//
+// So: same observable where observable, declared proxy where not, same exception
+// semantics and vocabulary always. Do not restate this as plain "same condition".
+//
+// What else differs is lifecycle-bound and deliberate:
 //
 //   - SEVERITY. This check runs at PREPARATION, before any agent exists, and
 //     fails closed per #497. doctor's severity is runtime-derived, and under the
@@ -40,24 +59,19 @@ import (
 func worktreeIsolationReadinessRow(t team.Team, profile string) runReadinessRow {
 	groups := map[string][]string{}
 	groupDisplay := map[string]string{}
+	proxied := map[string]bool{}
 	for _, m := range t.Members {
 		if team.EffectiveActorMode(t, m) != team.ActorModeImplementation {
 			continue
 		}
-		// #538 F4: group by CANONICAL filesystem location, not by the raw recorded
-		// string. doctor detects this collision by resolved Git index path, so
-		// comparing strings here made the two checks disagree on the CONDITION
-		// itself: /repo and a symlink pointing at it counted as two directories at
-		// preparation and one index at runtime, passing readiness and then failing
-		// doctor. Representation is not identity -- the same lesson as #539/#540.
 		cwd := m.EffectiveCWD(t.Project)
-		key := canonicalFilesystemPath(cwd)
-		if key == "" {
-			key = cwd
-		}
-		// Display the path as recorded; group by the canonical key.
+		key, observed := memberIsolationKey(cwd)
+		// Display the path as recorded; group by the observable (or its proxy).
 		if _, seen := groupDisplay[key]; !seen {
 			groupDisplay[key] = cwd
+		}
+		if !observed {
+			proxied[key] = true
 		}
 		groups[key] = append(groups[key], m.Role)
 	}
@@ -71,7 +85,14 @@ func worktreeIsolationReadinessRow(t team.Team, profile string) runReadinessRow 
 		if shown == "" {
 			shown = key
 		}
-		collisions = append(collisions, fmt.Sprintf("%s: %s", shown, strings.Join(roles, ", ")))
+		detail := fmt.Sprintf("%s: %s", shown, strings.Join(roles, ", "))
+		if proxied[key] {
+			// Be explicit that this group was matched by planned directory rather
+			// than an observed index, so the evidence never overstates what was
+			// actually checked.
+			detail += " (planned directory; no Git index to observe yet)"
+		}
+		collisions = append(collisions, detail)
 	}
 	if len(collisions) == 0 {
 		return runReadinessRow{Artifact: "worktree_isolation", Status: "ready", Evidence: "no 2+ mutation-capable members share one working directory"}
@@ -140,4 +161,58 @@ func sharedCwdCollisionRoles(groups map[string][]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// memberIsolationKey returns the grouping key for a member working directory and
+// whether it was OBSERVED rather than proxied.
+//
+// #538 F4: doctor groups by resolved Git index path, so grouping by directory
+// string made the two checks disagree on the condition itself. Two counterexamples
+// drove the final shape:
+//
+//   - two SUBDIRECTORIES of one checkout are distinct directories but ONE index,
+//     so a directory-only key misses a real collision;
+//   - a planned worktree that does not exist yet has NO index, so an index-only
+//     key cannot classify it at all (doctor excludes such members; preparation
+//     must not, since predicting the collision is the whole point pre-launch).
+//
+// Hence the hybrid: observe the index when there is one to observe, and fall back
+// to the canonical directory as a declared proxy when there is not. Callers must
+// surface the proxy case rather than presenting it as an observation.
+func memberIsolationKey(cwd string) (key string, observed bool) {
+	canonical := canonicalFilesystemPath(cwd)
+	if canonical == "" {
+		canonical = strings.TrimSpace(cwd)
+	}
+	if index, ok := worktreeIsolationIndexProbe(canonical); ok {
+		if resolved := canonicalFilesystemPath(index); resolved != "" {
+			return resolved, true
+		}
+	}
+	return canonical, false
+}
+
+// worktreeIsolationIndexProbe resolves a directory's Git index path using the same
+// observable doctor uses (git rev-parse --git-path index). It is a seam so tests
+// can exercise both branches without constructing real checkouts. A directory that
+// does not exist, or is not inside a checkout, reports ok=false.
+var worktreeIsolationIndexProbe = func(dir string) (string, bool) {
+	if dir == "" {
+		return "", false
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return "", false
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--git-path", "index").Output()
+	if err != nil {
+		return "", false
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(dir, path)
+	}
+	return filepath.Clean(path), true
 }

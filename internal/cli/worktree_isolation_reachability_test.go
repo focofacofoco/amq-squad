@@ -210,6 +210,10 @@ func TestFixTextCommandExecutesAsDisplayed(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
 	seedBlockedSquad(t, dir)
+	// #538 F5: run the displayed command from a NEUTRAL directory. Executing it
+	// from inside the blocked project lets an implicit cwd stand in for --project,
+	// which would mask exactly the mis-scoping F1 was about.
+	chdir(t, t.TempDir())
 	tm, err := team.ReadProfile(dir, "squad")
 	if err != nil {
 		t.Fatal(err)
@@ -370,4 +374,92 @@ func extractQuotedCommand(t *testing.T, text, prefix string) []string {
 		t.Fatalf("unterminated quoted command in fix text: %s", text)
 	}
 	return strings.Fields(rest[:j])
+}
+
+// #538 F4 counterexample (b): two SUBDIRECTORIES of one checkout are distinct
+// directories but share ONE Git index, so a directory-only key misses a real
+// collision that doctor reports.
+func TestReadinessGroupsSubdirectoriesOfOneCheckoutAsCollision(t *testing.T) {
+	project := t.TempDir()
+	subA := filepath.Join(project, "pkg", "a")
+	subB := filepath.Join(project, "pkg", "b")
+	for _, p := range []string{subA, subB} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both subdirectories resolve to the same index, as they would in a checkout.
+	sharedIndex := filepath.Join(project, ".git", "index")
+	withIsolationIndexProbe(t, func(dir string) (string, bool) {
+		if strings.HasPrefix(dir, canonicalFilesystemPath(project)) {
+			return sharedIndex, true
+		}
+		return "", false
+	})
+
+	tm := team.Team{Project: project, Members: []team.Member{
+		{Role: "dev-1", Binary: "claude", Handle: "dev-1", ActorMode: team.ActorModeImplementation, CWD: subA},
+		{Role: "dev-2", Binary: "codex", Handle: "dev-2", ActorMode: team.ActorModeImplementation, CWD: subB},
+	}}
+	row := worktreeIsolationReadinessRow(tm, "squad")
+	if row.Status != "blocked" {
+		t.Fatalf("two subdirectories of one checkout share one Git index and must block; got %s (%s)", row.Status, row.Evidence)
+	}
+}
+
+// #538 F4 counterexample (a): a PLANNED cwd that does not exist yet has no index
+// to observe. It must still be grouped (predicting the collision is the point of a
+// pre-launch check), by canonical directory as a declared proxy -- and the evidence
+// must SAY it is a proxy rather than implying an observation.
+func TestReadinessProxiesPlannedDirectoriesAndDisclosesIt(t *testing.T) {
+	project := t.TempDir()
+	planned := filepath.Join(project, "not-created-yet")
+	withIsolationIndexProbe(t, func(string) (string, bool) { return "", false })
+
+	tm := team.Team{Project: project, Members: []team.Member{
+		{Role: "dev-1", Binary: "claude", Handle: "dev-1", ActorMode: team.ActorModeImplementation, CWD: planned},
+		{Role: "dev-2", Binary: "codex", Handle: "dev-2", ActorMode: team.ActorModeImplementation, CWD: planned},
+	}}
+	row := worktreeIsolationReadinessRow(tm, "squad")
+	if row.Status != "blocked" {
+		t.Fatalf("two members planned into one directory must block; got %s (%s)", row.Status, row.Evidence)
+	}
+	if !strings.Contains(row.Evidence, "planned directory") {
+		t.Fatalf("evidence must disclose that this group was proxied, not observed; got: %s", row.Evidence)
+	}
+	// Distinct planned directories are the predictor of distinct future indexes.
+	tm.Members[1].CWD = filepath.Join(project, "also-not-created")
+	if row := worktreeIsolationReadinessRow(tm, "squad"); row.Status != "ready" {
+		t.Fatalf("distinct planned directories must not collide; got %s (%s)", row.Status, row.Evidence)
+	}
+}
+
+// An OBSERVED collision must not be labelled a proxy.
+func TestObservedCollisionIsNotDisclosedAsProxy(t *testing.T) {
+	project := t.TempDir()
+	shared := filepath.Join(project, "shared")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withIsolationIndexProbe(t, func(string) (string, bool) {
+		return filepath.Join(project, ".git", "index"), true
+	})
+	tm := team.Team{Project: project, Members: []team.Member{
+		{Role: "dev-1", Binary: "claude", Handle: "dev-1", ActorMode: team.ActorModeImplementation, CWD: shared},
+		{Role: "dev-2", Binary: "codex", Handle: "dev-2", ActorMode: team.ActorModeImplementation, CWD: shared},
+	}}
+	row := worktreeIsolationReadinessRow(tm, "squad")
+	if row.Status != "blocked" {
+		t.Fatalf("expected blocked, got %s", row.Status)
+	}
+	if strings.Contains(row.Evidence, "planned directory") {
+		t.Fatalf("an observed index collision must not be disclosed as a proxy; got: %s", row.Evidence)
+	}
+}
+
+func withIsolationIndexProbe(t *testing.T, probe func(string) (string, bool)) {
+	t.Helper()
+	orig := worktreeIsolationIndexProbe
+	t.Cleanup(func() { worktreeIsolationIndexProbe = orig })
+	worktreeIsolationIndexProbe = probe
 }
