@@ -1139,6 +1139,9 @@ func adoptResumeExecLaunchRecords(results []resumeExecLaunchResult) bool {
 }
 
 func adoptResumeExecLaunchRecord(check resumeExecLaunchCheck, pane tmuxpane.TmuxPane) error {
+	// resumeExecAdoptionPane admits only the exact paneTitleToken for this
+	// workstream/role, so this writer persists an already-verifiable identity
+	// rather than stamping a possibly unrelated replacement pane.
 	return launch.WithRecordLock(check.AgentDir, func() error {
 		rec, err := launch.Read(check.AgentDir)
 		if err != nil {

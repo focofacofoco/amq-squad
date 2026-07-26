@@ -728,6 +728,9 @@ func maybeFilterCurrentExternalLead(t team.Team, workstream, profile, trustMode 
 	if !write || !currentEnvIdentifiesExternalLead(lead, handle, root) {
 		return t, false, nil
 	}
+	if err := stampCapturedLaunchPane(id.PaneID, env.SessionName, lead.Role); err != nil {
+		return t, false, fmt.Errorf("stamp external lead pane %s: %w", id.PaneID, err)
+	}
 	rec := externalLeadRecordForLaunch(lead, cwd, handle, root, env, id, profile, trustMode, binaryArgs, modelOverrides)
 	if err := launch.Write(agentDir, rec); err != nil {
 		return t, false, fmt.Errorf("write external lead record: %w", err)

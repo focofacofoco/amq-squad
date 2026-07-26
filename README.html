@@ -911,7 +911,12 @@ registered pane must retain the exact
 <code>amq:&lt;session&gt;:&lt;role&gt;</code> title. A legitimate
 external lead that moves to a different pane therefore reads stale until
 it is re-registered; this fail-closed tradeoff prevents pane-number
-reuse from impersonating the operator-visible lead.</p>
+reuse from impersonating the operator-visible lead.
+<code>agent up</code> stamps that same title when it adopts the
+operator's current tmux pane, so the pane is retitled as part of
+becoming a managed identity. If the operator renames it later, liveness
+degrades gracefully to the verified PID path rather than trusting the
+renamed pane.</p>
 <p><code>doctor</code> has three severities: <code>ok</code>,
 <code>warn</code>, and <code>fail</code>. Only <code>fail</code> makes
 the command exit non-zero; warnings remain visible readiness notes. A

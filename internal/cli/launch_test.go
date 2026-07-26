@@ -12,6 +12,7 @@ import (
 
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	"github.com/omriariav/amq-squad/v2/internal/team"
+	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 )
 
 func TestRunWakeBindingExecPersistsExactLockBeforeTargetExec(t *testing.T) {
@@ -955,6 +956,61 @@ func TestRunLaunchWritesManagedRawWakeModeRecord(t *testing.T) {
 	}
 	if rec.Binary != "codex" || rec.WakeInjectMode != "raw" {
 		t.Fatalf("managed launch record = %+v", rec)
+	}
+}
+
+func TestRunLaunchStampsCapturedPaneBeforeRecordAndExec(t *testing.T) {
+	setupFakeAMQWithVersion(t, "0.42.0")
+	project := t.TempDir()
+	t.Setenv(envTmuxTarget, "")
+	t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
+	t.Setenv("TMUX_PANE", "%9")
+
+	oldPane := launchCurrentPaneIdentity
+	launchCurrentPaneIdentity = func() (*tmuxpane.PaneIdentity, error) {
+		return &tmuxpane.PaneIdentity{Session: "operator", WindowID: "@1", WindowName: "shell", PaneID: "%9"}, nil
+	}
+	t.Cleanup(func() { launchCurrentPaneIdentity = oldPane })
+
+	var tmuxCalls [][]string
+	oldRun := tmuxRunCommand
+	oldStamp := stampCapturedLaunchPane
+	stampCapturedLaunchPane = defaultStampCapturedLaunchPane
+	tmuxRunCommand = func(name string, args ...string) error {
+		tmuxCalls = append(tmuxCalls, append([]string{name}, args...))
+		return nil
+	}
+	t.Cleanup(func() {
+		tmuxRunCommand = oldRun
+		stampCapturedLaunchPane = oldStamp
+	})
+
+	execCalls := 0
+	oldExec := amqSyscallExec
+	amqSyscallExec = func(string, []string, []string) error {
+		execCalls++
+		return nil
+	}
+	t.Cleanup(func() { amqSyscallExec = oldExec })
+
+	if _, stderr, err := captureOutput(t, func() error {
+		return runLaunch([]string{"--project", project, "--team-home", project, "--no-bootstrap", "--role", "cto", "--me", "cto", "--session", "issue-96", "codex"})
+	}); err != nil {
+		t.Fatalf("runLaunch: %v\n%s", err, stderr)
+	}
+	wantCall := []string{"tmux", "select-pane", "-t", "%9", "-T", "amq:issue-96:cto"}
+	if !reflect.DeepEqual(tmuxCalls, [][]string{wantCall}) {
+		t.Fatalf("tmux calls = %v, want %v", tmuxCalls, [][]string{wantCall})
+	}
+	if execCalls != 1 {
+		t.Fatalf("exec calls = %d, want 1", execCalls)
+	}
+	rec, err := launch.Read(filepath.Join(os.Getenv("AMQ_FAKE_ROOT"), "agents", "cto"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Tmux == nil || rec.Tmux.PaneID != "%9" {
+		t.Fatalf("captured launch record pane = %+v, want %%9", rec.Tmux)
 	}
 }
 

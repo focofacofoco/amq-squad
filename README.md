@@ -475,7 +475,10 @@ exception to replacement-pane recovery: their registered pane must retain the
 exact `amq:<session>:<role>` title. A legitimate external lead that moves to a
 different pane therefore reads stale until it is re-registered; this
 fail-closed tradeoff prevents pane-number reuse from impersonating the
-operator-visible lead.
+operator-visible lead. `agent up` stamps that same title when it adopts the
+operator's current tmux pane, so the pane is retitled as part of becoming a
+managed identity. If the operator renames it later, liveness degrades
+gracefully to the verified PID path rather than trusting the renamed pane.
 
 `doctor` has three severities: `ok`, `warn`, and `fail`. Only `fail` makes the
 command exit non-zero; warnings remain visible readiness notes. A shared Git
