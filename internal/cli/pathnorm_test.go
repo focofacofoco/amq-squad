@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -153,11 +154,61 @@ func TestRecordingKeepsSymlinkAndComparisonResolvesIt(t *testing.T) {
 func TestCanonicalPathHandlesMissingLocation(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "gone", "worktree")
 	got := canonicalFilesystemPath(missing)
-	if got != filepath.Clean(missing) {
-		t.Fatalf("canonicalFilesystemPath(%q)=%q, want the absolute form of a non-existent path", missing, got)
+	if got == "" {
+		t.Fatalf("canonicalFilesystemPath(%q) returned empty; it must be total", missing)
+	}
+	if !filepath.IsAbs(got) || got != filepath.Clean(got) {
+		t.Fatalf("canonicalFilesystemPath(%q)=%q, want a clean absolute path", missing, got)
+	}
+	// Stable: canonicalizing twice must not move.
+	if again := canonicalFilesystemPath(got); again != got {
+		t.Fatalf("canonicalFilesystemPath is not idempotent: %q -> %q", got, again)
 	}
 	if canonicalFilesystemPath("   ") != "" {
 		t.Fatal("blank input must canonicalize to the empty string")
+	}
+}
+
+// Second-review finding 5: EvalSymlinks fails outright when the LEAF is missing,
+// even if an ancestor is a symlink. Taking the absolute form in that case would
+// make /link/x and /real/x canonicalize differently for a not-yet-created x, so
+// two records naming the same future location would compare as drift.
+//
+// The comparison resolves the longest EXISTING ancestor and rejoins the
+// remainder, so both spellings agree whether or not the leaf exists yet.
+func TestCanonicalPathResolvesSymlinkPrefixForMissingLeaf(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// Several depths of not-yet-existing descendant.
+	for _, leaf := range []string{"x", filepath.Join("a", "b"), filepath.Join("a", "b", "c", "d")} {
+		t.Run(leaf, func(t *testing.T) {
+			viaLink := canonicalFilesystemPath(filepath.Join(link, leaf))
+			viaReal := canonicalFilesystemPath(filepath.Join(real, leaf))
+			if viaLink != viaReal {
+				t.Fatalf("same missing location canonicalized differently:\n via link: %q\n via real: %q", viaLink, viaReal)
+			}
+			// And the set comparison must therefore see them as one entry.
+			set := canonicalFilesystemPaths([]string{filepath.Join(link, leaf), filepath.Join(real, leaf)})
+			if len(set) != 1 {
+				t.Fatalf("two spellings of one missing location produced %d set entries: %v", len(set), set)
+			}
+		})
+	}
+
+	// sameFilesystemPath is the comparator callers actually use, so pin it too.
+	if !sameFilesystemPath(filepath.Join(link, "not-created-yet"), filepath.Join(real, "not-created-yet")) {
+		t.Fatal("sameFilesystemPath must treat a symlinked prefix and its target as one location for a missing leaf")
+	}
+
+	// A path with no existing ancestor at all must still canonicalize, not hang
+	// or return empty: the loop has to terminate at the root.
+	orphan := canonicalFilesystemPath(filepath.Join(string(filepath.Separator), "no-such-root-dir-amq", "x", "y"))
+	if orphan == "" || !filepath.IsAbs(orphan) {
+		t.Fatalf("a path with no existing ancestor canonicalized to %q", orphan)
 	}
 }
 
@@ -228,6 +279,79 @@ func TestPathSetComparisonIsOrderAndRepresentationIndependent(t *testing.T) {
 		}
 		if recordedOneOrder[i] != mixedRepresentation[i] {
 			t.Fatalf("set comparison is representation dependent: %v vs %v", recordedOneOrder, mixedRepresentation)
+		}
+	}
+}
+
+// Second-review MUST-FIX 2: every command whose --project is a comma-separated
+// directory LIST must be exempt from single-path normalization. `list` was
+// exempt; history and restore were not, so `history --project ~,/repo`
+// normalized the whole value to <cwd>/~,/repo.
+func TestCommaSeparatedProjectFlagCommandsSurviveVerbatim(t *testing.T) {
+	for _, command := range []string{"list", "history", "restore"} {
+		t.Run(command, func(t *testing.T) {
+			fs := flag.NewFlagSet(command, flag.ContinueOnError)
+			project := fs.String("project", "", "comma-separated project directories to scan (default: cwd)")
+			value := "~,/repo,./rel"
+			if err := parseFlags(fs, []string{"--project", value}); err != nil {
+				t.Fatal(err)
+			}
+			if *project != value {
+				t.Fatalf("%s --project was rewritten to %q; the comma-separated list must survive verbatim", command, *project)
+			}
+		})
+	}
+}
+
+// The exemption map is load-bearing, so it must police itself rather than rely on
+// someone remembering. This enumerates the actual flag registrations in the
+// package and fails when a comma-separated --project is not registered as exempt,
+// so the NEXT such command cannot be silently missed.
+func TestEveryCommaSeparatedProjectFlagIsExempt(t *testing.T) {
+	entries, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A --project registration whose usage string says "comma-separated" is a
+	// directory list by construction.
+	registration := regexp.MustCompile(`fs\.String\("project",\s*""\s*,\s*"comma-separated`)
+	flagSetName := regexp.MustCompile(`flag\.NewFlagSet\("([^"]+)"`)
+
+	found := map[string]string{}
+	for _, path := range entries {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		src := string(body)
+		loc := registration.FindStringIndex(src)
+		if loc == nil {
+			continue
+		}
+		// The nearest preceding NewFlagSet declares the command this belongs to.
+		names := flagSetName.FindAllStringSubmatch(src[:loc[0]], -1)
+		if len(names) == 0 {
+			t.Fatalf("%s registers a comma-separated --project but declares no flag set name", path)
+		}
+		command := names[len(names)-1][1]
+		found[command] = path
+	}
+	if len(found) == 0 {
+		t.Fatal("no comma-separated --project registrations found; this guard has stopped guarding anything")
+	}
+	for command, path := range found {
+		if !commaSeparatedProjectFlagCommands[command] {
+			t.Fatalf("%s registers --project as a comma-separated list for command %q, but it is not in commaSeparatedProjectFlagCommands; normalization will corrupt that flag", path, command)
+		}
+	}
+	// And no stale entries: an exemption for a command that no longer takes a
+	// list would silently skip normalization it should be doing.
+	for command := range commaSeparatedProjectFlagCommands {
+		if _, ok := found[command]; !ok {
+			t.Fatalf("commaSeparatedProjectFlagCommands exempts %q, but no comma-separated --project registration was found for it; the exemption is stale and skips normalization", command)
 		}
 	}
 }

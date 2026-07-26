@@ -91,23 +91,39 @@ func TestToolPolicySourcesAreByteIdenticalAcrossRegeneration(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("regeneration changed the recorded source set:\n first=%v\nsecond=%v", first, second)
 	}
-	// Re-deriving the plan for the same inputs must also agree, so a later
-	// prepare cannot undo what overlay init recorded (the #539 loop).
+	// Re-deriving the plan the way `run start --prepare` does must also agree, so
+	// a later prepare cannot undo what overlay init recorded. That mutual undoing
+	// is the #539 loop, and this half of the assertion is what makes the
+	// readiness RecordOnly carve-out safe: it omits the materialization check on
+	// the assumption that the writer is deterministic.
 	cfg, err := team.Read(project)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := buildRunStartToolProfilePlans(cfg, "", "")
+	// A REAL assignment string. buildRunStartToolProfilePlans returns (nil, nil)
+	// for an empty one, which would make every assertion below unreachable.
+	plans, err := buildRunStartToolProfilePlans(cfg, "", "backend=coding")
 	if err != nil {
 		t.Fatalf("re-derive plans: %v", err)
 	}
+	if len(plans) == 0 {
+		t.Fatal("no policy plans were derived; the assertion below would be vacuous")
+	}
+	checked := 0
 	for _, plan := range plans {
 		if plan.After.Role != "backend" {
 			continue
 		}
+		checked++
+		if len(plan.After.ToolPolicySources) == 0 {
+			t.Fatal("re-derived plan recorded no capability sources; the comparison would be vacuous")
+		}
 		if !reflect.DeepEqual(plan.After.ToolPolicySources, second) {
 			t.Fatalf("re-derived source set differs from the recorded one:\nrecorded=%v\nderived =%v", second, plan.After.ToolPolicySources)
 		}
+	}
+	if checked != 1 {
+		t.Fatalf("expected exactly one derived plan for role backend, checked %d", checked)
 	}
 }
 

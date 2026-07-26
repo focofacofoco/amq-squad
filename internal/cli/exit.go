@@ -119,9 +119,16 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 // comma" heuristic on purpose: a heuristic would silently skip normalization
 // for any legitimate directory whose name contains a comma, which is exactly
 // the kind of representation-dependent behavior #539/#540 are about.
+// This map is load-bearing: adding a command whose --project is a directory LIST
+// without registering it here silently corrupts that flag. TestEveryCommaSeparatedProjectFlagIsExempt
+// enumerates the flag registrations and fails when one is missing, so the next
+// such command cannot be missed by inspection alone.
 var commaSeparatedProjectFlagCommands = map[string]bool{
-	// list --project dir1,dir2,... scans several projects at once.
-	"list": true,
+	// Each of these documents --project as "comma-separated project directories
+	// to scan" and splits the value itself.
+	"list":    true,
+	"history": true,
+	"restore": true,
 }
 
 // normalizePathFlags rewrites filesystem-path flags to their canonical

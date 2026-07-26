@@ -35,12 +35,32 @@ var paneErrorLineRE = regexp.MustCompile(`(?im)^\s*(error|fatal|panic):\s*(.+)$`
 
 // bootstrapFailureTailLines is how much of each pane to inspect. A bootstrap
 // error is the last thing printed before the shell prompt, so the tail is where
-// it is; reading more would start picking up prior scrollback from a reused pane.
+// it is.
+//
+// PRECONDITION: reading a fixed-size tail assumes the pane contains ONLY output
+// from this launch. That holds today because every agent pane is created within
+// the launch operation itself, and the session-reuse branches do NOT weaken it:
+// AllowExistingSession reuses the SESSION, not a pane, so reuseExistingSession
+// skips the first-target block and every agent still gets a fresh split/window.
+// The only pane ever reused for an agent is a session-initial pane created
+// microseconds earlier in the same operation.
+//
+// If an agent is ever placed into a PRE-EXISTING pane, this probe needs a
+// scrollback fence: mark the pane before dispatch and read only past the mark.
+// Without one it could attribute a stale anchored error line from unrelated
+// earlier output to this launch and fail a healthy spawn.
 const bootstrapFailureTailLines = 12
 
 // Probe pacing. The budget bounds only the INCONCLUSIVE case: a healthy launch
 // stops as soon as every engine is seen running, and a dead one stops as soon as
 // the first pane is confirmed dead, so neither normally pays the full budget.
+//
+// Known cost, accepted: a MIXED roster, where some panes report their engine and
+// others cannot be inspected at all, never reaches either early-return condition
+// and so pays the whole budget before failing open. It is bounded, it only
+// delays a launch rather than failing it, and the alternative (failing open as
+// soon as any pane is uninspectable) would give up the signal for the panes that
+// are readable.
 var (
 	paneBootstrapProbeBudget   = 6 * time.Second
 	paneBootstrapProbeInterval = 250 * time.Millisecond
@@ -169,6 +189,38 @@ var paneBootstrapProbe = func(paneID string) (string, bool) {
 	return strings.TrimSpace(fields[1]), true
 }
 
+// paneShellCommands are the interactive shells a pane falls back to when its
+// agent has exited. A bootstrap death is "the SHELL is the current command",
+// not merely "the engine is not the current command".
+//
+// The distinction is the difference between a correct probe and one that kills
+// healthy launches. Between `send-keys` and the engine being exec'd, the pane's
+// current command passes through intermediate executables -- the wrapper, a
+// shell function, amq-squad itself. If shell init happens to print an anchored
+// error line in that window (say "error: plugin cache unavailable"), treating
+// any non-engine command as death would fail a launch that is starting normally.
+// An unrecognized command is therefore INCONCLUSIVE: keep waiting.
+var paneShellCommands = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "fish": true,
+	"dash": true, "ksh": true, "csh": true, "tcsh": true,
+	"ash": true, "busybox": true, "login": true,
+}
+
+// paneIsAtShell reports whether a pane's current command is a known interactive
+// shell, i.e. the agent that was launched there is no longer running.
+func paneIsAtShell(command string) bool {
+	command = strings.ToLower(strings.TrimSpace(command))
+	if command == "" {
+		return false
+	}
+	if i := strings.LastIndexByte(command, '/'); i >= 0 {
+		command = command[i+1:]
+	}
+	// tmux reports a login shell as "-zsh".
+	command = strings.TrimPrefix(command, "-")
+	return paneShellCommands[command]
+}
+
 // bootstrapProbe describes one pane to check.
 type bootstrapProbe struct {
 	Role   string
@@ -255,9 +307,15 @@ func waitForPaneBootstrap(probes []bootstrapProbe) []memberPaneBootstrapFailure 
 				running++
 				continue
 			}
-			// Engine is not the pane's current command. Only call it a death
-			// when the pane also shows an error, so a pane that has merely not
-			// exec'd the binary yet keeps waiting.
+			// Not the engine. Only a KNOWN SHELL means the agent is gone; any
+			// other command is an intermediate executable in the startup window
+			// and is inconclusive, so it keeps waiting rather than being killed
+			// on the strength of an error line printed during init.
+			if !paneIsAtShell(command) {
+				continue
+			}
+			// At the shell. Require the pane to also show an error before calling
+			// it a death, so a shell that simply has not exec'd yet keeps waiting.
 			if text, failed := paneBootstrapFailure(p.PaneID); failed {
 				failures = append(failures, memberPaneBootstrapFailure{Role: p.Role, PaneID: p.PaneID, Error: text})
 			}

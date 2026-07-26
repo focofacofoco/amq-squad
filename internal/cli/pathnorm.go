@@ -36,6 +36,14 @@ import (
 // symlinks. Representation-independence of an identity is a property of the
 // comparison, not of the stored bytes: a symlinked path and its target are the
 // same location and must compare equal however each side was recorded.
+//
+// ONE DELIBERATE EXCEPTION: tool_policy_sources records canonically. That field
+// exists only to be compared, is never echoed back as an operator-chosen path,
+// and has two writers that derive the project from different origins (cwd vs
+// team.json), so absolute-only recording made them disagree byte-for-byte. See
+// the comment at its assignment in team_overlay.go. Prefer the record/compare
+// split for anything new; do not widen this exception without the same
+// justification.
 
 // absoluteFilesystemPath is the RECORDING normalization: tilde-expanded,
 // absolute, and lexically cleaned. This is what turns `--project .` into a
@@ -68,19 +76,39 @@ func absoluteFilesystemPath(p string) string {
 // plus symlink resolution. Two paths naming the same location canonicalize to
 // the same string regardless of how either was written or recorded.
 //
-// Symlink resolution is best effort: EvalSymlinks fails on a path that does not
-// exist, which is expected here because comparators must be able to canonicalize
-// a recorded location that has since been removed. The absolute form is a valid
-// and stable answer in that case, which is the property comparisons depend on.
+// Symlink resolution is best effort, because comparators must be able to
+// canonicalize a location that does not exist -- a recorded worktree that has
+// since been removed, or a path about to be created.
+//
+// EvalSymlinks fails outright when the LEAF is missing, even if an ancestor is a
+// symlink. Taking the absolute form in that case would make /link/x and /real/x
+// canonicalize differently for a not-yet-created x, so two records naming the
+// same future location would compare as drift. Instead, resolve the longest
+// EXISTING ancestor and rejoin the remainder, which gives the same answer for
+// both spellings whether or not the leaf exists yet.
 func canonicalFilesystemPath(p string) string {
 	p = absoluteFilesystemPath(p)
 	if p == "" {
 		return ""
 	}
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		p = filepath.Clean(resolved)
+		return filepath.Clean(resolved)
 	}
-	return p
+	remainder := ""
+	dir := p
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached the root without finding an existing ancestor. The absolute
+			// form is still stable, which is what comparison needs.
+			return p
+		}
+		remainder = filepath.Join(filepath.Base(dir), remainder)
+		dir = parent
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Clean(filepath.Join(resolved, remainder))
+		}
+	}
 }
 
 // canonicalFilesystemPathIn is the COMPARISON normalization for a path that may

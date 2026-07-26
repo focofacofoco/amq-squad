@@ -276,3 +276,57 @@ func TestProbeRejectsTmuxFallbackPaneRow(t *testing.T) {
 		t.Fatalf("a matching pane row must be accepted, got (%q, %t)", command, ok)
 	}
 }
+
+// Second-review MUST-FIX 1: the death rule is "the SHELL is the current command",
+// not "anything other than the expected engine".
+//
+// Between send-keys and the engine being exec'd, a pane's current command passes
+// through intermediate executables (a wrapper, a shell function, amq-squad
+// itself). If shell init prints an anchored error line in that window, treating
+// any non-engine command as death kills a launch that is starting normally.
+func TestIntermediateExecutableWithErrorTextIsNotABootstrapDeath(t *testing.T) {
+	const initNoise = "error: plugin cache unavailable\n"
+	for _, command := range []string{"amq-squad", "node", "env", "wrapper.sh", "codex-launcher"} {
+		t.Run(command, func(t *testing.T) {
+			withFakePanes(t, map[string]fakePane{
+				"%1": {command: command, screen: initNoise},
+			})
+			probes := []bootstrapProbe{{Role: "cto", PaneID: "%1", Engine: "claude"}}
+			if failures := waitForPaneBootstrap(probes); len(failures) != 0 {
+				t.Fatalf("pane mid-startup at %q was killed as a bootstrap death: %+v", command, failures)
+			}
+		})
+	}
+}
+
+// The complement: a real shell IS a death when the pane also shows an error,
+// including a login shell, which tmux reports with a leading dash.
+func TestKnownShellsWithErrorTextAreBootstrapDeaths(t *testing.T) {
+	for _, command := range []string{"zsh", "bash", "-zsh", "/bin/sh", "fish"} {
+		t.Run(command, func(t *testing.T) {
+			withFakePanes(t, map[string]fakePane{
+				"%1": {command: command, screen: "error: load accepted prepared launch identity\n"},
+			})
+			probes := []bootstrapProbe{{Role: "cto", PaneID: "%1", Engine: "claude"}}
+			failures := waitForPaneBootstrap(probes)
+			if len(failures) != 1 {
+				t.Fatalf("pane at shell %q with an error was not reported dead: %+v", command, failures)
+			}
+		})
+	}
+}
+
+// paneIsAtShell must not classify an agent engine as a shell, or a healthy pane
+// would be eligible for the death check.
+func TestPaneIsAtShellRejectsEnginesAndBlanks(t *testing.T) {
+	for _, command := range []string{"claude", "codex", "", "   ", "amq-squad"} {
+		if paneIsAtShell(command) {
+			t.Fatalf("%q must not be classified as a shell", command)
+		}
+	}
+	for _, command := range []string{"zsh", "-bash", "/usr/bin/fish", "BASH"} {
+		if !paneIsAtShell(command) {
+			t.Fatalf("%q must be classified as a shell", command)
+		}
+	}
+}
