@@ -1147,6 +1147,7 @@ func adoptResumeExecLaunchRecord(check resumeExecLaunchCheck, pane tmuxpane.Tmux
 		rec.Binary = check.Binary
 		rec.TeamProfile = check.Profile
 		rec.StartedAt = time.Now().UTC()
+		rec.StoppedAt = nil
 		rec.Tmux = &launch.TmuxInfo{
 			Session:    pane.Session,
 			WindowID:   pane.WindowID,

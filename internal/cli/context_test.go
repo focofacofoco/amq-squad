@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	"github.com/omriariav/amq-squad/v2/internal/team"
@@ -71,11 +72,18 @@ func isolateCanonicalContextTest(t *testing.T, project string) {
 		}
 	}
 	previousScan, previousAlive := contextScanLaunchEntries, contextPIDAlive
+	previousMatch, previousTTY, previousPane := contextProcessMatch, contextProcessTTY, contextPaneAlive
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) { return nil, nil }
 	contextPIDAlive = func(int) bool { return false }
+	contextProcessMatch = func(int, func(string) bool) bool { return false }
+	contextProcessTTY = func(int) (string, bool) { return "", false }
+	contextPaneAlive = func(string) bool { return false }
 	t.Cleanup(func() {
 		contextScanLaunchEntries = previousScan
 		contextPIDAlive = previousAlive
+		contextProcessMatch = previousMatch
+		contextProcessTTY = previousTTY
+		contextPaneAlive = previousPane
 	})
 }
 
@@ -322,10 +330,194 @@ func TestResolveCanonicalContextAmbiguousLaunchesReportEveryProvenance(t *testin
 		t.Fatal("expected same-rank live-launch ambiguity")
 	}
 	message := err.Error()
-	for _, want := range []string{"ambiguous profile", "no winner", "every candidate", "alpha", "beta", "agents/a", "agents/b", contextSourceLaunch, contextSourceAMQRC, contextSourceDefault, "lower precedence"} {
+	for _, want := range []string{
+		"ambiguous profile", "no winner", "every candidate", "alpha", "beta", "agents/a", "agents/b",
+		contextSourceLaunch, contextSourceAMQRC, contextSourceDefault, "lower precedence",
+		"amq-squad context explain --profile alpha --session s",
+		"amq-squad context explain --profile beta --session s",
+	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("ambiguity missing %q: %s", want, message)
 		}
+	}
+}
+
+func TestStoppedAndPIDReusedLaunchRecordsDoNotWinContext(t *testing.T) {
+	project := t.TempDir()
+	isolateCanonicalContextTest(t, project)
+	stoppedAt := time.Now().Add(-time.Minute).UTC()
+	contextPIDAlive = func(int) bool { return true }
+	contextProcessMatch = func(pid int, _ func(string) bool) bool { return pid == 2 || pid == 3 }
+	contextProcessTTY = func(pid int) (string, bool) {
+		if pid == 2 {
+			return "/dev/ttys999", true
+		}
+		return "/dev/ttys003", true
+	}
+	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
+		return []launch.Entry{
+			{
+				AgentDir: filepath.Join(project, ".agent-mail", "alpha", "s", "agents", "stopped"),
+				Record: launch.Record{
+					AgentPID: 1, Binary: "codex", AgentTTY: "/dev/ttys001", TeamProfile: "alpha",
+					Session: "s", Handle: "stopped", TeamHome: project, StoppedAt: &stoppedAt,
+				},
+			},
+			{
+				AgentDir: filepath.Join(project, ".agent-mail", "beta", "s", "agents", "reused"),
+				Record: launch.Record{
+					AgentPID: 2, Binary: "codex", AgentTTY: "/dev/ttys002", TeamProfile: "beta",
+					Session: "s", Handle: "reused", TeamHome: project,
+				},
+			},
+		}, nil
+	}
+	ctx, err := resolveCanonicalContext(contextResolveOptions{ProjectFlag: project, ProjectExplicit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Profile != team.DefaultProfile || ctx.Sources["profile"] == contextSourceLaunch {
+		t.Fatalf("stopped/PID-reused records won context: %#v", ctx)
+	}
+
+	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
+		return []launch.Entry{{
+			AgentDir: filepath.Join(project, ".agent-mail", "gamma", "s", "agents", "live"),
+			Record: launch.Record{
+				AgentPID: 3, Binary: "codex", AgentTTY: "/dev/ttys003", TeamProfile: "gamma",
+				Session: "s", Handle: "live", TeamHome: project,
+			},
+		}}, nil
+	}
+	ctx, err = resolveCanonicalContext(contextResolveOptions{ProjectFlag: project, ProjectExplicit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Profile != "gamma" || ctx.Sources["profile"] != contextSourceLaunch {
+		t.Fatalf("verified live record did not win context: %#v", ctx)
+	}
+}
+
+func TestLegacyLaunchRecordsWithoutStoppedAtUseLivenessProbe(t *testing.T) {
+	project := t.TempDir()
+	isolateCanonicalContextTest(t, project)
+	deadDir := filepath.Join(project, ".agent-mail", "legacy-a", "s", "agents", "dead")
+	reusedDir := filepath.Join(project, ".agent-mail", "legacy-b", "s", "agents", "reused")
+	for agentDir, rec := range map[string]launch.Record{
+		deadDir: {
+			TeamHome: project, TeamProfile: "legacy-a", Session: "s", Handle: "dead",
+			Binary: "codex", AgentPID: 30, AgentTTY: "/dev/ttys030",
+		},
+		reusedDir: {
+			TeamHome: project, TeamProfile: "legacy-b", Session: "s", Handle: "reused",
+			Binary: "codex", AgentPID: 31, AgentTTY: "/dev/ttys031",
+		},
+	} {
+		if err := launch.Write(agentDir, rec); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(launch.Path(agentDir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "stopped_at") {
+			t.Fatalf("legacy fixture unexpectedly carries stopped_at:\n%s", raw)
+		}
+	}
+	contextScanLaunchEntries = launch.ScanEntries
+	contextPIDAlive = func(pid int) bool { return pid == 31 }
+	contextProcessMatch = func(pid int, _ func(string) bool) bool { return pid == 31 }
+	contextProcessTTY = func(pid int) (string, bool) { return "/dev/ttys999", pid == 31 }
+
+	ctx, err := resolveCanonicalContext(contextResolveOptions{ProjectFlag: project, ProjectExplicit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Profile != team.DefaultProfile || ctx.Sources["profile"] == contextSourceLaunch {
+		t.Fatalf("legacy dead/reused records poisoned context: %#v", ctx)
+	}
+}
+
+func TestContextCleanupRemovesOnlyRecheckedNonLiveRecords(t *testing.T) {
+	project := t.TempDir()
+	staleDir := filepath.Join(project, ".agent-mail", "old", "s", "agents", "stale")
+	liveDir := filepath.Join(project, ".agent-mail", "live", "s", "agents", "live")
+	for agentDir, rec := range map[string]launch.Record{
+		staleDir: {TeamHome: project, TeamProfile: "old", Session: "s", Handle: "stale", Binary: "codex", AgentPID: 11},
+		liveDir:  {TeamHome: project, TeamProfile: "live", Session: "s", Handle: "live", Binary: "codex", AgentPID: 12},
+	} {
+		if err := launch.Write(agentDir, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out strings.Builder
+	err := runContextCleanupWithDeps([]string{"--project", project, "--yes"}, contextCleanupDeps{
+		Scan: launch.ScanEntries, Out: &out,
+		IsLive: func(rec launch.Record, _ string) bool { return rec.Handle == "live" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := launch.Read(staleDir); !os.IsNotExist(err) {
+		t.Fatalf("stale record still present: %v\n%s", err, out.String())
+	}
+	if _, err := launch.Read(liveDir); err != nil {
+		t.Fatalf("live record was removed: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{"non-live launch records: 1", "REMOVED", launch.Path(staleDir)} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("cleanup output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestContextCleanupPreservesRecordThatBecomesLiveAfterPreview(t *testing.T) {
+	project := t.TempDir()
+	agentDir := filepath.Join(project, ".agent-mail", "old", "s", "agents", "worker")
+	if err := launch.Write(agentDir, launch.Record{
+		TeamHome: project, TeamProfile: "old", Session: "s", Handle: "worker", Binary: "codex", AgentPID: 21,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	var out strings.Builder
+	err := runContextCleanupWithDeps([]string{"--project", project, "--yes"}, contextCleanupDeps{
+		Scan: launch.ScanEntries, Out: &out,
+		IsLive: func(launch.Record, string) bool {
+			calls++
+			return calls > 1
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := launch.Read(agentDir); err != nil {
+		t.Fatalf("record that became live was removed: %v", err)
+	}
+	if !strings.Contains(out.String(), "record became live after preview") {
+		t.Fatalf("missing live recheck result:\n%s", out.String())
+	}
+}
+
+func TestContextCleanupDeclineIsNoOp(t *testing.T) {
+	project := t.TempDir()
+	agentDir := filepath.Join(project, ".agent-mail", "old", "s", "agents", "worker")
+	if err := launch.Write(agentDir, launch.Record{TeamHome: project, TeamProfile: "old", Session: "s", Handle: "worker"}); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	err := runContextCleanupWithDeps([]string{"--project", project}, contextCleanupDeps{
+		Scan: launch.ScanEntries, In: strings.NewReader("\n"), Out: &out,
+		IsLive: func(launch.Record, string) bool { return false },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := launch.Read(agentDir); err != nil {
+		t.Fatalf("declined cleanup mutated record: %v", err)
+	}
+	if !strings.Contains(out.String(), "Declined; no launch records removed") {
+		t.Fatalf("missing declined result:\n%s", out.String())
 	}
 }
 

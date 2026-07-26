@@ -331,7 +331,15 @@ func executeDown(d downExecution) error {
 		exceptionScope = &exactStopScope
 	}
 	for _, m := range targets {
-		reports = append(reports, terminateMember(t, d.ProjectDir, d.Profile, m, workstream, d.Terminator, d.Probe, exceptionScope, d.ClosePanes, d.PaneDeps))
+		report := terminateMember(t, d.ProjectDir, d.Profile, m, workstream, d.Terminator, d.Probe, exceptionScope, d.ClosePanes, d.PaneDeps)
+		switch report.Status {
+		case downStatusStopped, downStatusCleaned, downStatusNotLive:
+			if err := markDownLaunchRecordStopped(report, time.Now().UTC()); err != nil {
+				report.Status = downStatusFailed
+				report.Detail = strings.Trim(strings.TrimSpace(report.Detail)+"; mark launch record stopped: "+err.Error(), "; ")
+			}
+		}
+		reports = append(reports, report)
 	}
 	renderErr := renderDownReportsScoped(d.Out, verb, d.ProjectDir, d.Profile, workstream, reports, d.JSON)
 	if watcherStopped && !downReportsConfirmed(reports) {
@@ -344,6 +352,32 @@ func executeDown(d downExecution) error {
 		}
 	}
 	return renderErr
+}
+
+// markDownLaunchRecordStopped preserves the resumable record while removing it
+// from live context precedence immediately. The exact record is re-read under
+// the shared writer lock so a concurrent relaunch can never be stamped stopped.
+func markDownLaunchRecordStopped(report downReport, now time.Time) error {
+	if strings.TrimSpace(report.AgentDir) == "" {
+		return nil
+	}
+	return launch.WithRecordLock(report.AgentDir, func() error {
+		current, err := launch.Read(report.AgentDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if current.AgentPID != report.PID ||
+			(report.Handle != "" && current.Handle != "" && !strings.EqualFold(current.Handle, report.Handle)) ||
+			(report.Root != "" && current.Root != "" && !sameResolvedDir(current.Root, report.Root)) {
+			return fmt.Errorf("launch record changed after runtime teardown; preserved without a stopped marker")
+		}
+		stoppedAt := now.UTC()
+		current.StoppedAt = &stoppedAt
+		return launch.WriteUnderRecordLock(report.AgentDir, current)
+	})
 }
 
 func validateExactStopLaunchRecords(t team.Team, profile, workstream string, targets []team.Member) error {

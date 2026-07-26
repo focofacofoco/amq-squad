@@ -13,7 +13,104 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	"github.com/omriariav/amq-squad/v2/internal/rules"
 	"github.com/omriariav/amq-squad/v2/internal/team"
+	"github.com/omriariav/amq-squad/v2/internal/worktreeplan"
 )
+
+func TestDoctorSharedIndexCollisionIsStateAware(t *testing.T) {
+	inspection := worktreeplan.Inspection{
+		Members: []worktreeplan.MemberStatus{
+			{Role: "one", Index: "/repo/.git/index", State: worktreeplan.StateUnplanned},
+			{Role: "two", Index: "/repo/.git/index", State: worktreeplan.StateUnplanned},
+		},
+		Diagnostics: []worktreeplan.Diagnostic{{
+			Kind: "shared-index-collision", Status: worktreeplan.DiagnosticFail,
+			Detail: "one,two share /repo/.git/index",
+		}},
+	}
+	diagnosticFor := func(rows []statusRecord) worktreeplan.Diagnostic {
+		diagnostics := stateAwareSharedIndexDiagnostics(inspection, rows, "review", "s")
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Kind == "shared-index-collision" {
+				return diagnostic
+			}
+		}
+		t.Fatal("shared-index-collision diagnostic missing")
+		return worktreeplan.Diagnostic{}
+	}
+
+	stopped := diagnosticFor([]statusRecord{
+		{Role: "one", Status: statusStateStale},
+		{Role: "two", Status: statusStateMissing},
+	})
+	if stopped.Status != worktreeplan.DiagnosticWarn {
+		t.Fatalf("stopped collision = %+v, want warn", stopped)
+	}
+	for _, want := range []string{
+		"fewer than two affected members are live",
+		"warning does not fail doctor",
+		"amq-squad worktree plan --role R --task ID --base SHA --scope PATH... --profile review --session s",
+		"amq-squad worktree materialize --role R --task ID --base SHA --scope PATH... --profile review --session s --yes",
+	} {
+		if !strings.Contains(stopped.Detail, want) {
+			t.Fatalf("stopped collision missing %q: %+v", want, stopped)
+		}
+	}
+	if fails := countFails([]doctorCheck{{Status: doctorWarn, Detail: stopped.Detail}}); fails != 0 {
+		t.Fatalf("warning changed doctor exit contract: %d fails", fails)
+	}
+
+	oneLive := diagnosticFor([]statusRecord{
+		{Role: "one", Status: statusStateLive},
+		{Role: "two", Status: statusStateStale},
+	})
+	if oneLive.Status != worktreeplan.DiagnosticWarn {
+		t.Fatalf("one-live collision = %+v, want warn", oneLive)
+	}
+
+	bothLive := diagnosticFor([]statusRecord{
+		{Role: "one", Status: statusStateLive},
+		{Role: "two", Status: statusStateWakeLive},
+	})
+	if bothLive.Status != worktreeplan.DiagnosticFail || !strings.Contains(bothLive.Detail, "while live") {
+		t.Fatalf("live collision = %+v, want fail", bothLive)
+	}
+}
+
+func TestDoctorStoppedUnplannedSharedIndexDoesNotFail(t *testing.T) {
+	repo := seedReviewGitRepo(t)
+	if err := team.WriteProfile(repo, team.DefaultProfile, team.Team{
+		Project: repo,
+		Members: []team.Member{
+			{Role: "one", Handle: "one", Binary: "codex", Session: "stopped"},
+			{Role: "two", Handle: "two", Binary: "codex", Session: "stopped"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := doctorExecution{
+		ProjectDir: repo, Profile: team.DefaultProfile,
+		WorktreeDiagnostics: defaultDoctorWorktreeDiagnostics,
+	}
+	checks := doctorCheckWorktrees(d, "stopped")
+	if fails := countFails(checks); fails != 0 {
+		t.Fatalf("stopped, unplanned same-cwd profile produced %d doctor failures: %+v", fails, checks)
+	}
+	var collision doctorCheck
+	for _, check := range checks {
+		if check.Kind == "shared-index-collision" {
+			collision = check
+			break
+		}
+	}
+	if collision.Status != doctorWarn {
+		t.Fatalf("shared-index collision = %+v, want warn", collision)
+	}
+	for _, want := range []string{"one,two share", "fewer than two affected members are live", "worktree materialize"} {
+		if !strings.Contains(collision.Detail, want) {
+			t.Fatalf("collision missing %q: %+v", want, collision)
+		}
+	}
+}
 
 func TestDoctorBootstrapGraceIsInfoAndOverdueIsWarn(t *testing.T) {
 	if got := doctorBootstrapStatus(bootstrapack.Result{State: "pending", Required: true}); got != doctorOK {

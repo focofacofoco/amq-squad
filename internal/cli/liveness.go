@@ -124,6 +124,13 @@ func classifyAgentLivenessWithReplacementResolver(agentDir, root, expectedProfil
 			out.Detail = fmt.Sprintf("launch record profile %q does not match requested profile %q", squadnamespace.NormalizeProfile(launchRec.TeamProfile), squadnamespace.NormalizeProfile(expectedProfile))
 			return out
 		}
+		if launchRec.StoppedAt != nil && !launchRec.StoppedAt.IsZero() {
+			out.Tmux = nil
+			out.Verdict = livenessStale
+			out.Status = statusStateStale
+			out.Detail = fmt.Sprintf("launch record explicitly stopped at %s", launchRec.StoppedAt.UTC().Format(time.RFC3339))
+			return out
+		}
 	}
 	wakeLock, wakeErr := readWakeLock(agentDir)
 	presence, presenceErr := readPresenceForEntry(agentDir)
