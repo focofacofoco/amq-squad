@@ -484,23 +484,20 @@ func buildGeneratedPolicyPlan(t team.Team, idx int, opts generatedToolPolicyOpti
 	}
 	after.ToolProfile = opts.Profile
 	after.ToolBlocklist = dedupeSortedStrings(block)
-	// #539: capability sources are recorded CANONICALLY, which is a deliberate
-	// exception to the record-absolute rule in pathnorm.go.
+	// #539: capability sources are recorded ABSOLUTE, never symlink-resolved,
+	// per the record/compare contract in pathnorm.go.
 	//
-	// Absolute is not enough here, because the two writers derive the project
-	// from different origins: `team overlay init` resolves it from the working
-	// directory (os.Getwd already returns the symlink-resolved form) while
-	// `run start --prepare` reads team.json's stored Project verbatim. On any
-	// host where the project path crosses a symlink -- /var vs /private/var on
-	// macOS being the common case -- those produce different bytes for the same
-	// files, and the differing prefix also changes the sorted order. That is
-	// exactly the "byte-identical for identical inputs" AC failing.
+	// Recording canonically was tried and reverted: ToolPolicySources is NOT
+	// compare-only. It is printed by the overlay plan output (see the `sources:`
+	// field above), exported in the team/plan JSON envelopes, and part of the
+	// team.json bytes digested for prepared-run readiness. Canonicalizing here
+	// would therefore rewrite operator-visible logical paths and digest inputs,
+	// which is precisely what the record/compare split exists to prevent.
 	//
-	// Canonicalizing at record time is safe for THIS field in a way it was not
-	// for the --project flag: these entries exist only to be compared, they are
-	// not the operator-chosen path echoed back in command output, and nothing
-	// derives a user-visible location from them.
-	after.ToolPolicySources = canonicalFilesystemPaths(sources)
+	// Byte-identity across writers comes from both deriving sources from the
+	// SAME project origin (t.Project, normalized on the way in by the --project
+	// choke point), not from collapsing representations at record time.
+	after.ToolPolicySources = absoluteFilesystemPaths(sources)
 	return generatedPolicyPlan{Index: idx, Force: opts.Force, Before: before, After: after, Files: files}, nil
 }
 

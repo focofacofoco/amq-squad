@@ -96,7 +96,18 @@ func TestToolPolicySourcesAreByteIdenticalAcrossRegeneration(t *testing.T) {
 	// is the #539 loop, and this half of the assertion is what makes the
 	// readiness RecordOnly carve-out safe: it omits the materialization check on
 	// the assumption that the writer is deterministic.
-	cfg, err := team.Read(project)
+	//
+	// SAME INPUTS is the condition the AC states, so the re-derivation must use
+	// the same project origin `team overlay init` just used. Overlay init resolved
+	// its project from the working directory, so read it from there rather than
+	// from the test's own spelling of the same directory: passing a DIFFERENT
+	// spelling would be different inputs, and that case is covered separately by
+	// TestMixedOriginRecordingsDoNotReadAsDrift.
+	sameOrigin, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := team.Read(sameOrigin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,5 +332,153 @@ func TestRecordOnlyScopeOmitsExactlyTheMaterializationClause(t *testing.T) {
 	}
 	if err := validateMemberToolPolicy(cfg, member, toolPolicyCheckRecordOnly); err != nil {
 		t.Fatalf("record-only scope must tolerate a not-yet-written policy file: %v", err)
+	}
+}
+
+// The record/compare contract, pinned at the field the reviewer defended:
+// tool_policy_sources is printed in overlay plan output, exported in JSON
+// envelopes, and digested as part of team.json for readiness. It must therefore
+// be recorded ABSOLUTE and never symlink-resolved, so a canonical-at-record
+// change cannot silently move operator-visible paths or digest inputs again.
+func TestRecordedToolPolicySourcesAreNotSymlinkResolved(t *testing.T) {
+	realHome := t.TempDir()
+	writeFile(t, filepath.Join(realHome, ".claude", "settings.json"), `{"enabledPlugins":{"user@thing":true}}`)
+	writeFile(t, filepath.Join(realHome, ".claude.json"), `{}`)
+
+	// A project reached through a SYMLINK. Recording must keep the symlinked
+	// spelling; only comparison may resolve it.
+	realProject := seedTeam(t, team.Team{
+		Members: []team.Member{{Role: "backend", Binary: "claude", Handle: "backend", Session: "s"}},
+	})
+	writeFile(t, filepath.Join(realProject, ".claude", "settings.local.json"), `{"enabledPlugins":{"project@thing":true}}`)
+	withModelLookupRoots(t, filepath.Join(realHome, "config"), realHome, nil)
+
+	link := filepath.Join(t.TempDir(), "linked-project")
+	if err := os.Symlink(realProject, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if canonicalFilesystemPath(link) == absoluteFilesystemPath(link) {
+		t.Skip("symlink does not change this path; nothing to distinguish")
+	}
+
+	cfg, err := team.Read(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := buildRunStartToolProfilePlans(cfg, "", "backend=coding")
+	if err != nil {
+		t.Fatalf("derive plans: %v", err)
+	}
+	if len(plans) == 0 {
+		t.Fatal("no plans derived; the assertion would be vacuous")
+	}
+	for _, plan := range plans {
+		if plan.After.Role != "backend" {
+			continue
+		}
+		if len(plan.After.ToolPolicySources) == 0 {
+			t.Fatal("no sources recorded; the assertion would be vacuous")
+		}
+		found := false
+		for _, src := range plan.After.ToolPolicySources {
+			if !filepath.IsAbs(src) {
+				t.Fatalf("source %q is not absolute: %v", src, plan.After.ToolPolicySources)
+			}
+			if strings.HasPrefix(src, absoluteFilesystemPath(link)) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("no source retained the symlinked project spelling %q; recording must not resolve symlinks: %v",
+				absoluteFilesystemPath(link), plan.After.ToolPolicySources)
+		}
+	}
+}
+
+// The INTENT behind the byte-identity criterion: the prepare-undoes-overlay-init
+// loop of #539 must never recur. Byte-identity across MIXED origins is not
+// achievable without rewriting recorded paths (see pathnorm.go), so what
+// actually has to hold is that mixed-origin recordings never read as DRIFT.
+//
+// This is the case that ships: `team overlay init` run from inside the repo takes
+// its project from the working directory (symlink-resolved), while the wizard
+// passes --project explicitly (unresolved). The two record different bytes for
+// the same files, and that must be benign.
+func TestMixedOriginRecordingsDoNotReadAsDrift(t *testing.T) {
+	project, _ := seedClaudeToolPolicyProject(t, "backend")
+
+	// Origin A: what an implicit-cwd invocation resolves (Getwd, symlink-resolved).
+	implicitOrigin, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Origin B: what an explicit --project invocation records (absolute, unresolved).
+	explicitOrigin := absoluteFilesystemPath(project)
+	if implicitOrigin == explicitOrigin {
+		t.Skip("this platform's cwd and flag origins agree; there is no mixed-origin case to pin")
+	}
+
+	// Record with origin A, exactly as `team overlay init` from inside the repo does.
+	if _, _, err := captureOutput(t, func() error {
+		return runTeamOverlay([]string{"init", "--role", "backend", "--tool-profile", "coding",
+			"--allow-tools", "plugin:project@thing,plugin:user@thing"})
+	}); err != nil {
+		t.Fatalf("overlay init: %v", err)
+	}
+	recorded := readTeamMember(t, project, "backend").ToolPolicySources
+	if len(recorded) == 0 {
+		t.Fatal("no sources recorded; the assertion would be vacuous")
+	}
+
+	// Confirm the origins really do produce different bytes, so this test is
+	// pinning the mixed case rather than trivially passing.
+	viaExplicit, err := team.Read(explicitOrigin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := buildRunStartToolProfilePlans(viaExplicit, "", "backend=coding")
+	if err != nil {
+		t.Fatalf("derive plans: %v", err)
+	}
+	var derived []string
+	for _, plan := range plans {
+		if plan.After.Role == "backend" {
+			derived = plan.After.ToolPolicySources
+		}
+	}
+	if len(derived) == 0 {
+		t.Fatal("no sources derived; the assertion would be vacuous")
+	}
+	if reflect.DeepEqual(recorded, derived) {
+		t.Skip("origins produced identical bytes here; the mixed case is not reproducible on this host")
+	}
+
+	// THE POINT: different bytes, same files, and therefore NO drift -- from a
+	// team read through EITHER origin. This is what makes shipping divergent
+	// recordings safe instead of lucky, and it is the #539 loop being impossible.
+	for _, origin := range []struct{ name, dir string }{
+		{"implicit cwd origin", implicitOrigin},
+		{"explicit --project origin", explicitOrigin},
+	} {
+		t.Run(origin.name, func(t *testing.T) {
+			cfg, readErr := team.Read(origin.dir)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			member := team.Member{}
+			for _, m := range cfg.Members {
+				if m.Role == "backend" {
+					member = m
+				}
+			}
+			// Spawn's predicate, which is what refused the launch in #539.
+			if err := validateMemberToolPolicyDrift(cfg, member); err != nil {
+				t.Fatalf("mixed-origin recording read as drift from %s: %v", origin.name, err)
+			}
+			// And readiness must agree, so this cannot pass one and fail the other.
+			if err := validateMemberToolPolicy(cfg, member, toolPolicyCheckRecordOnly); err != nil {
+				t.Fatalf("readiness rejected a mixed-origin recording from %s: %v", origin.name, err)
+			}
+		})
 	}
 }

@@ -37,13 +37,13 @@ import (
 // comparison, not of the stored bytes: a symlinked path and its target are the
 // same location and must compare equal however each side was recorded.
 //
-// ONE DELIBERATE EXCEPTION: tool_policy_sources records canonically. That field
-// exists only to be compared, is never echoed back as an operator-chosen path,
-// and has two writers that derive the project from different origins (cwd vs
-// team.json), so absolute-only recording made them disagree byte-for-byte. See
-// the comment at its assignment in team_overlay.go. Prefer the record/compare
-// split for anything new; do not widen this exception without the same
-// justification.
+// There are NO exceptions to this split. A canonical-at-record exception was
+// attempted for tool_policy_sources and reverted: that field turned out to be
+// printed by the overlay plan output, exported in JSON envelopes, and digested
+// as part of team.json for prepared-run readiness, so canonicalizing it rewrote
+// operator-visible paths and digest inputs. When two writers disagree on a
+// recorded path, fix the ORIGIN they derive it from; do not collapse
+// representations at record time.
 
 // absoluteFilesystemPath is the RECORDING normalization: tilde-expanded,
 // absolute, and lexically cleaned. This is what turns `--project .` into a
