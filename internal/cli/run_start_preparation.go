@@ -385,8 +385,24 @@ func buildRunPreparationProposal(in runPreparationProposalInput) (runPreparation
 		for _, file := range policyFiles[roleID] {
 			policyEvidence += fmt.Sprintf(" planned_%s=%s", file.Action, file.Path)
 		}
+		// #539: readiness must fail closed on the same condition spawn rejects.
+		// This row used to be an unconditional "ready", which is exactly how a
+		// member could be reported ready here and then refused at spawn for tool
+		// policy drift. Readiness and spawn now call validateMemberToolPolicy.
+		//
+		// The scope differs only where it must: when this preparation plans to
+		// write the role's policy files, those files do not exist yet, so the
+		// on-disk materialization clause is skipped. Everything the record alone
+		// determines -- including the capability-source-set comparison that
+		// produced #539 -- is enforced in both scopes.
+		policyScope := toolPolicyCheckFull
 		if len(policyFiles[roleID]) == 0 {
 			policyEvidence += " preserve_effective_policy"
+		} else {
+			policyScope = toolPolicyCheckRecordOnly
+		}
+		if err := validateMemberToolPolicy(tm, member, policyScope); err != nil {
+			return proposal, fmt.Errorf("tool_policy blocker [drifted] %s: %w", roleID, err)
 		}
 		add("tool_policy:"+roleID, "ready", policyEvidence, "")
 		agentDir := filepath.Join(root, "agents", handle)
@@ -579,4 +595,34 @@ func printRunPreparationProposal(proposal runPreparationProposal) {
 		fmt.Printf("  %-24s %-8s %s\n", row.Artifact, row.Status, row.Evidence)
 	}
 	fmt.Println("Proposal only. No profile, brief, rules, role, policy, manifest, mailbox, or pane was created.")
+}
+
+// preparationRollbackGuidance explains what the transactional rollback did to the
+// profile, and therefore which remedy is actually runnable now.
+//
+// #538 F3: which advice is TRUE depends on whether THIS run created the profile:
+//
+//   - created: rollback leaves no profile, so `team member update` and
+//     `team shared-cwd-exception set` have nothing to act on and the fix must be
+//     applied at creation time.
+//   - pre-existing: the profile is still there, those commands work as printed,
+//     and `new profile NAME` would fail because it already exists.
+//
+// The flag comes from preflight's pre-run observation, NOT from the preparation
+// snapshot. An earlier version derived it from the snapshot and was wrong in both
+// directions: the profile was not in that snapshot set at all (so every case got
+// the fallback wording), and even if it had been, the roster is created BEFORE
+// preparation snapshots, so a freshly created profile would have looked
+// pre-existing. Emitting the wrong branch here is worse than silence: it sends the
+// operator to a command that cannot work while telling them the working one is
+// unavailable.
+func preparationRollbackGuidance(profileExistedBeforeRun bool) string {
+	if profileExistedBeforeRun {
+		return "Preparation is transactional, so this profile is unchanged from its pre-preparation state; " +
+			"it still exists and the blocked row's commands apply to it as printed. Fix the reported rows, then re-run --prepare."
+	}
+	return "Preparation is transactional and this run CREATED the profile, so the rollback removed it: " +
+		"commands that modify an existing profile (for example 'amq-squad team shared-cwd-exception set') " +
+		"have nothing to act on yet. Apply the blocked row's fix at creation time instead " +
+		"('amq-squad new profile NAME --cwd \"role=path,...\"' or 'amq-squad new profile NAME --shared-cwd-exception \"<reason>\"'), then re-run --prepare."
 }

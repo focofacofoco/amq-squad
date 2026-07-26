@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/omriariav/amq-squad/v2/internal/team"
@@ -484,7 +485,20 @@ func buildGeneratedPolicyPlan(t team.Team, idx int, opts generatedToolPolicyOpti
 	}
 	after.ToolProfile = opts.Profile
 	after.ToolBlocklist = dedupeSortedStrings(block)
-	after.ToolPolicySources = dedupeSortedStrings(sources)
+	// #539: capability sources are recorded ABSOLUTE, never symlink-resolved,
+	// per the record/compare contract in pathnorm.go.
+	//
+	// Recording canonically was tried and reverted: ToolPolicySources is NOT
+	// compare-only. It is printed by the overlay plan output (see the `sources:`
+	// field above), exported in the team/plan JSON envelopes, and part of the
+	// team.json bytes digested for prepared-run readiness. Canonicalizing here
+	// would therefore rewrite operator-visible logical paths and digest inputs,
+	// which is precisely what the record/compare split exists to prevent.
+	//
+	// Byte-identity across writers comes from both deriving sources from the
+	// SAME project origin (t.Project, normalized on the way in by the --project
+	// choke point), not from collapsing representations at record time.
+	after.ToolPolicySources = absoluteFilesystemPaths(sources)
 	return generatedPolicyPlan{Index: idx, Force: opts.Force, Before: before, After: after, Files: files}, nil
 }
 
@@ -566,32 +580,221 @@ func discoverCodexCapabilities(path string) ([]string, bool, error) {
 	for _, raw := range strings.Split(string(b), "\n") {
 		line := strings.TrimSpace(raw)
 		if strings.HasPrefix(line, "mcp_servers") || strings.HasPrefix(line, "plugins") {
-			return nil, true, fmt.Errorf("unsupported inline Codex capability syntax in %s: %s", path, line)
+			rewrite := "[mcp_servers.github]"
+			if strings.HasPrefix(line, "plugins") {
+				rewrite = "[plugins.example]"
+			}
+			return nil, true, fmt.Errorf("unsupported inline or dotted Codex capability syntax in %s: %s; use a %s table header", path, line, rewrite)
 		}
 		if !strings.HasPrefix(line, "[") {
 			continue
 		}
-		kind := ""
-		prefix := ""
-		switch {
-		case strings.HasPrefix(line, "[mcp_servers."):
-			kind, prefix = "mcp:", "[mcp_servers."
-		case strings.HasPrefix(line, "[plugins."):
-			kind, prefix = "plugin:", "[plugins."
-		default:
+		entry, recognized, parseErr := parseCodexCapabilityTable(line)
+		if parseErr != nil {
+			return nil, true, fmt.Errorf("unsupported Codex capability table syntax in %s: %s: %w", path, line, parseErr)
+		}
+		if !recognized {
 			continue
 		}
-		if !strings.HasSuffix(line, "]") {
-			return nil, true, fmt.Errorf("unsupported Codex capability table syntax in %s: %s", path, line)
-		}
-		name := strings.TrimSuffix(strings.TrimPrefix(line, prefix), "]")
-		name = strings.Trim(strings.TrimSpace(name), "\"")
-		if name == "" || strings.Contains(name, ".") {
-			return nil, true, fmt.Errorf("unsupported Codex capability name syntax in %s: %s", path, line)
-		}
-		entries = append(entries, kind+name)
+		entries = append(entries, entry)
 	}
 	return dedupeSortedStrings(entries), true, nil
+}
+
+// parseCodexCapabilityTable returns the capability represented by a Codex
+// config table. A capability is the second TOML key segment; deeper segments
+// configure that capability and must not be mistaken for new capability names.
+func parseCodexCapabilityTable(line string) (string, bool, error) {
+	possibleCapability := looksLikeCodexCapabilityTable(line)
+	header, err := stripTOMLTrailingComment(strings.TrimSpace(line))
+	if err != nil {
+		if possibleCapability {
+			return "", true, err
+		}
+		return "", false, nil
+	}
+	header = strings.TrimSpace(header)
+	if !strings.HasPrefix(header, "[") {
+		return "", false, nil
+	}
+	if strings.HasPrefix(header, "[[") {
+		if possibleCapability {
+			return "", true, fmt.Errorf("array tables are not supported")
+		}
+		return "", false, nil
+	}
+	if !strings.HasSuffix(header, "]") {
+		if possibleCapability {
+			return "", true, fmt.Errorf("missing closing bracket")
+		}
+		return "", false, nil
+	}
+	parts, err := parseTOMLDottedKey(strings.TrimSpace(header[1 : len(header)-1]))
+	if err != nil {
+		if possibleCapability {
+			return "", true, err
+		}
+		return "", false, nil
+	}
+	if len(parts) == 0 {
+		return "", false, nil
+	}
+	kind := ""
+	switch parts[0] {
+	case "mcp_servers":
+		kind = "mcp:"
+	case "plugins":
+		kind = "plugin:"
+	default:
+		return "", false, nil
+	}
+	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+		return "", true, fmt.Errorf("capability name is missing")
+	}
+	return kind + parts[1], true, nil
+}
+
+func looksLikeCodexCapabilityTable(line string) bool {
+	line = strings.TrimSpace(line)
+	for _, prefix := range []string{
+		"[mcp_servers", "[plugins",
+		"[\"mcp_servers\"", "[\"plugins\"",
+		"['mcp_servers'", "['plugins'",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripTOMLTrailingComment removes a TOML comment marker only when it occurs
+// outside quoted keys. This is enough to isolate a table header without
+// confusing # characters that are part of a quoted capability name.
+func stripTOMLTrailingComment(line string) (string, error) {
+	inDouble, inSingle, escaped := false, false, false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case inDouble:
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inDouble = false
+			}
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case c == '"':
+			inDouble = true
+		case c == '\'':
+			inSingle = true
+		case c == '#':
+			return strings.TrimSpace(line[:i]), nil
+		}
+	}
+	if inDouble || inSingle || escaped {
+		return "", fmt.Errorf("unterminated quoted key")
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func parseTOMLDottedKey(raw string) ([]string, error) {
+	var parts []string
+	for i := 0; ; {
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t') {
+			i++
+		}
+		if i >= len(raw) {
+			if len(parts) == 0 {
+				return nil, fmt.Errorf("empty table header")
+			}
+			return parts, nil
+		}
+
+		var part string
+		switch raw[i] {
+		case '"':
+			start := i
+			i++
+			escaped := false
+			for i < len(raw) {
+				c := raw[i]
+				if escaped {
+					escaped = false
+					i++
+					continue
+				}
+				if c == '\\' {
+					escaped = true
+					i++
+					continue
+				}
+				if c == '"' {
+					i++
+					break
+				}
+				i++
+			}
+			if i > len(raw) || raw[i-1] != '"' || escaped {
+				return nil, fmt.Errorf("unterminated quoted key")
+			}
+			unquoted, err := strconv.Unquote(raw[start:i])
+			if err != nil {
+				return nil, fmt.Errorf("invalid quoted key: %w", err)
+			}
+			part = unquoted
+		case '\'':
+			i++
+			start := i
+			for i < len(raw) && raw[i] != '\'' {
+				i++
+			}
+			if i >= len(raw) {
+				return nil, fmt.Errorf("unterminated literal key")
+			}
+			part = raw[start:i]
+			i++
+		default:
+			start := i
+			for i < len(raw) && raw[i] != '.' && raw[i] != ' ' && raw[i] != '\t' {
+				c := raw[i]
+				if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+					(c >= '0' && c <= '9') || c == '_' || c == '-') {
+					return nil, fmt.Errorf("invalid bare key character %q", c)
+				}
+				i++
+			}
+			part = raw[start:i]
+		}
+		if part == "" {
+			return nil, fmt.Errorf("empty key segment")
+		}
+		parts = append(parts, part)
+
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t') {
+			i++
+		}
+		if i >= len(raw) {
+			return parts, nil
+		}
+		if raw[i] != '.' {
+			return nil, fmt.Errorf("unexpected character %q after key segment", raw[i])
+		}
+		i++
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t') {
+			i++
+		}
+		if i >= len(raw) {
+			return nil, fmt.Errorf("empty key segment")
+		}
+	}
 }
 
 func writeGeneratedPolicyRecovery(path string, plans []generatedPolicyPlan) error {
@@ -711,13 +914,11 @@ func discoverCodexMCPServers(path string) []string {
 	}
 	var out []string
 	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "[mcp_servers.") || !strings.HasSuffix(line, "]") {
+		entry, recognized, parseErr := parseCodexCapabilityTable(strings.TrimSpace(line))
+		if parseErr != nil || !recognized {
 			continue
 		}
-		name := strings.TrimSuffix(strings.TrimPrefix(line, "[mcp_servers."), "]")
-		name = strings.Trim(strings.TrimSpace(name), "\"")
-		if name != "" {
+		if name, ok := strings.CutPrefix(entry, "mcp:"); ok {
 			out = append(out, name)
 		}
 	}
@@ -945,10 +1146,43 @@ func validateMemberOverlayPaths(t team.Team, members []team.Member) error {
 	return nil
 }
 
+// toolPolicyCheckScope selects how much of the shared tool-policy predicate
+// applies at a given call site.
+//
+// #539 was an "accepted at readiness, dead at spawn" failure: readiness emitted
+// an unconditional `tool_policy:<role> ready` row while spawn ran a real check,
+// so the two could disagree. They now run the SAME predicate; the scope only
+// controls whether the on-disk materialization comparison is part of it, which
+// is the one clause that is meaningless before the policy files are written.
+type toolPolicyCheckScope int
+
+const (
+	// toolPolicyCheckFull validates the recorded capability-source set, the
+	// inherited-capability coverage, and that the materialized policy files
+	// match the audited effective policy. This is what spawn enforces, and what
+	// readiness enforces for a role whose policy is being preserved as-is.
+	toolPolicyCheckFull toolPolicyCheckScope = iota
+	// toolPolicyCheckRecordOnly validates everything that depends only on the
+	// member record plus the discoverable host/project config, and skips the
+	// materialization comparison. Readiness uses this for a role whose policy
+	// files this preparation is planning to write: those files do not exist yet,
+	// so comparing them would fail for a reason that is not drift. Every other
+	// clause -- including the capability-source-set comparison that produced
+	// #539 -- still applies and still fails closed.
+	toolPolicyCheckRecordOnly
+)
+
+// validateMemberToolPolicyDrift is the spawn-time entry point. It enforces the
+// full predicate, including materialization.
 func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
+	return validateMemberToolPolicy(t, m, toolPolicyCheckFull)
+}
+
+func validateMemberToolPolicy(t team.Team, m team.Member, scope toolPolicyCheckScope) error {
 	if m.ToolPolicySource() != "member_generated_profile" {
 		return nil
 	}
+	checkMaterialization := scope == toolPolicyCheckFull
 	var discovered, sources []string
 	switch normalizedAgentBinary(m.Binary) {
 	case "claude":
@@ -968,40 +1202,42 @@ func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
 		if err != nil {
 			return fmt.Errorf("member %s: tool policy drift/not-ready: %w", m.Role, err)
 		}
-		overlay := claudeSettingsOverlay{EnabledPlugins: map[string]bool{}, DisableAllHooks: m.ToolDisableAllHooks}
-		for _, entry := range m.ToolAllowlist {
-			if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
-				overlay.EnabledPlugins[id] = true
-			}
-		}
-		for _, entry := range m.ToolBlocklist {
-			if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
-				overlay.EnabledPlugins[id] = false
-			}
-		}
-		expectedSettings, marshalErr := json.MarshalIndent(overlay, "", "  ")
-		if marshalErr != nil {
-			return marshalErr
-		}
-		expectedSettings = append(expectedSettings, '\n')
-		for label, ref := range map[string]string{"settings": m.ToolConfig, "strict MCP": m.ToolMCPConfig} {
-			path := ref
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(m.EffectiveCWD(t.Project), path)
-			}
-			actual, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return fmt.Errorf("member %s: tool policy drift/not-ready: read Claude %s materialization: %w", m.Role, label, readErr)
-			}
-			expected := expectedSettings
-			if label == "strict MCP" {
-				expected, marshalErr = renderClaudeStrictMCP(m.ToolAllowlist, defs)
-				if marshalErr != nil {
-					return marshalErr
+		if checkMaterialization {
+			overlay := claudeSettingsOverlay{EnabledPlugins: map[string]bool{}, DisableAllHooks: m.ToolDisableAllHooks}
+			for _, entry := range m.ToolAllowlist {
+				if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
+					overlay.EnabledPlugins[id] = true
 				}
 			}
-			if string(actual) != string(expected) {
-				return fmt.Errorf("member %s: tool policy drift/not-ready: Claude %s materialization differs from audited effective policy", m.Role, label)
+			for _, entry := range m.ToolBlocklist {
+				if id, ok := strings.CutPrefix(entry, "plugin:"); ok {
+					overlay.EnabledPlugins[id] = false
+				}
+			}
+			expectedSettings, marshalErr := json.MarshalIndent(overlay, "", "  ")
+			if marshalErr != nil {
+				return marshalErr
+			}
+			expectedSettings = append(expectedSettings, '\n')
+			for label, ref := range map[string]string{"settings": m.ToolConfig, "strict MCP": m.ToolMCPConfig} {
+				path := ref
+				if !filepath.IsAbs(path) {
+					path = filepath.Join(m.EffectiveCWD(t.Project), path)
+				}
+				actual, readErr := os.ReadFile(path)
+				if readErr != nil {
+					return fmt.Errorf("member %s: tool policy drift/not-ready: read Claude %s materialization: %w", m.Role, label, readErr)
+				}
+				expected := expectedSettings
+				if label == "strict MCP" {
+					expected, marshalErr = renderClaudeStrictMCP(m.ToolAllowlist, defs)
+					if marshalErr != nil {
+						return marshalErr
+					}
+				}
+				if string(actual) != string(expected) {
+					return fmt.Errorf("member %s: tool policy drift/not-ready: Claude %s materialization differs from audited effective policy", m.Role, label)
+				}
 			}
 		}
 	case "codex":
@@ -1019,17 +1255,19 @@ func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
 				sources = append(sources, path)
 			}
 		}
-		paths := codexConfigPaths(m.ToolArgs())
-		if len(paths) == 0 {
-			return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile path is unresolved", m.Role)
-		}
-		actual, err := os.ReadFile(paths[0])
-		if err != nil {
-			return fmt.Errorf("member %s: tool policy drift/not-ready: %w", m.Role, err)
-		}
-		expected := renderCodexToolProfile(m.EffectiveToolProfile(), m.ToolAllowlist, m.ToolBlocklist)
-		if string(actual) != string(expected) {
-			return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile content differs from audited effective policy", m.Role)
+		if checkMaterialization {
+			paths := codexConfigPaths(m.ToolArgs())
+			if len(paths) == 0 {
+				return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile path is unresolved", m.Role)
+			}
+			actual, err := os.ReadFile(paths[0])
+			if err != nil {
+				return fmt.Errorf("member %s: tool policy drift/not-ready: %w", m.Role, err)
+			}
+			expected := renderCodexToolProfile(m.EffectiveToolProfile(), m.ToolAllowlist, m.ToolBlocklist)
+			if string(actual) != string(expected) {
+				return fmt.Errorf("member %s: tool policy drift/not-ready: selected Codex profile content differs from audited effective policy", m.Role)
+			}
 		}
 	}
 	covered := map[string]bool{}
@@ -1041,8 +1279,20 @@ func validateMemberToolPolicyDrift(t team.Team, m team.Member) error {
 			return fmt.Errorf("member %s: tool policy drift/not-ready: inherited capability %q is neither enabled nor revoked; regenerate policy", m.Role, entry)
 		}
 	}
-	if !reflect.DeepEqual(dedupeSortedStrings(sources), dedupeSortedStrings(m.ToolPolicySources)) {
-		return fmt.Errorf("member %s: tool policy drift/not-ready: capability source set changed from %v to %v; regenerate policy", m.Role, m.ToolPolicySources, sources)
+	// #539: compare capability sources as a canonicalized set. A stored relative
+	// path that names the same file as a discovered absolute one is not drift.
+	// Canonicalizing both sides also removes the ordering artifact, where a
+	// leading "." sorted differently from the absolute form and made an
+	// identical three-file set compare unequal.
+	//
+	// Anchoring is to t.Project, NOT to the process working directory: a
+	// team.json written by <=v2.24.0 still holds the project-relative
+	// ".claude/settings.local.json", and this check must reach the same verdict
+	// whether it runs from inside the repo or from anywhere else with --project.
+	recorded := canonicalFilesystemPathsIn(t.Project, m.ToolPolicySources)
+	discoveredSources := canonicalFilesystemPathsIn(t.Project, sources)
+	if !reflect.DeepEqual(discoveredSources, recorded) {
+		return fmt.Errorf("member %s: tool policy drift/not-ready: capability source set changed from %v to %v; regenerate policy", m.Role, recorded, discoveredSources)
 	}
 	return nil
 }
