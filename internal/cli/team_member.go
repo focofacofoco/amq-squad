@@ -197,6 +197,12 @@ func runTeamMemberAdd(args []string) error {
 	claudeArgsRaw := fs.String("claude-args", "", "extra Claude args for this member")
 	codexArgsRaw := fs.String("codex-args", "", "extra Codex args for this member")
 	actorModeFlag := fs.String("actor-mode", team.ActorModeReview, "actor execution capability: review (default, read-only) or implementation")
+	// #538: worktree_isolation readiness tells the operator to give each
+	// mutation-capable member its own working directory. That was reachable only
+	// at roster creation (team init / new profile --cwd), so fixing an EXISTING
+	// roster meant hand-editing team.json -- the exact thing the CLI exists to
+	// prevent. This is the post-creation path.
+	cwdFlag := fs.String("cwd", "", "working directory (isolated worktree) for this member; 2+ mutation-capable members sharing one directory blocks worktree_isolation readiness")
 	projectFlag := fs.String("project", "", "project/team-home directory (default: cwd)")
 	profileFlag := fs.String("profile", "", "team profile to mutate (default: default profile)")
 	launchFlag := fs.Bool("launch", false, "after adding, launch pending members with resume --exec")
@@ -289,6 +295,13 @@ func runTeamMemberAdd(args []string) error {
 			ActorMode:   actorMode,
 			SpawnOrigin: origin,
 			SpawnDepth:  depth,
+		}
+		if flagWasSet(fs, "cwd") {
+			resolved, cwdErr := memberCWDOverride(t.Project, *cwdFlag)
+			if cwdErr != nil {
+				return team.Member{}, cwdErr
+			}
+			added.CWD = resolved
 		}
 		if bin == "claude" {
 			added.ClaudeArgs = claudeArgs
@@ -441,6 +454,10 @@ func runTeamMemberUpdate(args []string) error {
 	claudeArgsRaw := fs.String("claude-args", "", "replace this member's extra Claude args (claude members only)")
 	codexArgsRaw := fs.String("codex-args", "", "replace this member's extra Codex args (codex members only)")
 	actorModeFlag := fs.String("actor-mode", "", "new actor execution capability: review or implementation")
+	// #538: the post-creation path for worktree_isolation. `--cwd ""` clears the
+	// override and returns the member to the team-home, so the flag can undo
+	// itself rather than being a one-way door.
+	cwdFlag := fs.String("cwd", "", "new working directory (isolated worktree) for this member; empty string clears the override")
 	projectFlag := fs.String("project", "", "project/team-home directory (default: cwd)")
 	profileFlag := fs.String("profile", "", "team profile to mutate (default: default profile)")
 	dryRunFlag := fs.Bool("dry-run", false, "preview the update without mutating")
@@ -451,7 +468,7 @@ func runTeamMemberUpdate(args []string) error {
 	if *noSessionPinFlag && flagWasSet(fs, "session") {
 		return usageErrorf("use either --session or --no-session-pin, not both")
 	}
-	changing := []string{"handle", "session", "no-session-pin", "model", "effort", "claude-args", "codex-args", "actor-mode"}
+	changing := []string{"handle", "session", "no-session-pin", "model", "effort", "claude-args", "codex-args", "actor-mode", "cwd"}
 	changed := false
 	for _, name := range changing {
 		if flagWasSet(fs, name) {
@@ -529,6 +546,13 @@ func runTeamMemberUpdate(args []string) error {
 		}
 		if flagWasSet(fs, "actor-mode") {
 			m.ActorMode = strings.ToLower(strings.TrimSpace(*actorModeFlag))
+		}
+		if flagWasSet(fs, "cwd") {
+			resolved, cwdErr := memberCWDOverride(t.Project, *cwdFlag)
+			if cwdErr != nil {
+				return team.Member{}, team.Team{}, cwdErr
+			}
+			m.CWD = resolved
 		}
 		if flagWasSet(fs, "effort") {
 			if m.Binary == "claude" {
@@ -793,4 +817,29 @@ func agentUpHint(m team.Member) string {
 		fmt.Fprintf(&b, " --codex-args %q", strings.Join(m.CodexArgs, " "))
 	}
 	return b.String()
+}
+
+// memberCWDOverride resolves a --cwd value the same way roster creation does
+// (team init, internal/cli/team.go): expand and absolutize, then treat a value
+// equal to the team-home as "no override" so the member record stays clean
+// rather than pinning the default explicitly.
+//
+// #538: keeping the create path and the post-creation path on ONE helper is what
+// stops `new profile --cwd` and `team member add|update --cwd` from drifting into
+// two different meanings for the same flag. That drift is the disease this
+// milestone keeps finding, so the shared helper is the point, not an incidental
+// tidy-up.
+func memberCWDOverride(projectDir, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	abs, err := expandPath(raw)
+	if err != nil {
+		return "", fmt.Errorf("resolve --cwd %q: %w", raw, err)
+	}
+	if sameFilesystemPath(abs, projectDir) {
+		return "", nil
+	}
+	return abs, nil
 }

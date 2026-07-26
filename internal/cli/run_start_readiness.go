@@ -2035,7 +2035,13 @@ func prepareRunArtifacts(project, profile, session, shape, stagedRaw, goal, goal
 	}
 	result = calculateRunReadinessWithContext(project, profile, session, context)
 	if !result.Ready {
-		return result, fmt.Errorf("artifact readiness failed after preparation")
+		// #538: preparation is transactional, so this failure rolls back the
+		// profile it created. Operators previously read a blocked row telling them
+		// to run `team shared-cwd-exception set`, tried it, and hit "no profile" --
+		// with nothing explaining that preparation had just removed the profile
+		// they were told to modify. Name that explicitly, and point at the
+		// creation-time forms, which do not depend on a profile existing first.
+		return result, fmt.Errorf("artifact readiness failed after preparation. Preparation is transactional, so any profile it created has been rolled back: commands that modify an EXISTING profile (for example 'amq-squad team shared-cwd-exception set') have nothing to act on yet. Apply the blocked row's fix at creation time instead -- the 'amq-squad new profile NAME --...' forms it names -- then re-run --prepare")
 	}
 	committed = true
 	return result, nil
