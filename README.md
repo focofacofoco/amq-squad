@@ -459,16 +459,24 @@ amq-squad rm issue-96
 
 `context` considers only verified-live launch records at
 `live_launch_record` precedence. `stop` preserves a resumable record but marks
-it non-live. `context cleanup` is the explicit recovery path for older orphaned
-records: it previews project-matching non-live records, requires confirmation,
-and rechecks each record under its writer lock before removal. A record that
-became live or changed after preview is always preserved.
+it non-live. PID-backed identity requires the recorded binary and a process
+birth time compatible with the launch record; pane-backed identity requires
+the exact `amq:<session>:<role>` title, so reused PIDs and pane numbers cannot
+silently restore stale context. `context cleanup` is the explicit recovery path
+for older orphaned records: it previews project-matching records that the
+shared status/resume liveness classifier finds non-live, requires confirmation,
+and rechecks each record under its writer lock before removal. Wake, presence,
+and replacement-pane liveness all preserve a record, as does any record that
+became live or changed after preview.
 
 `doctor` has three severities: `ok`, `warn`, and `fail`. Only `fail` makes the
 command exit non-zero; warnings remain visible readiness notes. A shared Git
 index is therefore a failure only when two or more affected members are live.
 Stopped or unplanned members sharing an index produce a warning with the exact
-`worktree plan` / `worktree materialize` remedy.
+`worktree plan` / `worktree materialize` remedy. Doctor uses the same
+replacement-pane discovery as status; if a member's runtime environment cannot
+be resolved, the affected role and resolution error remain visible in the
+diagnostic detail.
 
 Coordination:
 

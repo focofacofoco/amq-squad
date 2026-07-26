@@ -99,9 +99,10 @@ var (
 	contextPIDAlive          = procinfo.Alive
 	contextProcessMatch      = procinfo.Match
 	contextProcessTTY        = procinfo.TTY
-	contextPaneAlive         = func(paneID string) bool {
-		_, ok := statusPaneInspector(paneID)
-		return ok
+	contextProcessStartTime  = procinfo.StartTime
+	contextPaneTitle         = func(paneID string) (string, bool) {
+		pane, ok := statusPaneInspector(paneID)
+		return pane.Title, ok
 	}
 )
 
@@ -456,7 +457,7 @@ func resolveCanonicalContext(opts contextResolveOptions) (contextResolution, err
 	for _, live := range launches {
 		profile := squadnamespace.NormalizeProfile(live.Record.TeamProfile)
 		detail := live.Path
-		if pane := strings.TrimSpace(os.Getenv("TMUX_PANE")); pane != "" && live.Record.Tmux != nil && live.Record.Tmux.PaneID == pane {
+		if pane := strings.TrimSpace(os.Getenv("TMUX_PANE")); pane != "" && contextLaunchRecordPaneIdentityMatches(live.Record, pane) {
 			detail += "; current TMUX_PANE match"
 		}
 		addTupleContextCandidate(&candidates, "profile", contextSourceLaunch, profile, detail, profile, live.Record.Session)
@@ -860,12 +861,20 @@ func contextLaunchRecordRuntimeLive(rec launch.Record, currentPane string) bool 
 	if rec.AgentPID > 0 && contextPIDAlive(rec.AgentPID) {
 		binary := strings.TrimSpace(rec.Binary)
 		if binary == "" || contextProcessMatch(rec.AgentPID, agentProcessMatcher(binary)) {
-			recordedTTY := strings.TrimSpace(rec.AgentTTY)
-			if recordedTTY == "" || recordedTTY == "unknown" {
-				return true
+			reusedPID := false
+			if !rec.StartedAt.IsZero() && contextProcessStartTime != nil {
+				if processStartedAt, ok := contextProcessStartTime(rec.AgentPID); ok && processStartedAt.After(rec.StartedAt) {
+					reusedPID = true
+				}
 			}
-			if observedTTY, ok := contextProcessTTY(rec.AgentPID); !ok || sameResolvedDir(recordedTTY, observedTTY) {
-				return true
+			if !reusedPID {
+				recordedTTY := strings.TrimSpace(rec.AgentTTY)
+				if recordedTTY == "" || recordedTTY == "unknown" {
+					return true
+				}
+				if observedTTY, ok := contextProcessTTY(rec.AgentPID); !ok || sameResolvedDir(recordedTTY, observedTTY) {
+					return true
+				}
 			}
 		}
 	}
@@ -874,10 +883,29 @@ func contextLaunchRecordRuntimeLive(rec launch.Record, currentPane string) bool 
 	}
 	paneID := strings.TrimSpace(rec.Tmux.PaneID)
 	// Managed stop intentionally preserves panes so their final output remains
-	// readable; a leftover managed pane is therefore not live-launch evidence.
-	// The current pane remains direct identity evidence, while an external
-	// operator-owned record may use its independently live pane.
-	return paneID == strings.TrimSpace(currentPane) || (rec.External && contextPaneAlive(paneID))
+	// readable; a leftover or reused pane ID is not identity evidence. Both the
+	// current-pane and external-record paths require the launcher's exact
+	// amq:<session>:<role> title, so tmux pane-number reuse cannot win context.
+	if paneID != strings.TrimSpace(currentPane) && !rec.External {
+		return false
+	}
+	return contextLaunchRecordPaneIdentityMatches(rec, paneID)
+}
+
+func contextLaunchRecordPaneIdentityMatches(rec launch.Record, paneID string) bool {
+	if rec.Tmux == nil || strings.TrimSpace(rec.Tmux.PaneID) != strings.TrimSpace(paneID) {
+		return false
+	}
+	role := strings.TrimSpace(rec.Role)
+	if role == "" {
+		role = strings.TrimSpace(rec.Handle)
+	}
+	session := strings.TrimSpace(rec.Session)
+	if role == "" || session == "" {
+		return false
+	}
+	title, ok := contextPaneTitle(paneID)
+	return ok && strings.TrimSpace(title) == paneTitleToken(session, role)
 }
 
 func launchRecordMatchesProject(rec launch.Record, projectDir string) bool {
@@ -1124,7 +1152,7 @@ type contextCleanupDeps struct {
 	Scan   func(string) ([]launch.Entry, error)
 	In     io.Reader
 	Out    io.Writer
-	IsLive func(launch.Record, string) bool
+	IsLive func(launch.Entry, string) bool
 }
 
 type contextCleanupCandidate struct {
@@ -1135,8 +1163,39 @@ type contextCleanupCandidate struct {
 func runContextCleanup(args []string) error {
 	return runContextCleanupWithDeps(args, contextCleanupDeps{
 		Scan: contextScanLaunchEntries, In: os.Stdin, Out: os.Stdout,
-		IsLive: contextLaunchRecordRuntimeLive,
+		IsLive: contextLaunchEntryRuntimeLive,
 	})
+}
+
+// contextLaunchEntryRuntimeLive delegates cleanup safety to the same canonical
+// classifier used by status and resume. In particular, a dead launch PID does
+// not make a record removable while wake, presence, or replacement-pane
+// evidence still proves the member live.
+func contextLaunchEntryRuntimeLive(entry launch.Entry, _ string) bool {
+	rec := entry.Record
+	root := strings.TrimSpace(rec.Root)
+	if root != "" {
+		root = absoluteAMQRoot(rec.TeamHome, root)
+	} else {
+		root = filepath.Dir(filepath.Dir(entry.AgentDir))
+	}
+	handle := strings.TrimSpace(rec.Handle)
+	if handle == "" {
+		handle = filepath.Base(entry.AgentDir)
+	}
+	role := strings.TrimSpace(rec.Role)
+	if role == "" {
+		role = handle
+	}
+	cwd := strings.TrimSpace(rec.CWD)
+	if cwd == "" {
+		cwd = strings.TrimSpace(rec.TeamHome)
+	}
+	live := classifyAgentLiveness(
+		entry.AgentDir, root, squadnamespace.NormalizeProfile(rec.TeamProfile),
+		handle, role, rec.Binary, rec.Session, cwd, defaultDuplicateLaunchProbe,
+	)
+	return live.Live()
 }
 
 func runContextCleanupWithDeps(args []string, deps contextCleanupDeps) error {
@@ -1175,7 +1234,7 @@ record writer lock; a live or changed record is preserved.
 		deps.In = os.Stdin
 	}
 	if deps.IsLive == nil {
-		deps.IsLive = contextLaunchRecordRuntimeLive
+		deps.IsLive = contextLaunchEntryRuntimeLive
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -1196,7 +1255,7 @@ record writer lock; a live or changed record is preserved.
 	currentPane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
 	var candidates []contextCleanupCandidate
 	for _, entry := range entries {
-		if !launchRecordMatchesProject(entry.Record, projectDir) || deps.IsLive(entry.Record, currentPane) {
+		if !launchRecordMatchesProject(entry.Record, projectDir) || deps.IsLive(entry, currentPane) {
 			continue
 		}
 		row := contextCleanupRow{
@@ -1280,7 +1339,7 @@ func confirmContextCleanup(out io.Writer, in io.Reader) bool {
 	return answer == "y" || answer == "yes"
 }
 
-func removeContextCleanupCandidate(candidate contextCleanupCandidate, currentPane string, isLive func(launch.Record, string) bool) (bool, string, error) {
+func removeContextCleanupCandidate(candidate contextCleanupCandidate, currentPane string, isLive func(launch.Entry, string) bool) (bool, string, error) {
 	removed := false
 	detail := ""
 	err := launch.WithRecordLock(candidate.Entry.AgentDir, func() error {
@@ -1297,7 +1356,7 @@ func removeContextCleanupCandidate(candidate contextCleanupCandidate, currentPan
 			detail = "record changed after preview"
 			return nil
 		}
-		if isLive(current, currentPane) {
+		if isLive(launch.Entry{Record: current, AgentDir: candidate.Entry.AgentDir, Source: candidate.Entry.Source}, currentPane) {
 			detail = "record became live after preview"
 			return nil
 		}

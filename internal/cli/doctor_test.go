@@ -13,6 +13,7 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	"github.com/omriariav/amq-squad/v2/internal/rules"
 	"github.com/omriariav/amq-squad/v2/internal/team"
+	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 	"github.com/omriariav/amq-squad/v2/internal/worktreeplan"
 )
 
@@ -61,10 +62,15 @@ func TestDoctorSharedIndexCollisionIsStateAware(t *testing.T) {
 
 	oneLive := diagnosticFor([]statusRecord{
 		{Role: "one", Status: statusStateLive},
-		{Role: "two", Status: statusStateStale},
+		{Role: "two", Status: statusStateStale, Detail: "runtime resolution for role two failed: synthetic env error"},
 	})
 	if oneLive.Status != worktreeplan.DiagnosticWarn {
 		t.Fatalf("one-live collision = %+v, want warn", oneLive)
+	}
+	for _, want := range []string{"role two", "synthetic env error"} {
+		if !strings.Contains(oneLive.Detail, want) {
+			t.Fatalf("runtime uncertainty missing %q: %+v", want, oneLive)
+		}
 	}
 
 	bothLive := diagnosticFor([]statusRecord{
@@ -73,6 +79,53 @@ func TestDoctorSharedIndexCollisionIsStateAware(t *testing.T) {
 	})
 	if bothLive.Status != worktreeplan.DiagnosticFail || !strings.Contains(bothLive.Detail, "while live") {
 		t.Fatalf("live collision = %+v, want fail", bothLive)
+	}
+}
+
+func TestDoctorDiscoversLiveReplacementPanesForSharedIndexCollision(t *testing.T) {
+	base := setupFakeAMQSessionRoots(t)
+	repo := seedReviewGitRepo(t)
+	const session = "replacement-live"
+	members := []team.Member{
+		{Role: "one", Handle: "one", Binary: "codex", Session: session},
+		{Role: "two", Handle: "two", Binary: "codex", Session: session},
+	}
+	if err := team.WriteProfile(repo, team.DefaultProfile, team.Team{Project: repo, Members: members}); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, session)
+	for i, member := range members {
+		agentDir := filepath.Join(root, "agents", member.Handle)
+		if err := launch.Write(agentDir, launch.Record{
+			TeamHome: repo, TeamProfile: team.DefaultProfile, Session: session,
+			Role: member.Role, Handle: member.Handle, Root: root, CWD: repo,
+			Binary: member.Binary, AgentPID: 900000 + i, StartedAt: time.Now().Add(-time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousLister := statusPaneLister
+	statusPaneLister = func() ([]tmuxpane.TmuxPane, error) {
+		return []tmuxpane.TmuxPane{
+			{Session: session, Window: "0", Pane: "1", Command: "codex", CWD: repo, Title: "amq:" + session + ":one"},
+			{Session: session, Window: "0", Pane: "2", Command: "codex", CWD: repo, Title: "amq:" + session + ":two"},
+		}, nil
+	}
+	t.Cleanup(func() { statusPaneLister = previousLister })
+
+	checks := doctorCheckWorktrees(doctorExecution{
+		ProjectDir: repo, Profile: team.DefaultProfile,
+		WorktreeDiagnostics: defaultDoctorWorktreeDiagnostics,
+	}, session)
+	var collision doctorCheck
+	for _, check := range checks {
+		if check.Kind == "shared-index-collision" {
+			collision = check
+			break
+		}
+	}
+	if collision.Status != doctorFail || !strings.Contains(collision.Detail, "one,two share") || !strings.Contains(collision.Detail, "while live") {
+		t.Fatalf("replacement-live shared index collision = %+v, want fail", collision)
 	}
 }
 

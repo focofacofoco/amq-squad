@@ -645,6 +645,7 @@ func defaultDoctorWorktreeDiagnostics(t team.Team, profile, session string) ([]w
 // recursively attaching worktree diagnostics back into doctor.
 func doctorRuntimeRows(t team.Team, profile, session string, probe duplicateLaunchProbe) []statusRecord {
 	var rows []statusRecord
+	replacement := newBatchReplacementPaneResolver()
 	for _, member := range orderedTeamMembers(t.Members) {
 		if team.EffectiveActorMode(t, member) != team.ActorModeImplementation {
 			continue
@@ -652,7 +653,10 @@ func doctorRuntimeRows(t team.Team, profile, session string, probe duplicateLaun
 		cwd := member.EffectiveCWD(t.Project)
 		env, err := resolveAMQEnvForTeamProfile(cwd, profile, session, member.Handle)
 		if err != nil {
-			rows = append(rows, statusRecord{Role: member.Role, Status: statusStateStale})
+			rows = append(rows, statusRecord{
+				Role: member.Role, Status: statusStateStale,
+				Detail: fmt.Sprintf("runtime resolution for role %s failed: %v", member.Role, err),
+			})
 			continue
 		}
 		root := absoluteAMQRoot(cwd, env.Root)
@@ -662,7 +666,7 @@ func doctorRuntimeRows(t team.Team, profile, session string, probe duplicateLaun
 		}
 		live := classifyAgentLivenessWithReplacementResolver(
 			filepath.Join(root, "agents", handle), root, profile, handle,
-			member.Role, member.Binary, session, cwd, probe, nil,
+			member.Role, member.Binary, session, cwd, probe, replacement,
 		)
 		rows = append(rows, statusRecord{Role: member.Role, Status: live.Status})
 	}
@@ -674,9 +678,13 @@ func stateAwareSharedIndexDiagnostics(inspection worktreeplan.Inspection, rows [
 		return inspection.Diagnostics
 	}
 	liveRoles := map[string]bool{}
+	var runtimeUncertainty []string
 	for _, row := range rows {
 		if row.Status == statusStateLive || row.Status == statusStateWakeLive {
 			liveRoles[strings.ToLower(strings.TrimSpace(row.Role))] = true
+		}
+		if strings.TrimSpace(row.Detail) != "" {
+			runtimeUncertainty = append(runtimeUncertainty, strings.TrimSpace(row.Detail))
 		}
 	}
 	allByIndex := map[string][]string{}
@@ -706,6 +714,10 @@ func stateAwareSharedIndexDiagnostics(inspection worktreeplan.Inspection, rows [
 	if len(liveCollisions) > 0 {
 		replacement.Status = worktreeplan.DiagnosticFail
 		replacement.Detail = strings.Join(liveCollisions, "; ") + " while live; " + remedy
+	}
+	if len(runtimeUncertainty) > 0 {
+		sort.Strings(runtimeUncertainty)
+		replacement.Detail += "; runtime liveness uncertainty: " + strings.Join(runtimeUncertainty, "; ")
 	}
 	out := append([]worktreeplan.Diagnostic(nil), inspection.Diagnostics...)
 	for i := range out {

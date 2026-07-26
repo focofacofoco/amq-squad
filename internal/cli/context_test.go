@@ -72,18 +72,21 @@ func isolateCanonicalContextTest(t *testing.T, project string) {
 		}
 	}
 	previousScan, previousAlive := contextScanLaunchEntries, contextPIDAlive
-	previousMatch, previousTTY, previousPane := contextProcessMatch, contextProcessTTY, contextPaneAlive
+	previousMatch, previousTTY := contextProcessMatch, contextProcessTTY
+	previousStart, previousPaneTitle := contextProcessStartTime, contextPaneTitle
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) { return nil, nil }
 	contextPIDAlive = func(int) bool { return false }
 	contextProcessMatch = func(int, func(string) bool) bool { return false }
 	contextProcessTTY = func(int) (string, bool) { return "", false }
-	contextPaneAlive = func(string) bool { return false }
+	contextProcessStartTime = func(int) (time.Time, bool) { return time.Time{}, false }
+	contextPaneTitle = func(string) (string, bool) { return "", false }
 	t.Cleanup(func() {
 		contextScanLaunchEntries = previousScan
 		contextPIDAlive = previousAlive
 		contextProcessMatch = previousMatch
 		contextProcessTTY = previousTTY
-		contextPaneAlive = previousPane
+		contextProcessStartTime = previousStart
+		contextPaneTitle = previousPaneTitle
 	})
 }
 
@@ -438,6 +441,52 @@ func TestLegacyLaunchRecordsWithoutStoppedAtUseLivenessProbe(t *testing.T) {
 	}
 }
 
+func TestContextRejectsSameBinaryPIDReuseWithSameOrUnknownTTY(t *testing.T) {
+	project := t.TempDir()
+	isolateCanonicalContextTest(t, project)
+	recordedAt := time.Now().Add(-time.Minute).UTC()
+	contextPIDAlive = func(int) bool { return true }
+	contextProcessMatch = func(int, func(string) bool) bool { return true }
+	contextProcessStartTime = func(int) (time.Time, bool) {
+		return recordedAt.Add(time.Second), true
+	}
+	contextProcessTTY = func(int) (string, bool) { return "/dev/ttys007", true }
+
+	for _, agentTTY := range []string{"/dev/ttys007", "", "unknown"} {
+		rec := launch.Record{
+			AgentPID: 42, Binary: "codex", AgentTTY: agentTTY,
+			StartedAt: recordedAt, TeamProfile: "reused", Session: "s",
+			Role: "worker", Handle: "worker", TeamHome: project,
+		}
+		if contextLaunchRecordRuntimeLive(rec, "") {
+			t.Fatalf("process born after launch record won context with recorded tty %q", agentTTY)
+		}
+	}
+}
+
+func TestContextRejectsReusedPaneIDForCurrentAndExternalRecords(t *testing.T) {
+	project := t.TempDir()
+	isolateCanonicalContextTest(t, project)
+	rec := launch.Record{
+		External: true, TeamHome: project, Session: "s", Role: "worker", Handle: "worker",
+		Tmux: &launch.TmuxInfo{PaneID: "%7"},
+	}
+	contextPaneTitle = func(string) (string, bool) { return "amq:s:someone-else", true }
+	if contextLaunchRecordRuntimeLive(rec, "%7") {
+		t.Fatal("current-pane shortcut accepted a reused pane id with the wrong title")
+	}
+	if contextLaunchRecordRuntimeLive(rec, "") {
+		t.Fatal("external-pane path accepted a reused pane id with the wrong title")
+	}
+	contextPaneTitle = func(string) (string, bool) { return "amq:s:worker", true }
+	if !contextLaunchRecordRuntimeLive(rec, "%7") {
+		t.Fatal("exact current pane identity was not accepted")
+	}
+	if !contextLaunchRecordRuntimeLive(rec, "") {
+		t.Fatal("exact external pane identity was not accepted")
+	}
+}
+
 func TestContextCleanupRemovesOnlyRecheckedNonLiveRecords(t *testing.T) {
 	project := t.TempDir()
 	staleDir := filepath.Join(project, ".agent-mail", "old", "s", "agents", "stale")
@@ -453,7 +502,7 @@ func TestContextCleanupRemovesOnlyRecheckedNonLiveRecords(t *testing.T) {
 	var out strings.Builder
 	err := runContextCleanupWithDeps([]string{"--project", project, "--yes"}, contextCleanupDeps{
 		Scan: launch.ScanEntries, Out: &out,
-		IsLive: func(rec launch.Record, _ string) bool { return rec.Handle == "live" },
+		IsLive: func(entry launch.Entry, _ string) bool { return entry.Record.Handle == "live" },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -471,6 +520,42 @@ func TestContextCleanupRemovesOnlyRecheckedNonLiveRecords(t *testing.T) {
 	}
 }
 
+func TestContextCleanupPreservesCanonicalWakeLiveRecord(t *testing.T) {
+	project := t.TempDir()
+	root := filepath.Join(project, ".agent-mail", "review", "s")
+	agentDir := filepath.Join(root, "agents", "worker")
+	rec := launch.Record{
+		TeamHome: project, TeamProfile: "review", Session: "s", Role: "worker", Handle: "worker",
+		Root: root, CWD: project, Binary: "codex", AgentPID: 71, StartedAt: time.Now().Add(-time.Hour),
+	}
+	if err := launch.Write(agentDir, rec); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 72, Root: root, Started: time.Now()})
+	previousProbe := defaultDuplicateLaunchProbe
+	defaultDuplicateLaunchProbe = duplicateLaunchProbe{
+		PIDAlive: func(pid int) bool { return pid == 72 },
+		ProcessMatch: func(pid int, predicate func(string) bool) bool {
+			return pid == 72 && predicate("amq wake --root "+root+" --me worker")
+		},
+		Now: time.Now,
+	}
+	t.Cleanup(func() { defaultDuplicateLaunchProbe = previousProbe })
+
+	var out strings.Builder
+	if err := runContextCleanupWithDeps([]string{"--project", project, "--yes"}, contextCleanupDeps{
+		Scan: launch.ScanEntries, Out: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := launch.Read(agentDir); err != nil {
+		t.Fatalf("wake-live launch record was removed: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "non-live launch records: 0") {
+		t.Fatalf("wake-live record entered cleanup preview:\n%s", out.String())
+	}
+}
+
 func TestContextCleanupPreservesRecordThatBecomesLiveAfterPreview(t *testing.T) {
 	project := t.TempDir()
 	agentDir := filepath.Join(project, ".agent-mail", "old", "s", "agents", "worker")
@@ -483,7 +568,7 @@ func TestContextCleanupPreservesRecordThatBecomesLiveAfterPreview(t *testing.T) 
 	var out strings.Builder
 	err := runContextCleanupWithDeps([]string{"--project", project, "--yes"}, contextCleanupDeps{
 		Scan: launch.ScanEntries, Out: &out,
-		IsLive: func(launch.Record, string) bool {
+		IsLive: func(launch.Entry, string) bool {
 			calls++
 			return calls > 1
 		},
@@ -508,7 +593,7 @@ func TestContextCleanupDeclineIsNoOp(t *testing.T) {
 	var out strings.Builder
 	err := runContextCleanupWithDeps([]string{"--project", project}, contextCleanupDeps{
 		Scan: launch.ScanEntries, In: strings.NewReader("\n"), Out: &out,
-		IsLive: func(launch.Record, string) bool { return false },
+		IsLive: func(launch.Entry, string) bool { return false },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -526,6 +611,9 @@ func TestResolveCanonicalContextSharedTupleDoesNotRequireHandle(t *testing.T) {
 	isolateCanonicalContextTest(t, project)
 	root := filepath.Join(project, ".agent-mail", "release", "shared")
 	contextPIDAlive = func(int) bool { return true }
+	contextPaneTitle = func(paneID string) (string, bool) {
+		return "amq:shared:cto", paneID == "%7"
+	}
 	contextScanLaunchEntries = func(string) ([]launch.Entry, error) {
 		return []launch.Entry{
 			{AgentDir: filepath.Join(root, "agents", "cto"), Record: launch.Record{AgentPID: 1, TeamProfile: "release", Session: "shared", Handle: "cto", Root: root, BaseRoot: root, Tmux: &launch.TmuxInfo{PaneID: "%7"}}},
