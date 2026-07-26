@@ -78,6 +78,10 @@ type agentLiveness struct {
 	// ReplacementTarget is the live tmux pane jump target when the verdict is
 	// replacement-live; empty otherwise.
 	ReplacementTarget string
+	// RuntimeIdentity is the shared launch-record identity result. Downstream
+	// JSON rendering must consume this rather than re-promoting a recorded PID
+	// or pane from weaker observations.
+	RuntimeIdentity launchRuntimeIdentity
 }
 
 // Live reports whether the verdict is any of the live sub-states. Both status
@@ -126,6 +130,7 @@ func classifyAgentLivenessWithReplacementResolver(agentDir, root, expectedProfil
 			return out
 		}
 		launchIdentity = classifyLaunchRuntimeIdentity(launchRec, binary, "", launchRuntimeProbeFromDuplicate(probe))
+		out.RuntimeIdentity = launchIdentity
 		if launchRec.StoppedAt != nil && !launchRec.StoppedAt.IsZero() {
 			out.Tmux = nil
 			out.Verdict = livenessStale

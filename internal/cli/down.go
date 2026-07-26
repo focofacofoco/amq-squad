@@ -564,7 +564,12 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 		report.Detail = "no pid captured at launch and presence is not fresh — treating as not live"
 		return report
 	}
-	if !probe.PIDAlive(rec.AgentPID) {
+	binary := strings.TrimSpace(rec.Binary)
+	if binary == "" {
+		binary = m.Binary
+	}
+	runtimeIdentity := classifyLaunchPIDRuntimeIdentity(rec, binary, probe)
+	if !runtimeIdentity.PIDAlive {
 		report.Pane = prepare(PaneCleanupAgentAttestation{PID: rec.AgentPID, Binary: rec.Binary, Live: false}).Result
 		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe)
 		if cleaned.failed() {
@@ -581,26 +586,21 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 		report.Detail = fmt.Sprintf("recorded pid %d is not alive", rec.AgentPID)
 		return report
 	}
-	binary := strings.TrimSpace(rec.Binary)
-	if binary == "" {
-		binary = m.Binary
-	}
-	binaryMatch := binary != "" && probe.ProcessMatch(rec.AgentPID, agentProcessMatcher(binary))
-	if !binaryMatch {
-		report.Pane = prepare(PaneCleanupAgentAttestation{PID: rec.AgentPID, Binary: binary, Live: true, BinaryMatch: false}).Result
+	if !runtimeIdentity.PIDLive {
+		report.Pane = prepare(PaneCleanupAgentAttestation{PID: rec.AgentPID, Binary: binary, Live: true, BinaryMatch: runtimeIdentity.BinaryMatch}).Result
 		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe)
 		if cleaned.failed() {
 			report.Status = downStatusFailed
-			report.Detail = fmt.Sprintf("pid %d does not match expected binary %q (PID reuse); %s", rec.AgentPID, binary, cleaned.summary())
+			report.Detail = fmt.Sprintf("pid %d does not match recorded runtime identity (PID reuse); %s", rec.AgentPID, cleaned.summary())
 			return report
 		}
 		if cleaned.any() {
 			report.Status = downStatusCleaned
-			report.Detail = fmt.Sprintf("pid %d does not match expected binary %q (PID reuse); %s", rec.AgentPID, binary, cleaned.summary())
+			report.Detail = fmt.Sprintf("pid %d does not match recorded runtime identity (PID reuse); %s", rec.AgentPID, cleaned.summary())
 			return report
 		}
 		report.Status = downStatusNotLive
-		report.Detail = fmt.Sprintf("pid %d does not match expected binary %q (PID reuse)", rec.AgentPID, binary)
+		report.Detail = fmt.Sprintf("pid %d does not match recorded runtime identity (PID reuse)", rec.AgentPID)
 		return report
 	}
 	prepared := prepare(PaneCleanupAgentAttestation{PID: rec.AgentPID, Binary: binary, Live: true, BinaryMatch: true})

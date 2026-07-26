@@ -102,3 +102,13 @@ func launchRuntimeProbeFromDuplicate(probe duplicateLaunchProbe) launchRuntimePr
 		},
 	}
 }
+
+// classifyLaunchPIDRuntimeIdentity is the launch-record PID adapter for
+// callers that do not need pane identity. It still delegates the entire
+// decision to classifyLaunchRuntimeIdentity so binary, birth time, TTY, and
+// StoppedAt semantics cannot drift.
+func classifyLaunchPIDRuntimeIdentity(rec launch.Record, expectedBinary string, probe duplicateLaunchProbe) launchRuntimeIdentity {
+	runtimeProbe := launchRuntimeProbeFromDuplicate(probe)
+	runtimeProbe.PaneTitle = nil
+	return classifyLaunchRuntimeIdentity(rec, expectedBinary, "", runtimeProbe)
+}

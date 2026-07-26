@@ -470,7 +470,12 @@ explicit recovery path for older orphaned records: it previews
 project-matching records that classifier finds non-live, requires confirmation,
 and rechecks each record under its writer lock before removal. Wake, presence,
 and replacement-pane liveness all preserve a record, as does any record that
-became live or changed after preview.
+became live or changed after preview. External records are the deliberate
+exception to replacement-pane recovery: their registered pane must retain the
+exact `amq:<session>:<role>` title. A legitimate external lead that moves to a
+different pane therefore reads stale until it is re-registered; this
+fail-closed tradeoff prevents pane-number reuse from impersonating the
+operator-visible lead.
 
 `doctor` has three severities: `ok`, `warn`, and `fail`. Only `fail` makes the
 command exit non-zero; warnings remain visible readiness notes. A shared Git

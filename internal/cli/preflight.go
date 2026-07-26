@@ -215,15 +215,13 @@ func (p agentLaunchPreflight) inspectLaunchRecord(probe duplicateLaunchProbe) (*
 	if rec.AgentPID <= 0 {
 		return nil, nil
 	}
-	if !probe.PIDAlive(rec.AgentPID) {
-		return nil, nil
-	}
 	binary := strings.TrimSpace(rec.Binary)
 	if binary == "" {
 		binary = p.Binary
 	}
-	if binary == "" || !probe.ProcessMatch(rec.AgentPID, agentProcessMatcher(binary)) {
-		// PID reuse: not our agent.
+	if !classifyLaunchPIDRuntimeIdentity(rec, binary, probe).PIDLive {
+		// Dead process or PID reuse (binary, birth time, or TTY mismatch):
+		// not our recorded agent.
 		return nil, nil
 	}
 	msg := fmt.Sprintf("live %s agent at pid %d", binary, rec.AgentPID)
@@ -368,14 +366,11 @@ func launchWriterDead(agentDir, fallbackBinary string, probe duplicateLaunchProb
 		// the writer is dead from this record alone.
 		return false, false
 	}
-	if !probe.PIDAlive(rec.AgentPID) {
-		return true, true
-	}
 	binary := strings.TrimSpace(rec.Binary)
 	if binary == "" {
 		binary = fallbackBinary
 	}
-	if binary == "" || !probe.ProcessMatch(rec.AgentPID, agentProcessMatcher(binary)) {
+	if !classifyLaunchPIDRuntimeIdentity(rec, binary, probe).PIDLive {
 		return true, true
 	}
 	return false, true

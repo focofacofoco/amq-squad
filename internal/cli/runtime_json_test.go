@@ -301,6 +301,28 @@ func TestFillPaneAlive(t *testing.T) {
 	fillPaneAlive(nil, live) // must not panic
 }
 
+func TestFillPaneAliveFromLivenessRejectsReusedExternalPane(t *testing.T) {
+	rt := &tmuxRuntimeJSON{PaneID: "%7"}
+	live := &agentLiveness{
+		LaunchFound: true,
+		LaunchRecord: launch.Record{
+			External: true,
+			Tmux:     &launch.TmuxInfo{PaneID: "%7"},
+		},
+		RuntimeIdentity: launchRuntimeIdentity{PaneLive: false},
+	}
+	fillPaneAliveFromLiveness(rt, map[string]bool{"%7": true}, live)
+	if rt.PaneAlive {
+		t.Fatal("bare existence of a recycled external pane id must not restore pane liveness")
+	}
+
+	live.RuntimeIdentity.PaneLive = true
+	fillPaneAliveFromLiveness(rt, nil, live)
+	if !rt.PaneAlive {
+		t.Fatal("title-verified external pane identity must render live")
+	}
+}
+
 func TestLivePaneIDSetDegradesOnError(t *testing.T) {
 	set := livePaneIDSet(func() ([]tmuxpane.TmuxPane, error) { return nil, errors.New("no tmux server") })
 	if len(set) != 0 {

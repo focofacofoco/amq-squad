@@ -1763,6 +1763,9 @@ func resumeLiveNote(live agentLiveness, binary string) string {
 	if live.Signals.WakeAlive {
 		parts = append(parts, "wake")
 	}
+	// This is display-only source enumeration after Verdict already proved the
+	// member live. Signals preserve the historical multi-source note even for
+	// synthetic/test verdicts; they do not decide whether resume skips launch.
 	if live.Signals.AgentAlive && live.Signals.BinaryMatch {
 		parts = append(parts, "launch")
 	}
