@@ -11,6 +11,7 @@ from extraction (count silently dropped, exit 0) rather than fail.
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import tempfile
@@ -347,6 +348,148 @@ class SecondReviewFindings(unittest.TestCase):
                 [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
             )
         self.assertNotIn("Traceback", result.stderr, f"gate crashed:\n{result.stderr}")
+
+
+
+class ThirdRoundFindings(unittest.TestCase):
+    """The six convergence findings plus the three they exposed.
+
+    Every one was the gate reporting a verdict it had not earned.
+    """
+
+    def setUp(self):
+        if not BINARY.exists():
+            self.skipTest("binary not built; run make build")
+        self.gate = load_gate()
+
+    # H1 --------------------------------------------------------------------
+    def test_subcommand_surface_is_queried_not_guessed(self):
+        """Per-path error interpretation proved `doctor totallybogus` valid, because
+        doctor's error is an arity complaint, not the one recognized negative.
+        Membership over a queried set has no such blind spot."""
+        subs, observable = self.gate.subcommand_surface(str(BINARY), "doctor")
+        self.assertTrue(observable, "doctor's subcommand surface must be observable")
+        self.assertEqual(subs, set(), "doctor has no subcommands")
+        self.assertNotIn("totallybogus", subs)
+
+    def test_error_list_only_subcommands_resolve(self):
+        """The UNION proof. team's usage block lists 8 subcommands; lead, autonomous
+        and shared-cwd-exception appear ONLY in the error list. Using either source
+        alone would fail VALID references -- fail-closed on incomplete data invents
+        drift, which is a defect in the opposite direction from fail-open."""
+        subs, observable = self.gate.subcommand_surface(str(BINARY), "team")
+        self.assertTrue(observable)
+        for only_in_error_list in ("lead", "autonomous", "shared-cwd-exception"):
+            self.assertIn(only_in_error_list, subs, f"{only_in_error_list} must resolve")
+        for in_usage_block in ("init", "sync", "member"):
+            self.assertIn(in_usage_block, subs)
+
+    def test_subcommands_resolve_for_every_form_of_verb(self):
+        """Three different verb shapes: enumerates via 'use', via 'Try', and one with
+        an implicit default subcommand that enumerates neither."""
+        for verb, expected in (("evidence", "run"), ("team", "sync"), ("review-worktree", "remove")):
+            with self.subTest(verb=verb):
+                subs, observable = self.gate.subcommand_surface(str(BINARY), verb)
+                self.assertTrue(observable, f"{verb} surface must be observable")
+                self.assertIn(expected, subs)
+
+    # M2 --------------------------------------------------------------------
+    def test_global_flags_are_parsed_from_real_top_level_help(self):
+        """flag_surface(binary, "", None) ran `amq-squad "" --help`, returned an empty
+        set, and empty was then treated as all-verified."""
+        top = self.gate.run_help(str(BINARY))
+        flags = set(re.findall(r"--[A-Za-z][A-Za-z0-9-]*", top))
+        self.assertGreater(len(flags), 5, "top-level help must yield real global flags")
+
+    def test_bogus_global_flag_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "x.md").write_text("```\namq-squad --definitely-not-global\n```\n")
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertNotEqual(result.returncode, 0, "an invented global flag must not pass")
+
+    # M3 --------------------------------------------------------------------
+    def test_two_commands_in_one_span_stay_separate(self):
+        """Unconditional span collapse merged them, inventing drift."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("Run `amq-squad team sync --apply` then `amq-squad doctor --json`.\n")
+            found = self.gate.extract([probe])
+        self.assertEqual(found.get(("team", "sync")), {"--apply"})
+        self.assertEqual(found.get(("doctor", None)), {"--json"})
+
+    # M4 --------------------------------------------------------------------
+    def test_single_dash_token_after_verb_is_not_discarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("```\namq-squad team -sync\n```\n")
+            found = self.gate.extract([probe])
+        self.assertIn(("team", "-sync"), found, "a single-dash token must be reported, not dropped")
+
+    def test_malformed_flag_is_reported_not_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("```\namq-squad team sync --apply_bad\n```\n")
+            found = self.gate.extract([probe])
+        self.assertIn((self.gate.MALFORMED_FLAG_KEY, None), found)
+        self.assertIn("--apply_bad", found[(self.gate.MALFORMED_FLAG_KEY, None)])
+
+    # M5 --------------------------------------------------------------------
+    def test_flag_floor_is_ratio_based_not_exactly_zero(self):
+        """An exactly-zero floor was bypassed by a mass drop or by one verified flag."""
+        self.assertGreater(self.gate.MIN_VERIFIED_FLAGS, 1, "absolute floor must exceed 1")
+        self.assertGreaterEqual(self.gate.MIN_VERIFIED_FLAG_RATIO, 0.25)
+
+    # Self-exposed 7: shell comments -----------------------------------------
+    def test_inline_shell_comment_is_not_a_subcommand(self):
+        """`amq-squad doctor   # AMQ version, tmux` extracted `#` as a SUBCOMMAND,
+        which is what made the bogus path reachable at all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("```\namq-squad doctor        # AMQ version, team config, tmux\n```\n")
+            found = self.gate.extract([probe])
+        self.assertIn(("doctor", None), found)
+        self.assertNotIn(("doctor", "#"), found)
+
+    # Self-exposed 8: the -- separator ---------------------------------------
+    def test_flags_after_double_dash_belong_to_the_wrapped_command(self):
+        """`evidence run ... -- make ci`: make's flags are not amq-squad's, and `--`
+        is a separator rather than a flag claim."""
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "x.md"
+            probe.write_text("```\namq-squad evidence run T --me A -- make --wrong-flag\n```\n")
+            found = self.gate.extract([probe])
+        flags = found.get(("evidence", "run"), set())
+        self.assertIn("--me", flags)
+        self.assertNotIn("--wrong-flag", flags, "a wrapped command's flags must not be attributed")
+        self.assertNotIn("--", flags)
+
+    # Self-exposed 9: whitespace crossing newlines ---------------------------
+    def test_usage_parse_does_not_cross_lines(self):
+        """`\s+` matches NEWLINES, so a usage line ending at the verb ran into the
+        next line and captured "amq-squad" as a subcommand of doctor. A wrong
+        authoritative set is worse than none, because it is trusted."""
+        subs, _ = self.gate.subcommand_surface(str(BINARY), "doctor")
+        self.assertNotIn("amq-squad", subs, "the parse must not cross line boundaries")
+
+    # L6 --------------------------------------------------------------------
+    def test_none_safe_sort_is_actually_reached(self):
+        """The earlier regression test exited on the MIN_COMMANDS floor before ever
+        reaching the sort, so it would have passed with the fix reverted. Feed a
+        corpus large enough to clear the floor."""
+        real = sorted(SKILLS.rglob("*.md"))
+        with tempfile.TemporaryDirectory() as tmp:
+            for src in real:
+                (Path(tmp) / src.name).write_text(src.read_text())
+            # Force the mixed bare/subcommand shape that triggered the crash.
+            (Path(tmp) / "zz_mixed.md").write_text("```\namq-squad team\namq-squad team sync --apply\n```\n")
+            result = subprocess.run(
+                [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
+            )
+        self.assertNotIn("Traceback", result.stderr, f"gate crashed:\n{result.stderr}")
+        self.assertNotIn("MIN_COMMANDS", result.stderr)
+        self.assertNotIn("expected >=", result.stderr, "corpus must be large enough to reach the sort")
 
 
 if __name__ == "__main__":

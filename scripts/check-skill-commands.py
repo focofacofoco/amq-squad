@@ -30,9 +30,21 @@ SKILLS = REPO / "plugins" / "skills-src"
 # MEDIUM 4: Bash(amq-squad review-worktree remove:*) is a REAL command reference --
 # it is what an operator puts in an allowlist -- and the line-start rule alone
 # ignored it, so renames could break permission strings silently.
+# `rest` stops at the next `amq-squad` token, so an inline span holding TWO
+# commands does not attribute the second command's verb and flags to the first.
+# M3: collapsing spans unconditionally (needed for wrapped references) made
+# `amq-squad team sync --apply` + `amq-squad doctor --json` in one span read as
+# `team sync --apply amq-squad doctor --json`, i.e. invented drift.
 COMMAND_LINE = re.compile(
-    r"(?:^\s*(?:\$\s+|&&\s+|\|\s+)?|\bBash\(\s*)amq-squad\s+(?P<rest>[^\n]*)", re.M
+    r"(?:^\s*(?:\$\s+|&&\s+|\|\s+)?|\bBash\(\s*)amq-squad\s+(?P<rest>(?:(?!amq-squad)[^\n])*)",
+    re.M,
 )
+
+# An inline shell comment is not part of the command. Without stripping it,
+# `amq-squad doctor    # AMQ version, tmux, wake` extracted `#` as doctor's
+# SUBCOMMAND, which then hit the `doctor takes no positional arguments` error and
+# (before H1) was reported as a PROVEN path.
+INLINE_COMMENT = re.compile(r"\s+#.*$")
 
 # A trailing permission-string suffix: Bash(amq-squad x remove:*) -> drop ":*)".
 PERMISSION_SUFFIX = re.compile(r"[:)].*$")
@@ -61,6 +73,9 @@ VERB = re.compile(r"^[a-z][a-z0-9-]*$")
 SUBCOMMAND_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9-]*$")
 # Sentinel key for a flag-only reference such as `amq-squad --version`.
 GLOBAL_FLAG_KEY = "<global-flags>"
+# Sentinel for flag-shaped tokens that are not valid flag syntax (e.g. --apply_bad).
+# They are REPORTED, never dropped.
+MALFORMED_FLAG_KEY = "<malformed-flags>"
 # A flag token may be MALFORMED and must still be extracted so it can be reported.
 # A lowercase-only pattern silently dropped `--launch-shapeX`, which is the
 # vanishing-reference class a third time: fixed in the verb position, found by
@@ -88,6 +103,11 @@ MIN_VERBS_IN_SURFACE = 20
 # Below this many claimed flags the zero-verified floor would be noise; above it,
 # verifying none of them means flag parsing has broken.
 MIN_FLAGS_CLAIMED_FOR_FLOOR = 4
+# Committed coverage baseline. At the time of writing the gate verifies 15 of 23
+# claimed flags; these floors make a regression from that a BUILD failure rather
+# than a quiet shrink. Raise them when coverage genuinely improves.
+MIN_VERIFIED_FLAGS = 10
+MIN_VERIFIED_FLAG_RATIO = 0.5
 
 
 def run_help(binary: str, *args: str) -> str:
@@ -117,18 +137,86 @@ DELEGATES_FLAGS = re.compile(r"\[[^\]]*\b(?:flags|options)\]")
 UNKNOWN_SUBCOMMAND = re.compile(r"unknown '([^']+)' subcommand", re.I)
 
 
-def subcommand_exists(binary: str, verb: str, sub: str) -> tuple[bool, bool]:
-    """Return (exists, definitive).
+# Tri-state subcommand observation. Returning "exists" for every response except
+# the recognized negative was FAIL-OPEN IN A VERIFIER: an I/O error, a config
+# failure, or `doctor takes no positional arguments` all PROVED the path, so
+# `amq-squad doctor totallybogus` verified clean.
+#
+# This is the probe-posture rule for the third time in one milestone (the #538 git
+# probe, the earlier version of this prober, and now here): a readiness/verification
+# probe must fail CLOSED, and "closed" for an unreadable observation means failing
+# the BUILD loudly, not failing the reference silently — a silent reference failure
+# would be an invented drift report, which is its own bad outcome.
+SUB_PROBE = "__amq_squad_probe_invalid__"
 
-    HIGH 1: the gate previously verified only the TOP-LEVEL verb, so
-    `amq-squad team syncX` passed because `team` resolves and the resulting help
-    error was filed as merely unverifiable. Subcommands are where most renames
-    happen, so that hole voided the gate's core promise.
+# The binary lists its own valid subcommands when handed a bogus one, in two
+# formats:
+#   error: unknown evidence subcommand "X"; use run, show, list, recover, or lookup
+#   error: unknown 'team' subcommand: "X". Try 'init', 'resume', 'rules', ...
+# and says so explicitly when a verb takes no subcommand at all:
+#   error: doctor takes no positional arguments; got 2
+#
+# Asking once per verb yields an AUTHORITATIVE set, so membership is a pure set
+# check rather than a per-path guess. That replaces an earlier prober that returned
+# "exists" for every response except the recognized negative -- fail-open in a
+# verifier, which made `amq-squad doctor totallybogus` verify clean.
+UNKNOWN_SUB_USE = re.compile(r"unknown\s+\S+\s+subcommand[^;]*;\s*use\s+(?P<list>[^\n.]+)", re.I)
+UNKNOWN_SUB_TRY = re.compile(r"unknown\s+'[^']+'\s+subcommand[^.]*\.\s*Try\s+(?P<list>[^\n.]+)", re.I)
+NO_POSITIONALS = re.compile(r"takes no positional arguments", re.I)
+SUB_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+
+_SUB_SURFACE_CACHE: dict[tuple[str, str], tuple[set[str], bool]] = {}
+
+
+def subcommand_surface(binary: str, verb: str) -> tuple[set[str], bool]:
+    """Return (valid subcommands, observable).
+
+    observable=False means the binary's answer could not be interpreted. The caller
+    must fail the BUILD in that case: failing the reference would invent drift, and
+    passing it would be fail-open in a verifier. This is the probe-posture rule
+    (#538's git probe, and this prober twice) applied to a third surface.
     """
-    text = run_help(binary, verb, sub)
-    if UNKNOWN_SUBCOMMAND.search(text):
-        return False, True
-    return True, True
+    key = (binary, verb)
+    if key in _SUB_SURFACE_CACHE:
+        return _SUB_SURFACE_CACHE[key]
+    result: tuple[set[str], bool]
+    # PRIMARY source: the verb's own help usage block, which lists
+    # `amq-squad <verb> <sub>` lines uniformly across verbs. This is preferred over
+    # error-text parsing because verbs report bogus subcommands in at least three
+    # different formats (list-with-"use", list-with-"Try", and -- for a verb with an
+    # implicit default subcommand like review-worktree -- an argument complaint that
+    # enumerates nothing).
+    own = run_help(binary, verb)
+    # [ \t]+ rather than \s+: \s matches NEWLINES, so a usage line ending at the
+    # verb ran into the next line and captured "amq-squad" as a subcommand of
+    # `doctor`. Same newline-crossing class as the wrapped-reference bug; a wrong
+    # authoritative set is worse than none, because it is trusted.
+    usage = set(
+        re.findall(rf"^[ \t]+amq-squad[ \t]+{re.escape(verb)}[ \t]+([a-z][a-z0-9-]*)", own, re.M)
+    )
+    # Drop tokens that are placeholders rather than subcommands.
+    usage -= {"help"}
+    # SECOND source: ask with a bogus subcommand and parse whichever list format
+    # comes back. Both sources are authoritative and NEITHER is complete: `team`'s
+    # usage block lists 8 subcommands while its error list names 11 (lead,
+    # autonomous, shared-cwd-exception appear only in the error). Using the usage
+    # block alone produced FALSE FAILURES for valid subcommands, so take the UNION.
+    text = run_help(binary, verb, SUB_PROBE)
+    match = UNKNOWN_SUB_USE.search(text) or UNKNOWN_SUB_TRY.search(text)
+    listed: set[str] = set()
+    if match:
+        listed = {n for n in SUB_NAME.findall(match.group("list")) if n.lower() not in {"or", "and"}}
+
+    combined = usage | listed
+    if combined:
+        result = (combined, True)
+    elif NO_POSITIONALS.search(text):
+        # The verb genuinely has no subcommands, so any claimed one is drift.
+        result = (set(), True)
+    else:
+        result = (set(), False)
+    _SUB_SURFACE_CACHE[key] = result
+    return result
 
 
 def flag_surface(binary: str, verb: str, sub: str | None) -> tuple[set[str], bool]:
@@ -182,7 +270,8 @@ def extract(paths: list[Path]) -> dict[tuple[str, str | None], set[str]]:
         for blob in code_blobs(path.read_text()):
             # Join wrapped continuation lines so a reference is read whole.
             for match in COMMAND_LINE.finditer(blob):
-                rest = PERMISSION_SUFFIX.sub("", match.group("rest"))
+                rest = INLINE_COMMENT.sub("", match.group("rest"))
+                rest = PERMISSION_SUFFIX.sub("", rest)
                 tokens = rest.split()
                 if not tokens:
                     continue
@@ -199,14 +288,36 @@ def extract(paths: list[Path]) -> dict[tuple[str, str | None], set[str]]:
                     else:
                         found.setdefault((verb, None), set())
                     continue
-                sub = tokens[1] if len(tokens) > 1 and not tokens[1].startswith("-") else None
+                # M4: a token after the verb must never VANISH. `-sync` (single
+                # dash) used to be skipped as "flag-ish" while failing the flag
+                # shape too, so it disappeared entirely; the same held for
+                # malformed flags like `--apply_bad`. Both are claims and both must
+                # reach verification. This is the no-silent-discard guarantee in the
+                # two spots it was still unmet.
+                sub = None
+                if len(tokens) > 1:
+                    nxt = tokens[1]
+                    if not nxt.startswith("--"):
+                        # Includes a single-dash token: report it rather than drop it.
+                        sub = nxt
                 if sub is not None and not SUBCOMMAND_TOKEN.match(sub):
                     # A malformed subcommand (e.g. `syncX`) must be REPORTED, not
                     # silently folded into the bare verb: folding both loses the
                     # rename and, when the same verb also appears with a real
                     # subcommand, produced a None/str sort crash.
                     sub = sub.lower() if sub.isalpha() else sub
-                flags = {t for t in tokens if FLAG.match(t)}
+                # `--` ends amq-squad's own flags: everything after it belongs to the
+                # wrapped command (`evidence run ... -- make ci`), so collecting it
+                # would attribute make's flags to amq-squad. `--` itself is a
+                # separator, not a flag claim.
+                own_tokens = tokens[1:]
+                if "--" in own_tokens:
+                    own_tokens = own_tokens[: own_tokens.index("--")]
+                flags = {t for t in own_tokens if t.startswith("--")}
+                malformed = {t for t in flags if not FLAG.match(t)}
+                if malformed:
+                    found.setdefault((MALFORMED_FLAG_KEY, None), set()).update(malformed)
+                    flags -= malformed
                 found.setdefault((verb, sub), set()).update(flags)
     return found
 
@@ -249,11 +360,25 @@ def main() -> int:
 
     failures: list[str] = []
     unverifiable: list[str] = []
+    unobservable_paths: list[str] = []
     flags_checked = 0
     flags_claimed = 0
     verified_real_verb = False
 
-    global_flags, _ = flag_surface(binary, "", None)
+    # M2: flag_surface(binary, "", None) executed `amq-squad "" --help`, returned an
+    # empty set, and the empty set was then treated as "all flags verified", so
+    # `amq-squad --definitely-not-global` stayed green. Parse the real top-level
+    # help instead, and treat an unparseable top-level help as a BUILD failure
+    # rather than as permission to skip the check.
+    top_help = run_help(binary)
+    global_flags = set(re.findall(r"(--[A-Za-z][A-Za-z0-9-]*)", top_help))
+    if not global_flags:
+        print(
+            "error: no global flags parsed from 'amq-squad --help'; cannot verify "
+            "flag-only references. Refusing to report success while checking nothing.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Sort with a None-safe key. Sorting raw (verb, sub) tuples crashed with
     # TypeError whenever one verb appeared both bare and with a subcommand, because
@@ -262,10 +387,15 @@ def main() -> int:
     for (verb, sub), flags in sorted(checked.items(), key=lambda kv: (kv[0][0], kv[0][1] or "")):
         flags_claimed += len(flags)
 
+        if verb == MALFORMED_FLAG_KEY:
+            for flag in sorted(flags):
+                failures.append(f"'{flag}' is named in the skills but is not valid flag syntax")
+            continue
+
         # A flag-only reference (`amq-squad --version`): verify the flags exist.
         if verb == GLOBAL_FLAG_KEY:
             for flag in sorted(flags):
-                if global_flags and flag not in global_flags:
+                if flag not in global_flags:
                     failures.append(f"global flag '{flag}' is named in the skills but 'amq-squad --help' does not list it")
                 else:
                     flags_checked += 1
@@ -282,9 +412,15 @@ def main() -> int:
 
         # HIGH 1: verify the FULL command path, not just the first token.
         if sub is not None:
-            exists, definitive = subcommand_exists(binary, verb, sub)
-            if definitive and not exists:
-                failures.append(f"subcommand 'amq-squad {verb} {sub}' is named in the skills but {verb} has no such subcommand")
+            subs, observable = subcommand_surface(binary, verb)
+            if not observable:
+                unobservable_paths.append(f"amq-squad {verb} {sub} (could not read {verb}'s subcommand list)")
+                continue
+            if sub not in subs:
+                failures.append(
+                    f"subcommand 'amq-squad {verb} {sub}' is named in the skills but {verb} has no such "
+                    f"subcommand (valid: {', '.join(sorted(subs)) or 'none'})"
+                )
                 continue
 
         target = f"{verb} {sub}" if sub else verb
@@ -303,18 +439,37 @@ def main() -> int:
         print("error: no real verb was verified; the gate checked nothing", file=sys.stderr)
         return 2
 
+    if unobservable_paths:
+        # H1: an unreadable observation fails the BUILD, not the reference. Failing
+        # the reference would invent drift; passing it would be fail-open in a
+        # verifier. Neither is acceptable, so the gate refuses to render a verdict.
+        print(
+            f"error: could not observe {len(unobservable_paths)} command path(s); the gate cannot "
+            "verify them and will not report success:",
+            file=sys.stderr,
+        )
+        for path in sorted(unobservable_paths):
+            print(f"  - {path}", file=sys.stderr)
+        return 2
+
     # MEDIUM 5: floor the FLAG coverage too. Verbs were floored; flags were not, so
     # a help-format change that stopped yielding parsed flags would make everything
     # "unverifiable" and keep the build green -- the same silent shrink, one level
     # down.
-    if flags_claimed >= MIN_FLAGS_CLAIMED_FOR_FLOOR and flags_checked == 0:
-        print(
-            f"error: {flags_claimed} flag(s) are named in the skills but ZERO were verified. "
-            "Flag help is probably no longer parseable; this gate would otherwise pass by "
-            "verifying no flags at all.",
-            file=sys.stderr,
-        )
-        return 2
+    # M5: an exactly-zero floor was bypassed by a mass drop (23 claimed, 3 verified)
+    # or by a single verified flag. Floor on the RATIO and on an absolute baseline so
+    # coverage cannot silently shrink.
+    if flags_claimed >= MIN_FLAGS_CLAIMED_FOR_FLOOR:
+        required = max(MIN_VERIFIED_FLAGS, int(flags_claimed * MIN_VERIFIED_FLAG_RATIO))
+        if flags_checked < required:
+            print(
+                f"error: only {flags_checked} of {flags_claimed} named flag(s) were verified "
+                f"(need >= {required}: at least {MIN_VERIFIED_FLAGS} and {int(MIN_VERIFIED_FLAG_RATIO * 100)}% "
+                "of those claimed). Flag verification has probably regressed; this gate would "
+                "otherwise pass while checking far less than it did before.",
+                file=sys.stderr,
+            )
+            return 2
 
     if failures:
         print(f"skill/command drift ({len(failures)}):", file=sys.stderr)
