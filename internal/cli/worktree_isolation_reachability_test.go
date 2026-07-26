@@ -48,7 +48,7 @@ func TestSharedCwdRemedyIsolatedCwdsReachableInOneCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The readiness row must be satisfied without an exception being recorded.
-	row := worktreeIsolationReadinessRow(tm)
+	row := worktreeIsolationReadinessRow(tm, "squad")
 	if row.Status != "ready" {
 		t.Fatalf("worktree_isolation = %s (%s); isolated cwds must satisfy it. fix text was: %s", row.Status, row.Evidence, row.Fix)
 	}
@@ -86,7 +86,7 @@ func TestSharedCwdRemedyExceptionReachableInOneCommand(t *testing.T) {
 	if strings.TrimSpace(tm.SharedCwdException) == "" {
 		t.Fatal("--shared-cwd-exception was accepted but not recorded")
 	}
-	row := worktreeIsolationReadinessRow(tm)
+	row := worktreeIsolationReadinessRow(tm, "squad")
 	if row.Status != "ready" {
 		t.Fatalf("worktree_isolation = %s (%s); a recorded exception must satisfy it", row.Status, row.Evidence)
 	}
@@ -115,7 +115,7 @@ func TestSharedCwdRemedyIsolatedCwdReachableOnExistingRoster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blocked := worktreeIsolationReadinessRow(tm)
+	blocked := worktreeIsolationReadinessRow(tm, "squad")
 	if blocked.Status != "blocked" {
 		t.Fatalf("expected a shared-cwd collision to start blocked, got %s (%s)", blocked.Status, blocked.Evidence)
 	}
@@ -134,7 +134,7 @@ func TestSharedCwdRemedyIsolatedCwdReachableOnExistingRoster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row := worktreeIsolationReadinessRow(fixed); row.Status != "ready" {
+	if row := worktreeIsolationReadinessRow(fixed, "squad"); row.Status != "ready" {
 		t.Fatalf("worktree_isolation = %s (%s) after giving dev-2 its own cwd", row.Status, row.Evidence)
 	}
 	// And it must be reversible: clearing the override restores the collision.
@@ -147,56 +147,227 @@ func TestSharedCwdRemedyIsolatedCwdReachableOnExistingRoster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row := worktreeIsolationReadinessRow(cleared); row.Status != "blocked" {
+	if row := worktreeIsolationReadinessRow(cleared, "squad"); row.Status != "blocked" {
 		t.Fatalf("clearing the cwd override should restore the collision, got %s", row.Status)
 	}
 }
 
-// #538 acceptance criterion 1: every remedy the row NAMES must be executable.
-// This asserts the fix text references only real commands and flags, so it cannot
-// drift back into naming a bare "--cwd" with no command attached.
-func TestWorktreeIsolationFixNamesOnlyExecutableRemedies(t *testing.T) {
+// #538 acceptance criterion 1: every remedy the row NAMES must be executable
+// against the EXACT blocked roster.
+//
+// Second review F1: naming a command is not enough, it must be SCOPED. An
+// unscoped `team member update` targets the default profile, so for a blocked
+// named profile the printed command would mutate a different roster. And a
+// creation-time form is wrong here by construction: this profile already exists,
+// so `new profile NAME` would build an unrelated roster. Creation forms belong to
+// the rollback message, not this row.
+func TestWorktreeIsolationFixNamesScopedExecutableRemedies(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, dir)
-	if _, _, err := captureOutput(t, func() error {
-		return runNew([]string{"profile", "squad",
-			"--project", dir,
-			"--roles", "cto,dev-1,dev-2",
-			"--binary", "cto=claude,dev-1=claude,dev-2=codex",
-			"--actor-mode", "cto=review,dev-1=implementation,dev-2=implementation",
-			"--no-session-pin",
-		})
-	}); err != nil {
-		t.Fatal(err)
-	}
+	seedBlockedSquad(t, dir)
 	tm, err := team.ReadProfile(dir, "squad")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fix := worktreeIsolationReadinessRow(tm).Fix
+	fix := worktreeIsolationReadinessRow(tm, "squad").Fix
 	if fix == "" {
 		t.Fatal("a blocked row must carry a fix")
 	}
-	// Each named command must exist as a real verb, and each named flag must be
-	// accepted by it.
 	for _, want := range []string{
-		"amq-squad new profile NAME --cwd",
 		"amq-squad team member update",
-		"--shared-cwd-exception",
+		"--cwd /path/to/worktree",
 		"amq-squad team shared-cwd-exception set",
+		"--profile " + shellQuote("squad"),
+		"--project " + shellQuote(dir),
+		"dev-1",
 	} {
 		if !strings.Contains(fix, want) {
-			t.Fatalf("fix text does not name %q; text was: %s", want, fix)
+			t.Fatalf("fix text is missing %q; text was: %s", want, fix)
 		}
 	}
-	// It must name a role from the operator's OWN roster, not a placeholder.
-	if !strings.Contains(fix, "dev-1") {
-		t.Fatalf("fix text should name a colliding role from this roster; text was: %s", fix)
+	// The blocked profile already exists, so a creation form here would be wrong.
+	if strings.Contains(fix, "new profile") {
+		t.Fatalf("fix text must not offer a creation remedy for an EXISTING blocked profile; text was: %s", fix)
 	}
-	// The flags it names must be forwarded by new profile (the Finding B gap).
-	for _, flagName := range []string{"--cwd", "--shared-cwd-exception"} {
-		if !newProfileValueFlags[flagName] {
-			t.Fatalf("fix text names %s but `new profile` does not forward it, so the remedy is unrunnable", flagName)
+}
+
+// A blocked DEFAULT profile must not be told to pass --profile default.
+func TestWorktreeIsolationFixOmitsDefaultProfileScope(t *testing.T) {
+	dir := t.TempDir()
+	fix := worktreeIsolationFix(dir, team.DefaultProfile, []string{"dev-1", "dev-2"})
+	if strings.Contains(fix, "--profile") {
+		t.Fatalf("default profile needs no --profile scope; text was: %s", fix)
+	}
+	if !strings.Contains(fix, "--project "+shellQuote(dir)) {
+		t.Fatalf("fix text must still scope --project; text was: %s", fix)
+	}
+}
+
+// Second review F5: run the ACTUAL displayed command, parsed out of the fix text,
+// so the row cannot print something that does not work. Absolute-everything tests
+// are what masked F1 and F2.
+func TestFixTextCommandExecutesAsDisplayed(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	seedBlockedSquad(t, dir)
+	tm, err := team.ReadProfile(dir, "squad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fix := worktreeIsolationReadinessRow(tm, "squad").Fix
+
+	argv := extractQuotedCommand(t, fix, "amq-squad team member update")
+	// Substitute a real worktree for the placeholder, changing nothing else.
+	wt := filepath.Join(dir, "wt-a")
+	if err := os.MkdirAll(wt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i, a := range argv {
+		if a == "/path/to/worktree" {
+			argv[i] = wt
 		}
 	}
+	if len(argv) < 3 || argv[0] != "amq-squad" || argv[1] != "team" || argv[2] != "member" {
+		t.Fatalf("unexpected command shape: %v", argv)
+	}
+	if _, _, err := captureOutput(t, func() error { return runTeamMember(argv[3:]) }); err != nil {
+		t.Fatalf("the command the row DISPLAYS failed to run: %v\nargv: %v", err, argv)
+	}
+	fixed, err := team.ReadProfile(dir, "squad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row := worktreeIsolationReadinessRow(fixed, "squad"); row.Status != "ready" {
+		t.Fatalf("running the displayed remedy left the row %s (%s)", row.Status, row.Evidence)
+	}
+}
+
+// Second review F2: a RELATIVE --cwd must resolve against the PROJECT, not the
+// shell working directory. `--project /repo --cwd ../wt` run from /tmp previously
+// recorded /tmp/wt on update and /repo/../wt on create -- two writers, two
+// origins, which is the #539/#540 defect class.
+func TestRelativeCwdResolvesAgainstProjectNotShellCwd(t *testing.T) {
+	project := t.TempDir()
+	sibling := filepath.Join(project, "wt-rel")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedBlockedSquadIn(t, project)
+
+	// Run from an UNRELATED directory, which is what exposes the wrong anchor.
+	elsewhere := t.TempDir()
+	chdir(t, elsewhere)
+
+	if _, _, err := captureOutput(t, func() error {
+		return runTeamMember([]string{"update", "dev-2", "--project", project, "--profile", "squad", "--cwd", "wt-rel"})
+	}); err != nil {
+		t.Fatalf("relative --cwd update failed: %v", err)
+	}
+	tm, err := team.ReadProfile(project, "squad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range tm.Members {
+		if m.Role != "dev-2" {
+			continue
+		}
+		if !sameFilesystemPath(m.CWD, sibling) {
+			t.Fatalf("relative --cwd recorded %q; must resolve against the project (%q), not the shell cwd (%q)", m.CWD, sibling, elsewhere)
+		}
+	}
+	// Create and update must agree for the same relative input.
+	viaCreate := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(viaCreate, "wt-rel"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := captureOutput(t, func() error {
+		return runNew([]string{"profile", "squad", "--project", viaCreate,
+			"--roles", "cto,dev-1,dev-2", "--binary", "cto=claude,dev-1=claude,dev-2=codex",
+			"--actor-mode", "cto=review,dev-1=implementation,dev-2=implementation",
+			"--cwd", "dev-2=wt-rel", "--no-session-pin"})
+	}); err != nil {
+		t.Fatalf("relative --cwd at creation failed: %v", err)
+	}
+	created, err := team.ReadProfile(viaCreate, "squad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range created.Members {
+		if m.Role != "dev-2" {
+			continue
+		}
+		want := filepath.Join(viaCreate, "wt-rel")
+		if !sameFilesystemPath(m.CWD, want) {
+			t.Fatalf("create path recorded %q for a relative --cwd; want %q. create and update must share one origin", m.CWD, want)
+		}
+	}
+}
+
+// Second review F4: readiness must detect the collision doctor detects. Grouping
+// raw strings let a symlink and its target count as two directories at
+// preparation and one Git index at runtime -- ready, then doctor fail.
+func TestReadinessGroupsSymlinkEquivalentCwdsAsCollision(t *testing.T) {
+	project := t.TempDir()
+	real := filepath.Join(project, "shared")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(project, "shared-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if canonicalFilesystemPath(link) != canonicalFilesystemPath(real) {
+		t.Skip("symlink does not canonicalize onto its target here")
+	}
+
+	tm := team.Team{Project: project, Members: []team.Member{
+		{Role: "dev-1", Binary: "claude", Handle: "dev-1", ActorMode: team.ActorModeImplementation, CWD: real},
+		{Role: "dev-2", Binary: "codex", Handle: "dev-2", ActorMode: team.ActorModeImplementation, CWD: link},
+	}}
+	row := worktreeIsolationReadinessRow(tm, "squad")
+	if row.Status != "blocked" {
+		t.Fatalf("two members on symlink-equivalent directories share one Git index and must block; got %s (%s)", row.Status, row.Evidence)
+	}
+	// The evidence should show a path the operator recognises, not only the
+	// canonical form.
+	if !strings.Contains(row.Evidence, "dev-1") || !strings.Contains(row.Evidence, "dev-2") {
+		t.Fatalf("evidence must name both colliding roles; got %s", row.Evidence)
+	}
+}
+
+// seedBlockedSquad creates a named profile whose two implementers share the
+// team-home, i.e. the exact blocked state #538 is about.
+func seedBlockedSquad(t *testing.T, dir string) {
+	t.Helper()
+	seedBlockedSquadIn(t, dir)
+}
+
+func seedBlockedSquadIn(t *testing.T, dir string) {
+	t.Helper()
+	if _, _, err := captureOutput(t, func() error {
+		return runNew([]string{"profile", "squad", "--project", dir,
+			"--roles", "cto,dev-1,dev-2",
+			"--binary", "cto=claude,dev-1=claude,dev-2=codex",
+			"--actor-mode", "cto=review,dev-1=implementation,dev-2=implementation",
+			"--no-session-pin"})
+	}); err != nil {
+		t.Fatalf("seed blocked squad: %v", err)
+	}
+}
+
+// extractQuotedCommand pulls the single-quoted command beginning with prefix out
+// of a fix string and splits it into argv, honouring the shellQuote form the row
+// emits.
+func extractQuotedCommand(t *testing.T, text, prefix string) []string {
+	t.Helper()
+	i := strings.Index(text, "'"+prefix)
+	if i < 0 {
+		t.Fatalf("fix text does not contain a quoted %q command: %s", prefix, text)
+	}
+	rest := text[i+1:]
+	j := strings.Index(rest, "'")
+	if j < 0 {
+		t.Fatalf("unterminated quoted command in fix text: %s", text)
+	}
+	return strings.Fields(rest[:j])
 }

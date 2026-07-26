@@ -1603,7 +1603,7 @@ func calculateRunReadinessWithContext(project, profile, session string, context 
 				add("member:"+member.Role, "ready", fmt.Sprintf("staged handle=%s binary=%s model=%s effort=%s task=%s tool_policy=%s", current.Handle, current.Binary, current.Model, current.Effort, current.TaskOwnership, current.ToolProfile), "")
 			}
 		}
-		row := worktreeIsolationReadinessRow(tm)
+		row := worktreeIsolationReadinessRow(tm, profile)
 		add(row.Artifact, row.Status, row.Evidence, row.Fix)
 	}
 	briefPath := briefPathForProfile(project, profile, session)
@@ -2035,13 +2035,18 @@ func prepareRunArtifacts(project, profile, session, shape, stagedRaw, goal, goal
 	}
 	result = calculateRunReadinessWithContext(project, profile, session, context)
 	if !result.Ready {
-		// #538: preparation is transactional, so this failure rolls back the
-		// profile it created. Operators previously read a blocked row telling them
-		// to run `team shared-cwd-exception set`, tried it, and hit "no profile" --
-		// with nothing explaining that preparation had just removed the profile
-		// they were told to modify. Name that explicitly, and point at the
-		// creation-time forms, which do not depend on a profile existing first.
-		return result, fmt.Errorf("artifact readiness failed after preparation. Preparation is transactional, so any profile it created has been rolled back: commands that modify an EXISTING profile (for example 'amq-squad team shared-cwd-exception set') have nothing to act on yet. Apply the blocked row's fix at creation time instead -- the 'amq-squad new profile NAME --...' forms it names -- then re-run --prepare")
+		// #538: preparation is transactional, so a failure here rolls back to the
+		// pre-preparation state. Operators previously read a blocked row telling
+		// them to run `team shared-cwd-exception set`, tried it, and hit
+		// "no profile", with nothing explaining why.
+		//
+		// Second review F3: the correct guidance depends on whether THIS
+		// transaction created the profile. If it did, rollback removes it and the
+		// fix-existing commands have nothing to act on. If the profile already
+		// existed, rollback RESTORES it, those commands work fine, and telling the
+		// operator otherwise would be false. Decide from the snapshot rather than
+		// assuming the fresh-profile case.
+		return result, fmt.Errorf("artifact readiness failed after preparation. %s", preparationRollbackGuidance(snapshots, team.ProfilePath(project, profile)))
 	}
 	committed = true
 	return result, nil

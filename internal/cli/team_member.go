@@ -819,24 +819,28 @@ func agentUpHint(m team.Member) string {
 	return b.String()
 }
 
-// memberCWDOverride resolves a --cwd value the same way roster creation does
-// (team init, internal/cli/team.go): expand and absolutize, then treat a value
-// equal to the team-home as "no override" so the member record stays clean
-// rather than pinning the default explicitly.
+// memberCWDOverride is the SINGLE resolver for a member's --cwd, shared by
+// roster creation (team init), `team member add` and `team member update`.
 //
-// #538: keeping the create path and the post-creation path on ONE helper is what
-// stops `new profile --cwd` and `team member add|update --cwd` from drifting into
-// two different meanings for the same flag. That drift is the disease this
-// milestone keeps finding, so the shared helper is the point, not an incidental
-// tidy-up.
+// #538, second review F2: an earlier version of this claimed to be shared but was
+// not -- team init kept its own copy -- and it resolved a relative value with
+// filepath.Abs, i.e. against the SHELL working directory. So
+// `--project /repo --cwd ../wt` run from /tmp recorded /tmp/wt here and
+// /repo/../wt on the create path. That is precisely the two-writers/two-origins
+// defect #539 and #540 were about, reintroduced in the fix for a different bug.
+// Both problems have one fix: genuinely one function, anchored to the PROJECT.
+//
+// A relative path means "relative to the project", never to the caller's shell.
+// A value naming the team-home itself records as no override, so the member stays
+// clean rather than pinning the default explicitly.
 func memberCWDOverride(projectDir, raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
 	}
-	abs, err := expandPath(raw)
-	if err != nil {
-		return "", fmt.Errorf("resolve --cwd %q: %w", raw, err)
+	abs := absoluteFilesystemPathIn(projectDir, raw)
+	if abs == "" {
+		return "", fmt.Errorf("resolve --cwd %q", raw)
 	}
 	if sameFilesystemPath(abs, projectDir) {
 		return "", nil

@@ -596,3 +596,40 @@ func printRunPreparationProposal(proposal runPreparationProposal) {
 	}
 	fmt.Println("Proposal only. No profile, brief, rules, role, policy, manifest, mailbox, or pane was created.")
 }
+
+// preparationRollbackGuidance explains what the transactional rollback did to the
+// profile, and therefore which remedy is actually runnable now.
+//
+// #538 F3: preparation rolls back on readiness failure. Which advice is TRUE
+// depends on whether this transaction created the profile:
+//
+//   - created (no pre-existing file): rollback removes it, so `team member update`
+//     and `team shared-cwd-exception set` have nothing to act on, and the operator
+//     must apply the fix at creation time.
+//   - pre-existing: rollback RESTORES it, so those commands work as printed, and
+//     `new profile NAME` would fail because the profile already exists.
+//
+// Emitting the fresh-profile text unconditionally made the message false in the
+// second case, which is worse than silence: it sends the operator to a command
+// that cannot work while telling them the working one is unavailable.
+func preparationRollbackGuidance(snapshots []runPreparationFileSnapshot, profilePath string) string {
+	profilePath = filepath.Clean(strings.TrimSpace(profilePath))
+	existedBefore := false
+	tracked := false
+	for _, snap := range snapshots {
+		if snap.Path != profilePath {
+			continue
+		}
+		tracked = true
+		existedBefore = snap.Exists
+		break
+	}
+	if tracked && !existedBefore {
+		return "Preparation is transactional and it CREATED this profile, so the rollback removed it: " +
+			"commands that modify an existing profile (for example 'amq-squad team shared-cwd-exception set') " +
+			"have nothing to act on yet. Apply the blocked row's fix at creation time instead " +
+			"('amq-squad new profile NAME --cwd \"role=path,...\"' or 'amq-squad new profile NAME --shared-cwd-exception \"<reason>\"'), then re-run --prepare."
+	}
+	return "Preparation is transactional, so this profile has been RESTORED to its pre-preparation state; " +
+		"it still exists and the blocked row's commands apply to it as printed. Fix the reported rows, then re-run --prepare."
+}

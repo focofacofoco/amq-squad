@@ -513,13 +513,17 @@ Examples:
 		m.ToolProfile = strings.TrimSpace(toolProfiles[id])
 		m.ToolConfig = strings.TrimSpace(toolConfigs[id])
 		if c, ok := cwdOverrides[id]; ok {
-			abs, err := expandPath(c)
+			// #538 F2: use the SHARED resolver. This path previously had its own
+			// copy, which anchored a relative value to the shell working directory
+			// and compared team-home by raw string equality, so create and
+			// add/update could record different values for the same input. Two
+			// writers with two origins is the #539/#540 defect; there is now one
+			// function and one origin (the project).
+			resolved, err := memberCWDOverride(cwd, c)
 			if err != nil {
 				return fmt.Errorf("resolve cwd for %s: %w", id, err)
 			}
-			if abs != cwd {
-				m.CWD = abs
-			}
+			m.CWD = resolved
 		}
 		members = append(members, m)
 	}
