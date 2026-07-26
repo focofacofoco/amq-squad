@@ -448,12 +448,46 @@ Lifecycle:
 ```sh
 amq-squad status --session issue-96
 amq-squad console --session issue-96
+amq-squad context explain
+amq-squad context cleanup                  # preview + default-No confirmation
 amq-squad stop --session issue-96 --all
 amq-squad resume --session issue-96 --exec
 amq-squad fork --from issue-96 --as issue-96-review
 amq-squad archive issue-96
 amq-squad rm issue-96
 ```
+
+`context` considers only verified-live launch records at
+`live_launch_record` precedence. `stop` preserves a resumable record but marks
+it non-live. PID-backed identity requires the recorded binary and a process
+birth time compatible with the launch record; pane-backed identity requires
+the exact `amq:<session>:<role>` title, so reused PIDs and pane numbers cannot
+silently restore stale context. Process birth-time comparison allows a bounded
+two-second clock/reconstruction skew, while binary and TTY checks still apply.
+One runtime-identity classifier supplies context selection (including implicit
+project bootstrap), status/resume, and cleanup. `context cleanup` is the
+explicit recovery path for older orphaned records: it previews
+project-matching records that classifier finds non-live, requires confirmation,
+and rechecks each record under its writer lock before removal. Wake, presence,
+and replacement-pane liveness all preserve a record, as does any record that
+became live or changed after preview. External records are the deliberate
+exception to replacement-pane recovery: their registered pane must retain the
+exact `amq:<session>:<role>` title. A legitimate external lead that moves to a
+different pane therefore reads stale until it is re-registered; this
+fail-closed tradeoff prevents pane-number reuse from impersonating the
+operator-visible lead. `agent up` stamps that same title when it adopts the
+operator's current tmux pane, so the pane is retitled as part of becoming a
+managed identity. If the operator renames it later, liveness degrades
+gracefully to the verified PID path rather than trusting the renamed pane.
+
+`doctor` has three severities: `ok`, `warn`, and `fail`. Only `fail` makes the
+command exit non-zero; warnings remain visible readiness notes. A shared Git
+index is therefore a failure only when two or more affected members are live.
+Stopped or unplanned members sharing an index produce a warning with the exact
+`worktree plan` / `worktree materialize` remedy. Doctor uses the same
+replacement-pane discovery as status; if a member's runtime environment cannot
+be resolved, the affected role and resolution error remain visible in the
+diagnostic detail.
 
 Coordination:
 
@@ -787,9 +821,31 @@ amq-squad is tracker-neutral. Fetching GitHub, Jira, Confluence, or other goal
 sources happens in the skills or operator tooling; the core binary owns team,
 runtime, and coordination state.
 
-The minimum 0.42.1 compatibility floor is unchanged. This release is
-explicitly validated against pinned 0.45.0; latest remains a
-forward-compatibility canary.
+The minimum 0.42.1 compatibility floor is unchanged. General compatibility is
+explicitly validated against 0.42.1, 0.43.1, 0.45.0, 0.47.2, and 0.48.0;
+`latest` remains a moving forward-compatibility canary. The required macOS
+real-PTY wake matrix pins the same releases except for `latest`.
+
+AMQ 0.47.1 changed supervised `coop exec` wake input deliberately: instead of
+injecting message headers or subjects, it submits the fixed, shell-inert
+doorbell `: AMQ doorbell run amq drain --include-body then act on it`. Agents
+must drain the durable mailbox to discover the sender, subject, and body.
+AMQ 0.47.2 is the pinned 0.47 representative because it also keeps terminal
+authority stable during TTY activity.
+
+On Linux, AMQ 0.48.0 probes the legacy TIOCSTI capability. When the kernel
+disables it, wake degrades to a non-input notifier and records
+`injector_unsupported` diagnostics instead of pretending synthetic input was
+delivered. The macOS real-PTY lane proves native injection where TIOCSTI is
+available; AMQ's upstream tests own the Linux-only
+`/proc/sys/dev/tty/legacy_tiocsti=0` fallback.
+
+AMQ 0.48.0 can also inspect malformed configured mailbox layouts with
+`amq doctor --json` and create only missing safe directories with
+`amq doctor --fix-mailboxes --json`. Repair is explicit and fail-closed:
+existing messages are not moved, overwritten, or deleted, discovered-only
+mailboxes are not repair eligible, and unsafe filesystem state is refused.
+amq-squad never runs this mutating repair automatically.
 
 v2.20.0 requires AMQ 0.42.1+, the first supported release for the complete
 injected identity contract. After upgrading AMQ, stop and resume/relaunch agents

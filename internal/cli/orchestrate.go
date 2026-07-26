@@ -859,7 +859,12 @@ func runRunStart(args []string, version string) error {
 			if err := applyRunStartToolProfiles(project, profile, *toolProfileFlag); err != nil {
 				return runReadinessResult{}, err
 			}
-			return prepareRunArtifacts(project, profile, session, strings.TrimSpace(*launchShapeFlag), *stagedRolesFlag, *goalFlag, *goalSourceFlag, *goalDigestFlag, *seedFlag, runContext)
+			// #538 F3: teamPresent is captured by preflight BEFORE any roster is
+			// created, which is the only honest answer to "did this run create the
+			// profile". Deriving it from the preparation snapshot cannot work:
+			// runStartCreateFreshRoster runs first, so by then the profile always
+			// exists.
+			return prepareRunArtifacts(project, profile, session, strings.TrimSpace(*launchShapeFlag), *stagedRolesFlag, *goalFlag, *goalSourceFlag, *goalDigestFlag, *seedFlag, runContext, teamPresent)
 		})
 		printRunReadiness(result)
 		if err != nil {
@@ -1664,8 +1669,7 @@ func defaultRunStartLeadReadyCheck(project, profile, session, role string) (runS
 			continue
 		}
 		if row.Status == statusStateLive &&
-			row.Signals.AgentAlive &&
-			row.Signals.BinaryMatch &&
+			row.liveness.RuntimeIdentity.PIDLive &&
 			row.Tmux != nil &&
 			row.Tmux.PaneAlive {
 			return runStartLeadReadiness{Ready: true, Detail: fmt.Sprintf("role %s live in pane %s", row.Role, row.Tmux.PaneID)}, nil
