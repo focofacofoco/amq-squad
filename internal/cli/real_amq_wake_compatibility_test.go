@@ -525,6 +525,7 @@ func assertMarkerFreeWake(t *testing.T, got string) {
 func assertRealAMQCoopWakePayload(t *testing.T, version, got, legacySubject string) {
 	t.Helper()
 	assertMarkerFreeWake(t, got)
+	// Unparseable versions intentionally take the legacy branch so local dev binaries fail loudly.
 	if semverMeetsStableFloor(version, "0.47.1") {
 		if got != realAMQCoopWakeDoorbell {
 			t.Fatalf("submitted coop wake = %q, want fixed doorbell %q for AMQ %s", got, realAMQCoopWakeDoorbell, version)
