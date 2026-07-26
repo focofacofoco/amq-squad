@@ -550,28 +550,68 @@ class FourthRoundFindings(unittest.TestCase):
 
     # Finding 1 + #10: structure, not prose or examples ----------------------
     def test_flag_surface_ignores_prose_and_examples(self):
-        """`--dry-run` appears in notify's EXAMPLES and `alias for --profile` in
-        activity set's DESCRIPTIONS. Neither is the flag surface. Scraping them made
-        real flags look absent and invented drift."""
-        known, _ = self.gate.flag_surface(str(BINARY), "activity", "set")
-        # activity set's real flags come from the definition list...
-        self.assertIn("--me", known)
-        # ...and a flag named only inside a description must not be treated as a
-        # separate declared flag of some other command.
-        top = self.gate.run_help(str(BINARY))
-        self.assertIn("Usage", top)
+        """Asserts the NEGATIVE, which the previous version never did.
 
-    def test_global_flag_surface_is_structural(self):
-        """Both directions were wrong: examples were accepted as flags, and --version
-        was rejected despite being valid."""
+        Scanning the whole help body let any indented dash-leading line become a
+        definition, so an indented PROSE line mentioning a flag entered the surface.
+        A test that only checks a real flag is present cannot see that.
+        """
+        gate = self.gate
+        fake_help = "\n".join(
+            [
+                "amq-squad fake - a fake command",
+                "",
+                "Usage:",
+                "  amq-squad fake [--real-one VALUE]",
+                "",
+                "Description:",
+                "  --bogus-prose-flag appears only in prose and is not a flag.",
+                "",
+                "Examples:",
+                "  amq-squad fake --bogus-example-flag",
+                "",
+            ]
+        )
+        original = gate.run_help
+        gate.run_help = lambda *a, **k: fake_help
+        try:
+            known, exhaustive = gate.flag_surface("binary", "fake", None)
+        finally:
+            gate.run_help = original
+        self.assertIn("--real-one", known, "the usage block IS a flag surface")
+        self.assertNotIn("--bogus-prose-flag", known, "a prose line must NOT enter the surface")
+        self.assertNotIn("--bogus-example-flag", known, "an EXAMPLE must NOT enter the surface")
+        self.assertFalse(exhaustive, "a hand-written usage block is illustrative")
+
+    def test_go_definition_list_is_still_read(self):
+        """Section scoping must not break the exhaustive case it exists to serve."""
+        known, exhaustive = self.gate.flag_surface(str(BINARY), "activity", "set")
+        self.assertTrue(exhaustive)
+        for real in ("--me", "--task", "--phase"):
+            self.assertIn(real, known)
+
+    def test_bogus_global_flag_is_unverifiable_not_refuted(self):
+        """Encodes the MODEL, not merely a nonzero exit.
+
+        The earlier version exited at the MIN_COMMANDS floor before ever reaching
+        global verification, so it passed for the wrong reason. Top-level help is
+        hand-written (its Global flags section omits --version), therefore
+        illustrative, therefore a bogus global flag is UNVERIFIABLE rather than
+        refuted.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             for src in sorted(SKILLS.rglob("*.md")):
                 (Path(tmp) / src.name).write_text(src.read_text())
-            (Path(tmp) / "zz_global.md").write_text("```\namq-squad --version\n```\n")
+            (Path(tmp) / "zz_global.md").write_text(
+                "```\namq-squad --version\namq-squad --definitely-not-global\n```\n"
+            )
             result = subprocess.run(
                 [sys.executable, str(GATE), str(BINARY), tmp], capture_output=True, text=True
             )
-        self.assertEqual(result.returncode, 0, f"--version is valid and must not fail:\n{result.stderr}")
+        self.assertNotIn("expected >=", result.stderr, "corpus must clear the floors and reach the check")
+        self.assertEqual(result.returncode, 0, f"illustrative surface must not refute:\n{result.stderr}")
+        self.assertIn("NOT verifiable", result.stdout)
+        self.assertIn("--definitely-not-global", result.stdout)
 
     # Finding 2: one span, two commands --------------------------------------
     def test_one_span_two_commands_both_extracted(self):
@@ -600,11 +640,23 @@ class FourthRoundFindings(unittest.TestCase):
         self.assertIn("-apply", claimed, "a single-dash token must be reported, not dropped")
 
     # Finding 4: floor math, and the main()-level exit test ------------------
-    def test_floor_uses_ceiling_not_truncation(self):
-        """int() truncation let 11/23 (47.8%) pass a 50% floor."""
-        import math
+    def test_floor_uses_productions_ceiling_not_pythons(self):
+        """Exercises required_verified(), the PRODUCTION calculation.
 
-        self.assertEqual(math.ceil(23 * 0.5), 12, "12 of 23 is the true 50% threshold")
+        The previous version asserted math.ceil(23 * 0.5) == 12, which tests Python
+        and stays green if production truncates with int(). Third appearance of the
+        vacuity pattern inside tests OF the gate.
+        """
+        # 23 verifiable at 50% is 11.5; truncation gives 11, ceiling gives 12.
+        self.assertEqual(self.gate.required_verified(23), max(self.gate.MIN_VERIFIED_FLAGS, 12))
+        self.assertGreater(
+            self.gate.required_verified(23), 11, "int() truncation would allow 11 of 23 (47.8%)"
+        )
+
+    def test_floors_sit_at_committed_coverage(self):
+        """Floors set far below real coverage permitted a 13 -> 5 collapse at exit 0."""
+        self.assertGreaterEqual(self.gate.MIN_VERIFIED_FLAGS, 12)
+        self.assertGreaterEqual(self.gate.MIN_VERIFIABLE_FLAGS, 12)
 
     def test_floor_guards_the_verifiable_set_too(self):
         self.assertGreater(self.gate.MIN_VERIFIABLE_FLAGS, 0)

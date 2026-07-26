@@ -129,10 +129,23 @@ MIN_FLAGS_CLAIMED_FOR_FLOOR = 4
 # Committed coverage baseline. At the time of writing the gate verifies 15 of 23
 # claimed flags; these floors make a regression from that a BUILD failure rather
 # than a quiet shrink. Raise them when coverage genuinely improves.
-MIN_VERIFIED_FLAGS = 4
+# Floors sit AT committed coverage with one flag of headroom. Set far below it (4
+# and 5 against real coverage of 13) they permitted a 13 -> 5 collapse while exiting
+# 0, which is the silent shrink the floor exists to prevent.
+MIN_VERIFIED_FLAGS = 12
 # The VERIFIABLE set must not silently shrink either, or the ratio is vacuous.
-MIN_VERIFIABLE_FLAGS = 5
+MIN_VERIFIABLE_FLAGS = 12
 MIN_VERIFIED_FLAG_RATIO = 0.5
+
+
+def required_verified(verifiable: int) -> int:
+    """Minimum verified flags for a given verifiable count.
+
+    Production calculation, exposed so a test exercises THIS rather than Python's
+    math library: asserting math.ceil(23 * 0.5) == 12 stays green when production
+    truncates with int(), which made that test vacuous.
+    """
+    return max(MIN_VERIFIED_FLAGS, math.ceil(verifiable * MIN_VERIFIED_FLAG_RATIO))
 
 
 def run_help(binary: str, *args: str) -> str:
@@ -152,6 +165,10 @@ def verb_surface(binary: str) -> set[str]:
 # A command like that accepts flags its own help never enumerates, so its flag set
 # is not observable from --help and must not be treated as exhaustive.
 DELEGATES_FLAGS = re.compile(r"\[[^\]]*\b(?:flags|options)\]")
+
+# Section headers that introduce a FLAG LIST. Anything else (Examples:, Exit codes:,
+# Commands:, prose) is not a flag surface.
+FLAG_SECTION_HEADER = re.compile(r"\b(?:flags|options)\b", re.I)
 
 
 # The binary names its own valid subcommands when given a bad one:
@@ -284,8 +301,24 @@ def flag_surface(binary: str, verb: str, sub: str | None) -> tuple[set[str], boo
                 continue
             usage_flags.update(re.findall(r"--([A-Za-z][A-Za-z0-9-]*)", line))
 
+    # Finding 1: scanning the WHOLE body let any indented dash-leading line become a
+    # "definition", so an indented PROSE line mentioning a flag entered the surface.
+    # Collect definitions only inside recognized FLAG SECTIONS: everything after Go's
+    # `Usage of X:` header (that whole block is the definition list), or a hand-written
+    # section whose header names flags/options. `Examples:` and prose sections are
+    # excluded by construction rather than by pattern luck.
     definitions: set[str] = set()
+    in_flag_section = False
     for line in lines:
+        if line.startswith("Usage of "):
+            in_flag_section = True
+            continue
+        # A column-0 line ending in ':' starts a new section.
+        if line and not line[0].isspace() and line.rstrip().endswith(":"):
+            in_flag_section = bool(FLAG_SECTION_HEADER.search(line))
+            continue
+        if not in_flag_section:
+            continue
         m = re.match(r"^[ \t]{2,}--?([A-Za-z][A-Za-z0-9-]*)(?:[ \t=,]|$)", line)
         if m:
             definitions.add(m.group(1))
@@ -572,7 +605,7 @@ def main() -> int:
         # The floor measures against VERIFIABLE claims, because a flag on a
         # non-exhaustive surface can only ever be confirmed, never refuted, so
         # counting it as a miss would fail every build under the honest model.
-        required = max(MIN_VERIFIED_FLAGS, math.ceil(flags_verifiable * MIN_VERIFIED_FLAG_RATIO))
+        required = required_verified(flags_verifiable)
         if flags_checked < required:
             print(
                 f"error: only {flags_checked} of {flags_claimed} named flag(s) were verified "
