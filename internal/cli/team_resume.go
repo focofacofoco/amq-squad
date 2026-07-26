@@ -990,7 +990,12 @@ func inspectResumeLeadReady(check resumeExecLaunchCheck, probe duplicateLaunchPr
 	if paneID == "" {
 		return false, "lead launch record has no operator-addressable tmux pane"
 	}
-	if _, ok := statusPaneInspector(paneID); !ok {
+	if !classifyLaunchRuntimeIdentity(
+		rec,
+		check.Binary,
+		paneID,
+		launchRuntimeProbeFromDuplicate(probe),
+	).PaneLive {
 		return false, fmt.Sprintf("lead pane %s is not live", paneID)
 	}
 	bootstrap := bootstrapack.Evaluate(rec.BootstrapExpectation, bootstrapack.Identity{

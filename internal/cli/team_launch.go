@@ -761,7 +761,15 @@ func filterExplicitExternalLead(t team.Team, role string) (team.Team, bool, erro
 }
 
 func externalRecordMatchesPane(rec launch.Record, paneID string) bool {
-	return rec.External && rec.Tmux != nil && strings.TrimSpace(rec.Tmux.PaneID) == strings.TrimSpace(paneID)
+	if !rec.External || rec.Tmux == nil || strings.TrimSpace(rec.Tmux.PaneID) != strings.TrimSpace(paneID) {
+		return false
+	}
+	return classifyLaunchRuntimeIdentity(
+		rec,
+		rec.Binary,
+		paneID,
+		launchRuntimeProbeFromDuplicate(defaultDuplicateLaunchProbe),
+	).PaneLive
 }
 
 func currentEnvIdentifiesExternalLead(m team.Member, handle, root string) bool {

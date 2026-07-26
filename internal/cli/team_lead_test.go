@@ -1706,10 +1706,14 @@ func TestTeamLaunchDryRunSkipsRegisteredExternalLead(t *testing.T) {
 		Tmux:     &launch.TmuxInfo{PaneID: "%5"},
 	})
 	prev := currentPaneIdentity
+	prevInspector := statusPaneInspector
 	currentPaneIdentity = func() (*tmuxpane.PaneIdentity, error) {
 		return &tmuxpane.PaneIdentity{Session: "tmux-main", WindowID: "@7", WindowName: "shell", PaneID: "%5"}, nil
 	}
-	t.Cleanup(func() { currentPaneIdentity = prev })
+	statusPaneInspector = func(id string) (tmuxpane.TmuxPane, bool) {
+		return tmuxpane.TmuxPane{PaneID: id, Title: paneTitleToken("issue-96", "cto")}, id == "%5"
+	}
+	t.Cleanup(func() { currentPaneIdentity = prev; statusPaneInspector = prevInspector })
 
 	stdout, stderr, err := captureOutput(t, func() error {
 		return runTeamLaunch([]string{"--session", "issue-96", "--dry-run", "--no-bootstrap"})
