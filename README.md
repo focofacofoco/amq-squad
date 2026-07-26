@@ -448,12 +448,27 @@ Lifecycle:
 ```sh
 amq-squad status --session issue-96
 amq-squad console --session issue-96
+amq-squad context explain
+amq-squad context cleanup                  # preview + default-No confirmation
 amq-squad stop --session issue-96 --all
 amq-squad resume --session issue-96 --exec
 amq-squad fork --from issue-96 --as issue-96-review
 amq-squad archive issue-96
 amq-squad rm issue-96
 ```
+
+`context` considers only verified-live launch records at
+`live_launch_record` precedence. `stop` preserves a resumable record but marks
+it non-live. `context cleanup` is the explicit recovery path for older orphaned
+records: it previews project-matching non-live records, requires confirmation,
+and rechecks each record under its writer lock before removal. A record that
+became live or changed after preview is always preserved.
+
+`doctor` has three severities: `ok`, `warn`, and `fail`. Only `fail` makes the
+command exit non-zero; warnings remain visible readiness notes. A shared Git
+index is therefore a failure only when two or more affected members are live.
+Stopped or unplanned members sharing an index produce a warning with the exact
+`worktree plan` / `worktree materialize` remedy.
 
 Coordination:
 
