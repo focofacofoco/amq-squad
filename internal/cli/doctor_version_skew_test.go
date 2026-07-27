@@ -139,6 +139,12 @@ func TestDoctorCheckSkillVersion(t *testing.T) {
 	// would capture 9.9.9 from the NEXT line and report a bogus version instead of
 	// warning that the field is absent.
 	versionKeyThenNewline := "---\nname: \"amq-squad\"\nversion:\n9.9.9\n---\n"
+	// A "version:" line in the BODY is not the skill's identity. Without scoping the
+	// search to the opening frontmatter block, this reports 9.9.9 for a bundle whose
+	// frontmatter has no version at all.
+	bodyVersionOnly := "---\nname: \"amq-squad\"\n---\n\n# amq-squad\n\n```yaml\nversion: 9.9.9\n```\n"
+	// No frontmatter at all must not fall back to scanning the body either.
+	noFrontmatter := "# amq-squad\n\nversion: 9.9.9\n"
 
 	cases := []struct {
 		name         string
@@ -156,6 +162,8 @@ func TestDoctorCheckSkillVersion(t *testing.T) {
 		{"skewed warns with both versions", "v2.12.0", skillReader(skewed, "/cache/2.12.0/skills/amq-squad/SKILL.md"), doctorWarn, "skew"},
 		{"absent version field warns", "v2.12.0", skillReader(noMarker, "/cache/2.12.0/skills/amq-squad/SKILL.md"), doctorWarn, "no frontmatter `version:`"},
 		{"version key with value on the next line warns", "v2.12.0", skillReader(versionKeyThenNewline, "/cache/2.12.0/skills/amq-squad/SKILL.md"), doctorWarn, "no frontmatter `version:`"},
+		{"body version line is not the identity", "v2.12.0", skillReader(bodyVersionOnly, "/cache/2.12.0/skills/amq-squad/SKILL.md"), doctorWarn, "no frontmatter `version:`"},
+		{"document without frontmatter warns", "v2.12.0", skillReader(noFrontmatter, "/cache/2.12.0/skills/amq-squad/SKILL.md"), doctorWarn, "no frontmatter `version:`"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

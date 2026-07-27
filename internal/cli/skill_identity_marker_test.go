@@ -12,9 +12,66 @@ import (
 // properties that move had to preserve: the shipped bundle still verifies, and a bundle
 // that cannot be verified still WARNS rather than passing quietly.
 
+// TestNoShippedSkillCarriesThePreamble asserts the deleted preamble is absent from EVERY
+// SKILL.md, in both mirrors and in the sources they are generated from.
+//
+// The doctor-acceptance test below covers only the amq-squad router, because that is the
+// single file the binary reads. Nothing else covers the other 13: the release validator
+// requires the frontmatter version to be PRESENT, the drift gate checks that named
+// commands exist, and `generate-plugin-skills.py --check` only proves mirrors match their
+// sources. A preamble pasted back into one skill's source and faithfully mirrored would
+// pass all three, and agents reading that skill would resume announcing a version from the
+// body -- the exact behaviour #534 removed.
+//
+// Sources are checked as well as mirrors. Mirrors alone would be sufficient (a synced
+// mirror reveals the source, and an unsynced one fails --check), but naming the source
+// file points the reader at the file they would actually edit.
+func TestNoShippedSkillCarriesThePreamble(t *testing.T) {
+	const marker = "Skill version:"
+	roots := []string{
+		filepath.Join("..", "..", "plugins", "skills-src"),
+		filepath.Join("..", "..", "plugins", "claude", "skills"),
+		filepath.Join("..", "..", "plugins", "codex", "skills"),
+	}
+
+	checked := 0
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() || filepath.Base(path) != "SKILL.md" {
+				return nil
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			checked++
+			if strings.Contains(string(raw), marker) {
+				t.Errorf("%s carries the deleted %q preamble; #534 moves identity to frontmatter",
+					filepath.ToSlash(path), marker)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+
+	// Anti-vacuity: 7 skills across a source tree and two mirrors. A walk that found
+	// nothing would otherwise report a clean pass having read no files at all.
+	if checked < 21 {
+		t.Fatalf("inspected only %d SKILL.md files across sources and both mirrors; want >= 21", checked)
+	}
+}
+
 // TestDoctorAcceptsTheRealShippedBundle reads the actual mirror rather than a fixture.
 // A synthetic string proves the regex matches something the test author wrote; only the
 // real file proves the binary agrees with what the generator emits.
+//
+// Scoped to the amq-squad router deliberately: that is the one file the binary reads.
+// Preamble absence across all 14 is TestNoShippedSkillCarriesThePreamble's job.
 func TestDoctorAcceptsTheRealShippedBundle(t *testing.T) {
 	for _, mirror := range []string{"claude", "codex"} {
 		t.Run(mirror, func(t *testing.T) {
@@ -26,10 +83,6 @@ func TestDoctorAcceptsTheRealShippedBundle(t *testing.T) {
 				t.Fatalf("read shipped bundle: %v", err)
 			}
 			body := string(raw)
-
-			if strings.Contains(body, "Skill version:") {
-				t.Fatalf("%s still carries the deleted body preamble; #534 removes it", skillPath)
-			}
 
 			m := skillVersionFrontmatterRE.FindStringSubmatch(body)
 			if m == nil {

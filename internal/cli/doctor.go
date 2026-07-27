@@ -321,6 +321,31 @@ func doctorCheckCodexSkillCache(d doctorExecution) doctorCheck {
 // class is narrowed to [ \t]* to keep the match on its own line.
 var skillVersionFrontmatterRE = regexp.MustCompile(`(?m)^version:[ \t]*"?([0-9]+\.[0-9]+\.[0-9]+)"?`)
 
+// skillFrontmatterBlockRE captures the body of the OPENING frontmatter block only.
+var skillFrontmatterBlockRE = regexp.MustCompile(`(?s)\A---\r?\n(.*?)\r?\n---\r?(?:\n|\z)`)
+
+// skillFrontmatterVersion reads the shipped version from a skill document's opening
+// frontmatter. Scoping to that block matters as much as the pattern: a bare
+// whole-document search would also match a line beginning "version:" anywhere in the
+// BODY -- a YAML example inside a fence, say -- and report it as the skill's identity.
+// No shipped skill contains such a line today, so this is defence in depth rather than
+// a live fix.
+//
+// Credit: amq-dev-2 arrived at opening-frontmatter-only scoping for #566's Python
+// validator; matching it here keeps binary and validator agreeing by construction
+// instead of by each being independently reasonable.
+func skillFrontmatterVersion(content string) (string, bool) {
+	block := skillFrontmatterBlockRE.FindStringSubmatch(content)
+	if block == nil {
+		return "", false
+	}
+	m := skillVersionFrontmatterRE.FindStringSubmatch(block[1])
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
 // doctorCheckSkillVersion verifies that the installed amq-squad skill's frontmatter
 // version matches the running binary. Agents load the
 // cached skill on session start; if skill and binary differ they silently
@@ -341,12 +366,12 @@ func doctorCheckSkillVersion(d doctorExecution) doctorCheck {
 		return doctorCheck{Name: name, Status: doctorWarn,
 			Detail: fmt.Sprintf("no installed skill bundle found for %s; cannot verify skill/binary alignment. The skill must be installed so each agent session loads the matching build.", running)}
 	}
-	m := skillVersionFrontmatterRE.FindStringSubmatch(content)
-	if m == nil {
+	version, ok := skillFrontmatterVersion(content)
+	if !ok {
 		return doctorCheck{Name: name, Status: doctorWarn,
 			Detail: fmt.Sprintf("installed skill at %s has no frontmatter `version:` field; cannot verify alignment. The skill bundle may be stale or incomplete.", skillPath)}
 	}
-	installed := "v" + m[1]
+	installed := "v" + version
 	want := running
 	if !strings.HasPrefix(want, "v") {
 		want = "v" + want
