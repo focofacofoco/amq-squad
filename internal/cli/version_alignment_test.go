@@ -42,7 +42,8 @@ func alignedVersionSources(t *testing.T, version string) versionAlignmentSources
 			return claudeRoot
 		},
 		SkillMDContent: func(string) (string, string, bool) {
-			return "**Skill version: " + trimmed + "** - ok", "/cache/" + trimmed + "/skills/amq-squad/SKILL.md", true
+			// Shipped shape after #534: identity in frontmatter, no body preamble.
+			return "---\nname: \"amq-squad\"\nversion: \"" + trimmed + "\"  # x-release-please-version\n---\n", "/cache/" + trimmed + "/skills/amq-squad/SKILL.md", true
 		},
 	}
 }

@@ -288,13 +288,15 @@ func skillVersionComponent(reader func(runningVersion string) (content, path str
 			Detail:         fmt.Sprintf("no installed amq-squad skill bundle found for %s", running),
 		}
 	}
-	m := skillVersionMarkerRE.FindStringSubmatch(content)
+	// SHARED SHAPE: see skillVersionFrontmatterRE in doctor.go -- binary, validator and
+	// generator must agree on how the frontmatter version is read.
+	m := skillVersionFrontmatterRE.FindStringSubmatch(content)
 	if m == nil {
 		return versionComponentData{
 			Status:         "warn",
 			Path:           path,
 			MatchesRunning: boolPtr(false),
-			Detail:         fmt.Sprintf("installed skill at %s has no 'Skill version:' marker", path),
+			Detail:         fmt.Sprintf("installed skill at %s has no frontmatter `version:` field", path),
 		}
 	}
 	version := "v" + m[1]
