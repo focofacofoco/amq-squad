@@ -58,19 +58,21 @@ func TestNoProductionCodeBuildsExpectationLiterals(t *testing.T) {
 			if !ok || len(ret.Results) < 2 {
 				return true
 			}
-			for i, res := range ret.Results {
+			for _, res := range ret.Results {
 				lit, isLit := res.(*ast.CompositeLit)
 				if !isLit || len(lit.Elts) != 0 {
 					continue
 				}
-				// a sibling result must be a non-nil error-ish identifier
-				for j, sib := range ret.Results {
-					if j == i {
-						continue
-					}
-					if id, isID := sib.(*ast.Ident); isID && id.Name != "nil" {
-						exempt[lit] = true
-					}
+				// The exemption requires a non-nil value in the ERROR POSITION, i.e. the
+				// LAST result. Accepting any non-nil identifier anywhere let
+				// `return Expectation{}, nil, cached` through on the strength of `cached`
+				// while the error result was nil (#575 round 4).
+				last := ret.Results[len(ret.Results)-1]
+				if id, isID := last.(*ast.Ident); isID && id.Name != "nil" {
+					exempt[lit] = true
+				}
+				if _, isCall := last.(*ast.CallExpr); isCall {
+					exempt[lit] = true
 				}
 			}
 			return true
@@ -170,11 +172,34 @@ func TestRenderedPromotionRefusalDoesNotCallAnIncompleteRecordAMismatch(t *testi
 // every site that wraps an error with the mismatch label must first route the sentinel away.
 func TestEveryMismatchWrapperGuardsTheIncompleteSentinel(t *testing.T) {
 	const label = "verified live identity mismatch"
-	const guard = "errIncompleteLaunchRecord"
+	const sentinel = "errIncompleteLaunchRecord"
 	root := filepath.Join("..", "..", "internal")
 
 	var unguarded []string
 	sites := 0
+
+	// guardsSentinel reports whether an if-statement tests errors.Is(..., sentinel).
+	guardsSentinel := func(n ast.Node) bool {
+		found := false
+		ast.Inspect(n, func(x ast.Node) bool {
+			call, ok := x.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel == nil || sel.Sel.Name != "Is" {
+				return true
+			}
+			for _, a := range call.Args {
+				if id, isID := a.(*ast.Ident); isID && id.Name == sentinel {
+					found = true
+				}
+			}
+			return true
+		})
+		return found
+	}
+
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -182,38 +207,62 @@ func TestEveryMismatchWrapperGuardsTheIncompleteSentinel(t *testing.T) {
 		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
+		fset := token.NewFileSet()
+		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return parseErr
 		}
-		lines := strings.Split(string(raw), "\n")
-		for i, line := range lines {
-			if !strings.Contains(line, label) || strings.HasPrefix(strings.TrimSpace(line), "//") {
-				continue
+		ast.Inspect(file, func(n ast.Node) bool {
+			block, ok := n.(*ast.BlockStmt)
+			if !ok {
+				return true
 			}
-			sites++
-			// The guard must appear in the enclosing few lines above the wrap.
-			lo := i - 6
-			if lo < 0 {
-				lo = 0
+			guarded := false
+			for _, stmt := range block.List {
+				if ifs, isIf := stmt.(*ast.IfStmt); isIf && guardsSentinel(ifs.Cond) {
+					guarded = true
+					continue
+				}
+				// Does this statement ITSELF wrap with the mismatch label? Stop at nested
+				// block boundaries: an enclosing `if err != nil { ... }` contains the label
+				// in a child block that this walk visits separately, and judging the
+				// enclosing statement flagged correctly-guarded code.
+				wraps := false
+				ast.Inspect(stmt, func(x ast.Node) bool {
+					if x == nil {
+						return false
+					}
+					if b, isBlock := x.(*ast.BlockStmt); isBlock && b != stmt {
+						return false
+					}
+					if lit, isLit := x.(*ast.BasicLit); isLit && strings.Contains(lit.Value, label) {
+						wraps = true
+					}
+					return true
+				})
+				if !wraps {
+					continue
+				}
+				sites++
+				if !guarded {
+					unguarded = append(unguarded, fset.Position(stmt.Pos()).String())
+				}
 			}
-			if !strings.Contains(strings.Join(lines[lo:i], "\n"), guard) {
-				unguarded = append(unguarded, filepath.ToSlash(path)+":"+itoa(i+1))
-			}
-		}
+			return true
+		})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
 
-	// Anti-vacuity: if the label is ever renamed this test must fail loudly rather than
-	// silently pass by finding nothing to check.
+	// Anti-vacuity: if the label is renamed this must fail rather than pass by finding nothing.
 	if sites == 0 {
 		t.Fatalf("found no %q wrap sites; the label was renamed and this test is now blind", label)
 	}
 	if len(unguarded) != 0 {
-		t.Errorf("these sites wrap an error as %q without first routing %s away: %v. "+
-			"An incomplete record is cannot-verify, not verifiably-wrong", label, guard, unguarded)
+		t.Errorf("these sites wrap an error as %q without an errors.Is(%s) guard DOMINATING them "+
+			"in the same block: %v. An incomplete record is cannot-verify, not verifiably-wrong",
+			label, sentinel, unguarded)
 	}
 }

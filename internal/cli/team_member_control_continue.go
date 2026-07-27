@@ -179,7 +179,7 @@ func resolveExactTmuxControlContinue(project, profile, session, role, expectedCl
 	verified, err := deps.Verify(project, profile, session, mr.Handle)
 	if err != nil || verified.Verified == nil {
 		if err == nil {
-			err = fmt.Errorf("authoritative resolver returned no verified identity")
+			err = fmt.Errorf("%w: authoritative resolver returned no verified identity", errIncompleteLaunchRecord)
 		}
 		// Sixth wrap site (#575 round 3). The sentinel arrives here and was relabelled a
 		// mismatch, defeating the classification at another operator-visible surface.
