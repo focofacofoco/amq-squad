@@ -168,9 +168,13 @@ type statusRecord struct {
 	Status      statusState        `json:"status"`
 	RecordState string             `json:"record_state"`
 	Detail      string             `json:"detail,omitempty"`
-	Signals     statusSignals      `json:"signals"`
-	liveness    agentLiveness
-	goalBinding *launch.GoalBinding
+	// ClassificationError is fail-visible source evidence for callers that
+	// must distinguish an ordinary missing member from an unreadable or
+	// otherwise unclassifiable identity.
+	ClassificationError string        `json:"classification_error,omitempty"`
+	Signals             statusSignals `json:"signals"`
+	liveness            agentLiveness
+	goalBinding         *launch.GoalBinding
 	// Tmux is the persisted tmux runtime identity (exact pane/window ids) plus
 	// a computed pane_alive, so clients can target follow-up control. Omitted
 	// when the agent's launch record carried no tmux identity.
@@ -1703,6 +1707,7 @@ func classifyMemberStatusWithReplacementResolver(t team.Team, profile string, m 
 		rec.Status = statusStateMissing
 		rec.RecordState = "missing"
 		rec.Detail = "amq env unresolved: " + err.Error()
+		rec.ClassificationError = rec.Detail
 		return rec
 	}
 	if env.Me != "" {
@@ -1719,6 +1724,7 @@ func classifyMemberStatusWithReplacementResolver(t team.Team, profile string, m 
 	// verdict->statusState mapping lives in the classifier (Status field).
 	live := classifyAgentLivenessWithReplacementResolver(rec.AgentDir, root, profile, rec.Handle, m.Role, m.Binary, workstream, rec.CWD, probe, replacement)
 	rec.liveness = live
+	rec.ClassificationError = live.SourceError
 	rec.Tmux = tmuxRuntimeFromInfo(live.Tmux)
 	if live.LaunchFound {
 		rec.Terminal = terminalRuntimeFromInfo(live.LaunchRecord.Terminal)
@@ -1766,6 +1772,9 @@ func classifyMemberStatusWithReplacementResolver(t team.Team, profile string, m 
 	}
 	if rec.LiveIdentityMode != "managed_refused" {
 		rec.Detail = live.Detail
+		if rec.ClassificationError != "" {
+			rec.Detail = rec.ClassificationError
+		}
 	}
 	if rec.Tmux != nil {
 		rec.AgentPaneID = strings.TrimSpace(rec.Tmux.PaneID)

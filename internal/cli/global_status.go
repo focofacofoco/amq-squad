@@ -288,6 +288,16 @@ func projectGlobalStatusNOC(item globalNOCLaunch, identityFn func(launch.Record,
 	case globalNOCLaunchStopped:
 		health = globalStatusStopped
 	}
+	detail := item.Detail
+	if item.State == globalNOCLaunchStopped && identity.Live {
+		health = globalStatusDegraded
+		contradiction := "persisted NOC state is stopped but the canonical runtime identity is live; start is withheld"
+		if strings.TrimSpace(detail) == "" {
+			detail = contradiction
+		} else {
+			detail += "; " + contradiction
+		}
+	}
 	paneID := ""
 	if item.Record.Tmux != nil {
 		paneID = item.Record.Tmux.PaneID
@@ -301,7 +311,7 @@ func projectGlobalStatusNOC(item globalNOCLaunch, identityFn func(launch.Record,
 			PIDAlive: identity.PIDAlive, BinaryMatch: identity.BinaryMatch,
 		},
 		Backstop: item.Backstop, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
-		Detail: item.Detail,
+		Detail: detail,
 	}
 }
 
@@ -386,6 +396,9 @@ func projectGlobalStatusRun(s globalStatusExecution, registry globalNOCRegistry,
 			Status: status.Status, RecordState: status.RecordState, Detail: status.Detail,
 			Signals: status.Signals, Namespace: status.Namespace, Terminal: status.Terminal,
 		}
+		if strings.TrimSpace(status.ClassificationError) != "" {
+			appendRunSourceError("lead", status.ClassificationError)
+		}
 	}
 
 	operatorProjector := s.OperatorData
@@ -405,7 +418,11 @@ func projectGlobalStatusRun(s globalStatusExecution, registry globalNOCRegistry,
 		if !sameGlobalStatusNamespace(operatorData.Namespace, expectedNamespace) {
 			appendRunSourceError("operator_gates", "operator projection namespace contradicts the registered namespace")
 		} else {
-			row.OperatorGates = globalStatusOpenGates(operatorData.Attention)
+			var attentionErrors []string
+			row.OperatorGates, attentionErrors = globalStatusOpenGates(operatorData.Attention, expectedNamespace)
+			for _, detail := range attentionErrors {
+				appendRunSourceError("operator_gates", detail)
+			}
 		}
 	}
 
@@ -421,9 +438,6 @@ func projectGlobalStatusRun(s globalStatusExecution, registry globalNOCRegistry,
 }
 
 func globalStatusAMQBaseRoot(namespace squadnamespace.Ref) string {
-	if squadnamespace.NormalizeProfile(namespace.Profile) == team.DefaultProfile {
-		return filepath.Dir(namespace.AMQRoot)
-	}
 	return namespace.AMQRoot
 }
 
@@ -521,11 +535,22 @@ func validateGlobalStatusRegistration(registry globalNOCRegistry, run globalNOCR
 	}
 }
 
-func globalStatusOpenGates(items []operatorAttention) globalStatusGatesView {
+func globalStatusOpenGates(items []operatorAttention, expected squadnamespace.Ref) (globalStatusGatesView, []string) {
 	out := globalStatusGatesView{Items: []globalStatusGateView{}}
+	var sourceErrors []string
 	var oldest operatorAttention
 	for _, item := range items {
 		if !isOpenGateAttention(item) {
+			continue
+		}
+		if strings.TrimSpace(item.Profile) == "" ||
+			!squadnamespace.ProfilesEqual(item.Profile, expected.Profile) ||
+			item.Session != expected.Session ||
+			item.NamespaceID != expected.ID {
+			sourceErrors = append(sourceErrors, fmt.Sprintf(
+				"attention item %q contradicts registered namespace %s (profile=%q session=%q namespace_id=%q)",
+				item.Thread, expected.ID, item.Profile, item.Session, item.NamespaceID,
+			))
 			continue
 		}
 		out.Items = append(out.Items, globalStatusGateView{
@@ -546,7 +571,7 @@ func globalStatusOpenGates(items []operatorAttention) globalStatusGatesView {
 	if out.Open > 0 {
 		out.OldestAge = oldest.Age
 	}
-	return out
+	return out, sourceErrors
 }
 
 func globalStatusRunBackstop(run globalNOCRun, config globalNOCBackstop) globalStatusBackstopView {
@@ -650,7 +675,7 @@ func globalNOCStatusActions(root string, noc *globalStatusNOCView, registryState
 			Mutates: false, NeedsConfirmation: false, Available: true,
 		},
 		{
-			Kind: "global_start", Label: "launch global NOC", Scope: "global",
+			Kind: "global_start", Label: "confirm launch global NOC", Scope: "global",
 			Command: "amq-squad global start" + scope + " --go",
 			Mutates: true, NeedsConfirmation: true, Available: repairAvailable, Reason: repairReason,
 		},
@@ -668,6 +693,9 @@ func confirmGatedSessionActions(namespace squadnamespace.Ref) []runtimeActionJSO
 		}
 		if action.Mutates {
 			action.NeedsConfirmation = true
+			if !strings.Contains(strings.ToLower(action.Label), "confirm") {
+				action.Label = "confirm " + action.Label
+			}
 			action.Reason = "confirm-gated: mutates the registered session runtime"
 			runtimeaction.SyncUnavailableReason(&action)
 		}
@@ -688,15 +716,15 @@ func renderGlobalStatus(out io.Writer, data globalStatusEnvelopeData, jsonOut bo
 	}
 	if len(data.Runs) > 0 {
 		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "NAMESPACE\tHEALTH\tLEAD\tREGISTRATION\tGATES\tWATCHER\tLAST-REFRESH")
+		fmt.Fprintln(tw, "NAMESPACE\tHEALTH\tLEAD\tDETAIL\tREGISTRATION\tGATES\tWATCHER\tLAST-REFRESH")
 		for _, row := range data.Runs {
 			gates := fmt.Sprintf("%d", row.OperatorGates.Open)
 			if row.OperatorGates.OldestAge != "" {
 				gates += " (" + row.OperatorGates.OldestAge + ")"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\n",
+			fmt.Fprintf(tw, "%s\t%s\t%s/%s\t%s\t%s\t%s\t%s\t%s\n",
 				row.Namespace.ID, row.Health, emptyCell(row.Lead.Role), emptyCell(row.Lead.Status),
-				row.Registration.State, gates, emptyCell(row.Watcher.Health), row.LastRefresh.Format(time.RFC3339))
+				emptyCell(row.Lead.Detail), row.Registration.State, gates, emptyCell(row.Watcher.Health), row.LastRefresh.Format(time.RFC3339))
 		}
 		_ = tw.Flush()
 	}

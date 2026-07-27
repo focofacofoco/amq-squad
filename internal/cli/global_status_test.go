@@ -13,6 +13,7 @@ import (
 
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
+	"github.com/omriariav/amq-squad/v2/internal/state"
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
@@ -82,7 +83,7 @@ func TestGlobalStatusMissingRegistryIsVisibleReadOnlyAndNonFatal(t *testing.T) {
 	if len(env.Data.SourceErrors) != 1 || env.Data.SourceErrors[0].Source != "registry" {
 		t.Fatalf("missing registry source errors = %+v", env.Data.SourceErrors)
 	}
-	assertGlobalStatusActionsConfirmGated(t, env.Data.Actions)
+	assertGlobalStatusActionsConfirmGated(t, env.Data.Actions, "global_status", "global_start")
 }
 
 func TestRunGlobalStatusRoutesAndKeepsDegradationNonFatal(t *testing.T) {
@@ -189,16 +190,19 @@ func TestGlobalStatusProjectsMixedRunsFromOneRegistrySnapshot(t *testing.T) {
 						EventType: "gate", Thread: "gate/newer", Subject: "APPROVAL: newer",
 						GateKind: "approval", Age: "1h", LastEventAt: now.Add(-time.Hour),
 						Inspect: "amq thread --id gate/newer", Actionable: true,
+						Profile: profile, Session: session, NamespaceID: squadnamespace.ID(profile, session),
 					},
 					{
 						EventType: "gate", Thread: "gate/older", Subject: "APPROVAL: older",
 						GateKind: "approval", Age: "3h", LastEventAt: now.Add(-3 * time.Hour),
 						Inspect: "amq thread --id gate/older", Actionable: true,
+						Profile: profile, Session: session, NamespaceID: squadnamespace.ID(profile, session),
 					},
 					{
 						EventType: "gate", Thread: "gate/cleared", Subject: "APPROVED",
 						Age: "4h", LastEventAt: now.Add(-4 * time.Hour),
 						Actionable: true, Cleared: true,
+						Profile: profile, Session: session, NamespaceID: squadnamespace.ID(profile, session),
 					},
 				}
 			}
@@ -254,9 +258,9 @@ func TestGlobalStatusProjectsMixedRunsFromOneRegistrySnapshot(t *testing.T) {
 	if env.Data.Health != globalStatusUnknown || env.Data.Readiness.Ready {
 		t.Fatalf("mixed overall readiness = %+v / health=%s", env.Data.Readiness, env.Data.Health)
 	}
-	assertGlobalStatusActionsConfirmGated(t, env.Data.Actions)
+	assertGlobalStatusActionsConfirmGated(t, env.Data.Actions, "global_status", "global_start")
 	for _, row := range env.Data.Runs {
-		assertGlobalStatusActionsConfirmGated(t, row.Actions)
+		assertGlobalStatusActionsConfirmGated(t, row.Actions, "status", "resume_preview", "resume_new_session")
 	}
 }
 
@@ -319,6 +323,148 @@ func TestGlobalStatusNamedProfileUsesIsolatedAMQBaseRoot(t *testing.T) {
 	env := decodeGlobalStatusTestEnvelope(t, out.Bytes())
 	if len(env.Data.Runs) != 1 || env.Data.Runs[0].Health != globalStatusHealthy {
 		t.Fatalf("named-profile row = %+v", env.Data.Runs)
+	}
+}
+
+func TestGlobalStatusDefaultProfileScannerCannotReadSiblingSession(t *testing.T) {
+	project := t.TempDir()
+	registered := squadnamespace.Resolve(project, team.DefaultProfile, "registered")
+	sibling := squadnamespace.Resolve(project, team.DefaultProfile, "sibling")
+	for _, fixture := range []struct {
+		namespace squadnamespace.Ref
+		handle    string
+	}{
+		{registered, "registered-lead"},
+		{sibling, "sibling-lead"},
+	} {
+		agentDir := filepath.Join(fixture.namespace.AMQRoot, "agents", fixture.handle)
+		if err := os.MkdirAll(agentDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := launch.Write(agentDir, launch.Record{
+			CWD: project, Root: fixture.namespace.AMQRoot, Handle: fixture.handle,
+			Role: "cto", Binary: "codex", Session: fixture.namespace.Session,
+			TeamProfile: fixture.namespace.Profile, StartedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := state.Build(project, globalStatusAMQBaseRoot(registered), state.Probe{})
+	if err != nil {
+		t.Fatalf("build exact-session snapshot: %v", err)
+	}
+	if len(snapshot.Sessions) != 1 ||
+		snapshot.Sessions[0].Name != registered.Session ||
+		len(snapshot.Sessions[0].Agents) != 1 ||
+		snapshot.Sessions[0].Agents[0].Handle != "registered-lead" {
+		t.Fatalf("exact-session scanner crossed into sibling namespace: %+v", snapshot.Sessions)
+	}
+}
+
+func TestGlobalStatusMalformedLeadClassificationIsUnknownAndHumanVisible(t *testing.T) {
+	base := setupFakeAMQSessionRoots(t)
+	project := t.TempDir()
+	session := "malformed-lead"
+	agentDir := filepath.Join(base, session, "agents", "cto")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, launch.FileName), []byte("{not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	controlRoot := "/noc-control"
+	registry := globalStatusTestRegistry(controlRoot, now)
+	registry.Runs = []globalNOCRun{
+		globalStatusTestRun(controlRoot, project, session, "run-malformed-lead", now),
+	}
+	var out bytes.Buffer
+	err := executeGlobalStatus(globalStatusExecution{
+		ControlRoot: controlRoot, Out: &out, JSON: true, Now: func() time.Time { return now },
+		ReadRegistry: func(string) (globalNOCRegistry, error) { return registry, nil },
+		NOCIdentity: func(launch.Record, string) launchRuntimeIdentity {
+			return launchRuntimeIdentity{Live: true, PIDLive: true, PaneLive: true}
+		},
+		ReadTeam: func(string, string) (team.Team, error) {
+			return team.Team{
+				Project: project, Lead: "cto", Orchestrated: true,
+				Members: []team.Member{{Role: "cto", Handle: "cto", Binary: "codex", Session: session}},
+			}, nil
+		},
+		OperatorData: func(project, profile, session, _ string, _ func() time.Time) (operatorStatusEnvelopeData, error) {
+			return operatorStatusEnvelopeData{
+				Namespace: squadnamespace.Resolve(project, profile, session), ReadOnly: true,
+			}, nil
+		},
+		Watcher: func(team.Team, string, string, time.Time) notificationWatcherStatus {
+			return notificationWatcherStatus{Enabled: true, Health: "healthy"}
+		},
+	})
+	if err != nil {
+		t.Fatalf("malformed lead projection: %v", err)
+	}
+	env := decodeGlobalStatusTestEnvelope(t, out.Bytes())
+	row := env.Data.Runs[0]
+	if row.Health != globalStatusUnknown || row.Readiness.Ready ||
+		!strings.Contains(row.Lead.Detail, "read launch record") {
+		t.Fatalf("malformed lead was normalized instead of fail-visible: %+v", row)
+	}
+	foundLeadError := false
+	for _, sourceErr := range row.SourceErrors {
+		foundLeadError = foundLeadError || (sourceErr.Source == "lead" && strings.Contains(sourceErr.Detail, "read launch record"))
+	}
+	if !foundLeadError {
+		t.Fatalf("malformed lead source error missing: %+v", row.SourceErrors)
+	}
+	var human bytes.Buffer
+	if err := renderGlobalStatus(&human, env.Data, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(human.String(), "read launch record") {
+		t.Fatalf("human status hid lead classification failure:\n%s", human.String())
+	}
+}
+
+func TestGlobalStatusStoppedNOCWithLiveRuntimeIsDegradedAndCannotStart(t *testing.T) {
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	item := globalStatusTestRegistry("/noc-control", now).Launches[0]
+	item.State = globalNOCLaunchStopped
+	noc := projectGlobalStatusNOC(item, func(launch.Record, string) launchRuntimeIdentity {
+		return launchRuntimeIdentity{Live: true, PIDLive: true, PaneLive: true}
+	})
+	if noc.Health != globalStatusDegraded || !strings.Contains(noc.Detail, "persisted NOC state is stopped") {
+		t.Fatalf("stopped/live contradiction = %+v", noc)
+	}
+	actions := globalNOCStatusActions("/noc-control", noc, "healthy")
+	assertGlobalStatusActionsConfirmGated(t, actions, "global_status", "global_start")
+	for _, action := range actions {
+		if action.Kind == "global_start" && action.Available {
+			t.Fatalf("live canonical NOC exposed a second-start action: %+v", action)
+		}
+	}
+}
+
+func TestGlobalStatusOpenGatesRejectsForeignItemBinding(t *testing.T) {
+	expected := squadnamespace.Resolve("/projects/registered", team.DefaultProfile, "registered")
+	now := time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC)
+	items := []operatorAttention{
+		{
+			EventType: "gate", Thread: "gate/registered", Subject: "APPROVAL: registered",
+			Actionable: true, Profile: expected.Profile, Session: expected.Session,
+			NamespaceID: expected.ID, LastEventAt: now, Age: "1m",
+		},
+		{
+			EventType: "gate", Thread: "gate/foreign", Subject: "APPROVAL: foreign",
+			Actionable: true, Profile: expected.Profile, Session: "foreign",
+			NamespaceID: squadnamespace.ID(expected.Profile, "foreign"), LastEventAt: now, Age: "1m",
+		},
+	}
+	gates, sourceErrors := globalStatusOpenGates(items, expected)
+	if gates.Open != 1 || gates.Items[0].Thread != "gate/registered" ||
+		len(sourceErrors) != 1 || !strings.Contains(sourceErrors[0], "gate/foreign") {
+		t.Fatalf("foreign attention binding was projected: gates=%+v errors=%+v", gates, sourceErrors)
 	}
 }
 
@@ -723,6 +869,32 @@ func TestDoctorGlobalNOCRegistrationProjection(t *testing.T) {
 			t.Fatalf("unreadable doctor check = %+v", check)
 		}
 	})
+
+	t.Run("duplicate run id fails closed", func(t *testing.T) {
+		controlRoot := t.TempDir()
+		canonicalControlRoot, err := canonicalGlobalNOCControlRoot(controlRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		project := t.TempDir()
+		sessionRoot := t.TempDir()
+		session := "duplicate-run"
+		registry := globalStatusTestRegistry(canonicalControlRoot, now)
+		run := globalStatusTestRun(canonicalControlRoot, project, session, "run-duplicate", now)
+		registry.Runs = []globalNOCRun{run, run}
+		writeGlobalStatusTestRegistry(t, canonicalControlRoot, registry)
+		writeGlobalStatusDoctorRecord(t, sessionRoot, "global-orch", project, session, run.ExternalRegistration)
+
+		check := doctorCheckGlobalNOCRegistrationAtRoot(
+			team.Team{Project: project},
+			team.DefaultProfile,
+			session,
+			sessionRoot,
+		)
+		if check.Status != doctorFail || !strings.Contains(check.Detail, "duplicate run registrations") {
+			t.Fatalf("duplicate-run doctor check = %+v", check)
+		}
+	})
 }
 
 func globalStatusTestRegistry(controlRoot string, now time.Time) globalNOCRegistry {
@@ -800,11 +972,29 @@ func globalStatusRowsBySession(rows []globalStatusRunView) map[string]globalStat
 	return out
 }
 
-func assertGlobalStatusActionsConfirmGated(t *testing.T, actions []runtimeActionJSON) {
+func assertGlobalStatusActionsConfirmGated(t *testing.T, actions []runtimeActionJSON, expectedKinds ...string) {
 	t.Helper()
+	if len(actions) == 0 {
+		t.Fatal("expected global status actions, got none")
+	}
+	byKind := make(map[string]runtimeActionJSON, len(actions))
 	for _, action := range actions {
-		if action.Mutates && !action.NeedsConfirmation {
-			t.Errorf("mutating action is not confirm-gated: %+v", action)
+		byKind[action.Kind] = action
+		if action.ID != action.Kind {
+			t.Errorf("action ID does not mirror kind: %+v", action)
+		}
+		if action.Mutates {
+			if !action.NeedsConfirmation || action.ActionKind != "run" ||
+				!strings.Contains(strings.ToLower(action.Label), "confirm") {
+				t.Errorf("mutating action is not explicitly confirm-gated: %+v", action)
+			}
+		} else if action.NeedsConfirmation || action.ActionKind != "display" {
+			t.Errorf("read-only action is not canonical display action: %+v", action)
+		}
+	}
+	for _, kind := range expectedKinds {
+		if _, ok := byKind[kind]; !ok {
+			t.Errorf("required action kind %q missing: %+v", kind, actions)
 		}
 	}
 }

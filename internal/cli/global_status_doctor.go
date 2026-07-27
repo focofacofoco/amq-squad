@@ -172,18 +172,26 @@ func doctorCheckGlobalNOCRegistrationAtRoot(t team.Team, profile, workstream, ro
 		return check
 	}
 	expectedNamespace := squadnamespace.Resolve(t.Project, profile, workstream)
-	var run *globalNOCRun
+	var matchingRuns []globalNOCRun
 	for i := range registry.Runs {
 		if registry.Runs[i].ID == registration.NOCRunRegistrationID {
-			run = &registry.Runs[i]
-			break
+			matchingRuns = append(matchingRuns, registry.Runs[i])
 		}
 	}
-	if run == nil {
+	if len(matchingRuns) == 0 {
 		check.Status = doctorFail
 		check.Detail = fmt.Sprintf("global NOC registry has no run registration %s", registration.NOCRunRegistrationID)
 		return check
 	}
+	if len(matchingRuns) > 1 {
+		check.Status = doctorFail
+		check.Detail = fmt.Sprintf(
+			"global NOC registry has %d duplicate run registrations for %s",
+			len(matchingRuns), registration.NOCRunRegistrationID,
+		)
+		return check
+	}
+	run := &matchingRuns[0]
 	if !sameGlobalStatusNamespace(run.Namespace, expectedNamespace) ||
 		run.NOCLaunchID != registration.NOCLaunchID ||
 		run.NOCGeneration != registration.NOCGeneration ||
