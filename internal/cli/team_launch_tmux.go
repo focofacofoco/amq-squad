@@ -409,11 +409,31 @@ func verifyPaneProcessLaunched(paneID string) (string, error) {
 	// pane_dead is read separately because paneListFormat does not carry #{pane_dead}; checked
 	// rather than assumed. remain-on-exit keeps a dead pane reporting its last pid, so a pid
 	// alone cannot distinguish running from just-exited.
-	deadOut, deadErr := tmuxOutputCommand("tmux", "display-message", "-p", "-t", paneID, "#{pane_dead}")
+	// #577 round 5 F3: this read asked for ONLY #{pane_dead}, which DELETED the identity echo
+	// the pre-split version had. That echo is the whole reason the fallback-to-active-pane bug
+	// was caught: display-message does not error on a vanished target, it answers about the
+	// ACTIVE pane. So a pane that disappears BETWEEN the resolver's Found and this read yields
+	// the launcher's own pane_dead=0, and a fast-exited worker counted as launched.
+	//
+	// I replaced a check with a stronger check and lost a guarantee in the gap between them --
+	// the same round-2 finding, repeated. The echo is back: the id is requested alongside the
+	// liveness field and compared.
+	deadOut, deadErr := tmuxOutputCommand("tmux", "display-message", "-p", "-t", paneID, "#{pane_id}\t#{pane_dead}")
 	if deadErr != nil {
 		return "", fmt.Errorf("read pane liveness for %s: %w", paneID, deadErr)
 	}
-	dead := strings.TrimSpace(deadOut)
+	// Split the RAW reply, then trim each field. Trimming first would collapse a trailing tab,
+	// so "%7\t" would parse as one field and a BLANK liveness value could never be observed --
+	// it would always surface as an incomplete reply, making the blank-field guard below dead
+	// code. Two different broken replies deserve two different diagnostics.
+	deadFields := strings.Split(strings.TrimRight(deadOut, "\r\n"), "\t")
+	if len(deadFields) != 2 {
+		return "", fmt.Errorf("pane %s returned an incomplete liveness reply %q: cannot confirm the command is still running", paneID, strings.TrimSpace(deadOut))
+	}
+	if echoed := strings.TrimSpace(deadFields[0]); echoed != paneID {
+		return "", fmt.Errorf("liveness read for %s answered about a DIFFERENT pane %s: the requested pane vanished between identity and liveness, so this pid belongs to another process and the worker is NOT launched", paneID, echoed)
+	}
+	dead := strings.TrimSpace(deadFields[1])
 	if dead == "" {
 		return "", fmt.Errorf("pane %s returned no liveness field: cannot confirm the command is still running", paneID)
 	}

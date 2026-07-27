@@ -272,16 +272,39 @@ func tmuxSessionWindowIDs(workstream string) (map[string]tmuxSessionPaneLocation
 		// The session EXISTS and could not be enumerated: the genuine cannot-prove case.
 		return nil, false
 	}
+	// #577 round 5 F2: a SUCCESSFUL read was trusted even when empty or malformed. A tmux
+	// session cannot exist with zero panes -- and this session was just PROVEN to exist -- so an
+	// empty or all-malformed listing is broken evidence, not vacancy. Short rows were silently
+	// skipped by a `continue`, which turned unparseable output into a smaller, confident answer.
+	//
+	// Ids are shape-validated through the existing exactTmuxPaneID/exactTmuxWindowID helpers
+	// rather than a sixth local copy of the same regexp.
 	panes := map[string]tmuxSessionPaneLocation{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 {
-			loc := tmuxSessionPaneLocation{WindowID: fields[1]}
-			if len(fields) >= 3 {
-				loc.WindowName = strings.Join(fields[2:], " ")
-			}
-			panes[fields[0]] = loc
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
 		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
+			// A row we cannot parse is not a row we can ignore: the pane it describes may be
+			// an operator's, and delivery replaces a pane's process.
+			return nil, false
+		}
+		paneID, paneErr := exactTmuxPaneID(fields[0])
+		windowID, windowErr := exactTmuxWindowID(fields[1])
+		if paneErr != nil || windowErr != nil {
+			return nil, false
+		}
+		loc := tmuxSessionPaneLocation{WindowID: windowID}
+		if len(fields) >= 3 {
+			loc.WindowName = strings.Join(fields[2:], " ")
+		}
+		panes[paneID] = loc
+	}
+	if len(panes) == 0 {
+		// The session exists, so it has at least one pane. Zero means the evidence is broken.
+		return nil, false
 	}
 	return panes, true
 }
@@ -296,14 +319,25 @@ type tmuxSessionPaneLocation struct {
 
 // tmuxNoServerRunning matches the ONE tmux error that is affirmative evidence of no panes.
 //
-// Matched narrowly and deliberately: broadening it would restore the exact bug above, where any
-// probe failure became proof of vacancy. Anything not matched here is a refusal.
+// #577 round 5 F1: the previous version ALSO matched "error connecting to", and this repository
+// already documents what that phrase means. See IsPermissionDenied in
+// internal/tmuxpane/tmux.go: tmux prints "error connecting to <socket> (Operation not
+// permitted)" for a PERMISSION DENIAL -- the signature of a sandboxed agent -- and a denial is
+// NOT transient. So the broad half treated "the tmux socket is blocked" and "a connection
+// failed" as PROOF OF VACANCY.
+//
+// The consequence was not theoretical: a sandboxed or transiently-unreachable server holding a
+// POPULATED session produced a falsely empty before-map, and when connectivity returned for
+// --create the attribution conjunction evaluated against that empty snapshot and could destroy
+// an operator's pane. The comment claimed "the ONE tmux error" while the code matched two, and
+// the round-4 commit repeated that claim -- a warning already written three files away.
+//
+// Only the no-server phrasing counts. Anything else, permission included, is a refusal.
 func tmuxNoServerRunning(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no server running") || strings.Contains(msg, "error connecting to")
+	return strings.Contains(strings.ToLower(err.Error()), "no server running")
 }
 
 // tmuxSessionCreatedPaneID identifies the pane this launcher's --create produced, requiring
