@@ -821,21 +821,34 @@ amq-squad is tracker-neutral. Fetching GitHub, Jira, Confluence, or other goal
 sources happens in the skills or operator tooling; the core binary owns team,
 runtime, and coordination state.
 
-AMQ 0.49.0 is the sole supported release. Both real-AMQ matrices validate pinned
-v0.49.0 and latest; latest remains only a canary for any unexpected post-final
-release. Older AMQ versions are rejected fail-closed.
+AMQ 0.49.x is the supported series, with 0.49.0 as the minimum supported release
+and compatibility tested through 0.49.1. Both real-AMQ matrices validate pinned
+v0.49.0, pinned v0.49.1, and `latest`; `latest` remains a
+forward-compatibility canary. Releases older than 0.49.0 are rejected
+fail-closed.
 
 | Real-AMQ lane | Runner | Versions |
 | --- | --- | --- |
-| Queue, routing, receipts, doctor, lifecycle | Ubuntu | `v0.49.0`, `latest` |
-| Native real-PTY wake and teardown | macOS | `v0.49.0`, `latest` |
+| Queue, routing, receipts, doctor, lifecycle | Ubuntu | `v0.49.0`, `v0.49.1`, `latest` |
+| Native real-PTY wake and teardown | macOS | `v0.49.0`, `v0.49.1`, `latest` |
 
-AMQ 0.47.1 introduced the supervised `coop exec` wake contract now required by
-the 0.49.0 floor: instead of
-injecting message headers or subjects, it submits the fixed, shell-inert
-doorbell `: AMQ doorbell run amq drain --include-body then act on it`. Agents
-must drain the durable mailbox to discover the sender, subject, and body. No
-legacy subject-injection branch remains.
+AMQ 0.47.1 introduced the supervised `coop exec` wake contract used by every
+supported release: instead of injecting message headers or subjects, managed
+coop wakes submit the fixed, shell-inert doorbell
+`: AMQ doorbell run amq drain --include-body then act on it`. AMQ 0.49.1
+extended that fixed doorbell to standalone/default wake injection; 0.49.0
+standalone wakes still emit the post-baseline subject. The compatibility lane
+pins that historical boundary while all managed coop lanes require the fixed
+doorbell. Agents must drain the durable mailbox to discover the sender,
+subject, and body.
+
+AMQ 0.49.1 also hardens wake delivery without changing amq-squad production
+branches: transient foreground-process-group handoffs retry pending notices,
+active input through max hold demotes to out-of-band output, quiet detection
+requires consecutive samples, and periodic capability checks report only what
+they can prove. Its optional Claude Stop hook guards by fresh message content
+and recovers incomplete session context; amq-squad does not install or invoke
+that upstream hook.
 
 On Linux, AMQ 0.48.0 probes the legacy TIOCSTI capability. When the kernel
 disables it, wake degrades to a non-input notifier and records
@@ -858,10 +871,10 @@ which joins current message, route, delivery, DLQ, receipt, and thread evidence.
 It is useful for diagnostics, but it does not prove historical directory-sync
 or notification success and therefore is not retry or authorization authority
 for amq-squad evidence/receipt flows. See the
-[v0.49.0 leverage assessment](docs/amq-0.49.0-assessment.md).
+[AMQ 0.49.x support assessment](docs/amq-0.49.x-assessment.md).
 
 AMQ 0.42.1 historically introduced the complete injected identity contract;
-0.49.0 is now the supported floor. After upgrading AMQ, stop and
+0.49.0 is the supported floor for the 0.49.x series. After upgrading AMQ, stop and
 resume/relaunch agents so their parent shells refresh the complete identity
 tuple; a child command cannot repair stale parent environment variables.
 Default-profile sessions use

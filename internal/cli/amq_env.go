@@ -118,12 +118,13 @@ const minBaselineExistingAMQVersion = "0.46.0"
 // They document when persisted contracts first became available without
 // preserving pre-floor compatibility code.
 const (
-	historicalCompleteIdentityAMQVersion    = "0.42.1"
-	historicalReplyRefsAMQVersion           = "0.43.1"
-	historicalWakeRetireAMQVersion          = "0.45.0"
-	historicalOwnerBoundWakeAMQVersion      = "0.47.0"
-	historicalCoopWakeDoorbellAMQVersion    = "0.47.1"
-	historicalDoctorMailboxRepairAMQVersion = "0.48.0"
+	historicalCompleteIdentityAMQVersion       = "0.42.1"
+	historicalReplyRefsAMQVersion              = "0.43.1"
+	historicalWakeRetireAMQVersion             = "0.45.0"
+	historicalOwnerBoundWakeAMQVersion         = "0.47.0"
+	historicalCoopWakeDoorbellAMQVersion       = "0.47.1"
+	historicalDoctorMailboxRepairAMQVersion    = "0.48.0"
+	historicalStandaloneWakeDoorbellAMQVersion = "0.49.1"
 )
 
 // amqSupportsRequireWake reports whether the amq version string from `amq env`

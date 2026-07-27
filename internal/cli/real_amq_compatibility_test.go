@@ -158,8 +158,11 @@ func TestRealAMQCompatibility(t *testing.T) {
 	t.Run("coop exec drains preexisting goal with zero injection", func(t *testing.T) {
 		realAMQCoopExecBaselineDrainContract(t, binary)
 	})
+	t.Run("production cleanup recovers owner-bound managed wake", func(t *testing.T) {
+		realAMQProductionOwnerBoundCleanupContract(t, binary, version)
+	})
 	t.Run("external wake suppresses backlog and injects post-baseline resend", func(t *testing.T) {
-		realAMQExternalWakeBaselineContract(t, binary)
+		realAMQExternalWakeBaselineContract(t, binary, version)
 	})
 	t.Run("doctor repairs malformed configured mailbox", func(t *testing.T) {
 		realAMQDoctorMailboxRepairContract(t, binary)
@@ -457,7 +460,86 @@ amq wake recover-owner --root "$AM_ROOT" --me "$AM_ME" --json >/dev/null
 	}
 }
 
-func realAMQExternalWakeBaselineContract(t *testing.T, binary string) {
+func realAMQProductionOwnerBoundCleanupContract(t *testing.T, binary, version string) {
+	t.Helper()
+	project := realAMQSafeInjectViaFixtureProject(t)
+	root := filepath.Join(project, ".agent-mail", "production-owner-cleanup")
+	realAMQInitAgents(t, binary, project, root, "member")
+	cleanEnv := amqexec.NoUpdateCheckEnv(envWithoutAMQIdentity(os.Environ()))
+
+	injectionLog := filepath.Join(project, "owner-cleanup-injections.log")
+	injector := filepath.Join(project, "injector.sh")
+	member := filepath.Join(project, "member.sh")
+	ready := filepath.Join(project, "member.ready")
+	if err := os.WriteFile(injector, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AMQ_TEST_INJECTION_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	memberScript := `#!/bin/sh
+trap 'exit 0' TERM INT
+: > "$AMQ_TEST_MEMBER_READY"
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(member, []byte(memberScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(
+		binary,
+		"coop", "exec", "--root", root, "--me", "member", "--require-wake",
+		"--wake-inject-via", injector, member,
+	)
+	cmd.Dir = project
+	cmd.Env = append(cleanEnv,
+		"AMQ_TEST_INJECTION_LOG="+injectionLog,
+		"AMQ_TEST_MEMBER_READY="+ready,
+	)
+	var commandLog bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &commandLog, &commandLog
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	waitForRealWakeFile(t, ready, "owner-bound member readiness")
+	agentDir := filepath.Join(root, "agents", "member")
+	waitForRealWakeCondition(t, "owner-bound wake lock", func() bool {
+		_, err := os.Stat(wakeLockPath(agentDir))
+		return err == nil
+	})
+	lock, err := readWakeLock(agentDir)
+	if err != nil {
+		t.Fatalf("read owner-bound wake lock: %v", err)
+	}
+	rec := launch.Record{
+		CWD:           project,
+		AMQVersion:    version,
+		AgentPID:      cmd.Process.Pid,
+		WakePID:       lock.PID,
+		WakeInjectVia: injector,
+	}
+	term := newSignalTerminator(false)
+	if err := term.Terminate(rec.AgentPID); err != nil {
+		t.Fatalf("signal owner-bound member: %v", err)
+	}
+	result := reapStaleArtifacts(agentDir, "member", root, false, rec, term, defaultDuplicateLaunchProbe)
+	if result.failed() || result.WakeRetirement != "amq_owner_recovered" || !result.LockRemoved {
+		t.Fatalf("production owner-bound cleanup result=%+v\ncommand log:\n%s", result, commandLog.String())
+	}
+	_ = cmd.Wait()
+	waited = true
+	if defaultDuplicateLaunchProbe.PIDAlive(lock.PID) {
+		t.Fatalf("production owner-bound cleanup left wake pid %d alive", lock.PID)
+	}
+	if _, err := os.Stat(wakeLockPath(agentDir)); !os.IsNotExist(err) {
+		t.Fatalf("production owner-bound cleanup left wake lock: %v", err)
+	}
+}
+
+func realAMQExternalWakeBaselineContract(t *testing.T, binary, version string) {
 	t.Helper()
 	project := realAMQSafeInjectViaFixtureProject(t)
 	root := filepath.Join(project, ".agent-mail", "external-baseline")
@@ -521,8 +603,16 @@ func realAMQExternalWakeBaselineContract(t *testing.T, binary string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(injected, []byte("post-baseline goal resend")) || bytes.Contains(injected, []byte("original goal")) {
-		t.Fatalf("external wake injection did not isolate the post-baseline resend:\n%s", injected)
+	lines := nonemptyLines(string(injected))
+	if len(lines) != 1 {
+		t.Fatalf("external wake injected %d non-empty lines after one post-baseline resend, want 1:\n%s", len(lines), injected)
+	}
+	if semverMeetsStableFloor(version, historicalStandaloneWakeDoorbellAMQVersion) {
+		if lines[0] != realAMQCoopWakeDoorbell {
+			t.Fatalf("AMQ %s standalone wake = %q, want fixed doorbell %q", version, lines[0], realAMQCoopWakeDoorbell)
+		}
+	} else if !strings.Contains(lines[0], "post-baseline goal resend") || strings.Contains(lines[0], "original goal") {
+		t.Fatalf("AMQ %s standalone wake did not isolate the post-baseline subject:\n%s", version, injected)
 	}
 
 	_ = wake.Process.Kill()
@@ -667,12 +757,20 @@ func realAMQExactInjectViaWakeRetirement(t *testing.T, binary string) {
 	if mailID == "" {
 		t.Fatalf("pre-retirement mailbox send omitted stable id: %s", mailOut)
 	}
-	previous := runExactWakeRetire
+	previousRecover := runExactWakeRecoverOwner
+	runExactWakeRecoverOwner = func(req amqCommandRequest) ([]byte, error) {
+		out, err := realAMQTryCommand(binary, req.Dir, req.Env, req.Arg...)
+		return []byte(out), err
+	}
+	previousRetire := runExactWakeRetire
 	runExactWakeRetire = func(req amqCommandRequest) ([]byte, error) {
 		out, err := realAMQTryCommand(binary, req.Dir, req.Env, req.Arg...)
 		return []byte(out), err
 	}
-	t.Cleanup(func() { runExactWakeRetire = previous })
+	t.Cleanup(func() {
+		runExactWakeRecoverOwner = previousRecover
+		runExactWakeRetire = previousRetire
+	})
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- wake.Wait() }()
 	result := reapStaleArtifacts(filepath.Join(root, "agents", "consumer"), "consumer", root, false, launch.Record{CWD: project, AMQVersion: doctorMinAMQVersion, WakePID: wake.Process.Pid, WakeInjectVia: injector, WakeInjectArgs: []string{"fixed"}}, &recordingTerminator{}, defaultDuplicateLaunchProbe)

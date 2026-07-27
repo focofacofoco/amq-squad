@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -10,13 +11,18 @@ import sys
 
 
 VERSION_RE = re.compile(r"^v?([0-9]+\.[0-9]+\.[0-9]+)$")
-SKILL_MARKER_RE = re.compile(r"Skill version:\s*([0-9]+\.[0-9]+\.[0-9]+)")
+SKILL_FRONTMATTER_VERSION_RE = re.compile(
+    r'^version:\s*"?([0-9]+\.[0-9]+\.[0-9]+)"?',
+    re.MULTILINE,
+)
 AMQ_MIN_VERSION = "0.49.0"
-AMQ_TESTED_CURRENT_VERSION = "0.49.0"
+AMQ_TESTED_CURRENT_VERSION = "0.49.1"
 AMQ_COMPATIBILITY_POLICY = (
-    f"AMQ {AMQ_MIN_VERSION} is the sole supported release. "
-    f"Both real-AMQ matrices validate pinned v{AMQ_TESTED_CURRENT_VERSION} and latest; "
-    "latest remains only a canary for any unexpected post-final release."
+    f"AMQ 0.49.x is the supported series, with {AMQ_MIN_VERSION} as the minimum "
+    f"supported release and compatibility tested through {AMQ_TESTED_CURRENT_VERSION}. "
+    f"Both real-AMQ matrices validate pinned v{AMQ_MIN_VERSION}, pinned "
+    f"v{AMQ_TESTED_CURRENT_VERSION}, and latest; latest remains a "
+    "forward-compatibility canary."
 )
 
 
@@ -31,8 +37,15 @@ def fail_if_missing(path: str, needle: str, failures: list[str]) -> None:
 
 
 def fail_if_missing_normalized(path: str, needle: str, failures: list[str]) -> None:
-    if " ".join(needle.split()) not in " ".join(read(path).split()):
+    if normalize_policy_text(needle) not in normalize_policy_text(read(path)):
         failures.append(f"{path}: missing normalized {needle!r}")
+
+
+def normalize_policy_text(value: str) -> str:
+    value = html.unescape(value)
+    value = re.sub(r"<[^>]+>", "", value)
+    value = value.replace("**", "").replace("__", "").replace("`", "")
+    return " ".join(value.split())
 
 
 def require_release_notes(root: str, tag: str, failures: list[str]) -> None:
@@ -86,14 +99,14 @@ def main() -> int:
         ):
             skill_rel = f"plugins/{mirror}/skills/{skill_id}/SKILL.md"
             skill_body = read(os.path.join(root, skill_rel))
-            marker = SKILL_MARKER_RE.search(skill_body)
+            marker = SKILL_FRONTMATTER_VERSION_RE.search(skill_body)
             if not marker:
-                failures.append(f"{skill_rel}: missing Skill version marker")
+                failures.append(f"{skill_rel}: missing frontmatter version")
             elif marker.group(1) != version:
-                failures.append(f"{skill_rel}: Skill version {marker.group(1)!r} != {version!r}")
-            expected_echo = f"amq-squad skill {tag}"
-            if expected_echo not in skill_body:
-                failures.append(f"{skill_rel}: missing startup echo {expected_echo!r}")
+                failures.append(
+                    f"{skill_rel}: frontmatter version {marker.group(1)!r} "
+                    f"!= {version!r}"
+                )
 
     readme = os.path.join(root, "README.md")
     fail_if_missing(readme, f"go install github.com/omriariav/amq-squad/v2/cmd/amq-squad@{tag}", failures)

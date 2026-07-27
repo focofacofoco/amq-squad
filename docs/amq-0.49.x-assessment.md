@@ -1,9 +1,10 @@
-# AMQ 0.49.0 sole-support and leverage assessment
+# AMQ 0.49.x support and leverage assessment
 
-AMQ 0.49.0 is the sole supported release for amq-squad. Both real-AMQ CI
-matrices run pinned `v0.49.0` plus `latest`; `latest` is only a canary for an
-unexpected post-final release. Older AMQ versions fail the doctor and
-compatibility admission checks.
+AMQ 0.49.x is the supported series for amq-squad. The minimum supported release
+is 0.49.0 and compatibility is tested through 0.49.1. Both real-AMQ CI matrices
+run pinned `v0.49.0`, pinned `v0.49.1`, and `latest`; `latest` remains a
+forward-compatibility canary. Older AMQ versions fail both doctor diagnostics
+and launch admission before launch-record or process side effects.
 
 Historical capability boundaries remain named in code for archaeology:
 
@@ -15,6 +16,7 @@ Historical capability boundaries remain named in code for archaeology:
 | Owner-bound coop wake lifecycle | 0.47.0 |
 | Fixed shell-inert `coop exec` doorbell | 0.47.1 |
 | Configured-mailbox repair | 0.48.0 |
+| Fixed shell-inert standalone/default wake doorbell | 0.49.1 |
 
 They are not compatibility lanes or reasons to preserve below-floor branches.
 
@@ -56,10 +58,10 @@ non-destructive, and fail-closed.
 No follow-up is required: the missing operator guidance was fixed upstream and
 the amq-squad README now routes directly to it.
 
-## Wake retirement
+## Wake delivery and retirement
 
 The pre-0.47 fixture workaround that ignored `wake retire` refusal is removed.
-AMQ 0.49.0's `coop exec --wake-inject-via` helper is owner-bound: the coop
+Supported AMQ `coop exec --wake-inject-via` helpers are owner-bound: the coop
 member now releases that exact wake through `wake recover-owner`, authenticated
 by the inherited `AMQ_WAKE_OWNER` token and matching OS session. The fixture
 asserts prompt exit and absence of the claim. The ownerless `wake retire` path
@@ -67,9 +69,36 @@ correctly refuses this owner-bound state; when the owner is already dead,
 `recover-owner` remains the explicit fail-closed recovery path and does not
 require a live-owner token.
 
-For amq-squad-managed ownerless inject-via wakes, exact `wake retire` remains
-the required shutdown contract whenever a launch record has persisted injector
-identity. Refusal fails closed and never falls back to generic process
-signaling. Raw wakes or historical records without inject-via identity retain
-the bounded exact-PID signal path because AMQ cannot address those wakes by
-injector identity.
+Production cleanup applies the same three-way boundary. A persisted inject-via
+wake first receives structured `wake recover-owner --json` handling:
+owner-bound claims recover exactly after the signaled owner exits, while the
+exact structured ownerless refusal routes to `wake retire`. Unknown, corrupt,
+or mismatched results fail closed and preserve evidence. Raw wakes or
+historical records without inject-via identity retain the bounded exact-PID
+signal path because AMQ cannot address those wakes by injector identity.
+
+The fixed doorbell has two historical boundaries inside the supported series.
+Managed `coop exec` wakes use it in both 0.49.0 and 0.49.1 because that contract
+started in 0.47.1. Standalone/default wakes carry subject text in 0.49.0 and
+switch to the fixed shell-inert doorbell in 0.49.1. The version-aware
+compatibility fixture proves zero injection before the post-baseline resend and
+exactly one version-correct injection afterward; the final drain proves both
+messages remained durable.
+
+AMQ 0.49.1 adds transparent hardening around that contract: held notifications
+retry after transient foreground-process-group handoff, max-hold delivery
+demotes to out-of-band output, quiet detection requires consecutive samples,
+and periodic capability checks report only verified preconditions. None
+requires an amq-squad production version branch.
+
+## Optional Stop-hook hardening
+
+AMQ 0.49.1's optional Claude Stop hook blocks once per fresh message content,
+persists a bounded atomic 0600 guard without draining mail, resolves root and
+session through `amq env`, and recovers an incomplete ambient session pin.
+Configured-context and mailbox failures emit a visible `systemMessage`.
+
+amq-squad does not install or invoke this upstream hook; its `stop` and `resume`
+verbs manage agent processes and launch records directly. The upstream change
+is additive hardening for operators who separately enable the Claude hook and
+does not add an amq-squad production branch.

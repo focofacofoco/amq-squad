@@ -61,6 +61,26 @@ func TestRetireWakeWithAMQUsesExactPersistedInjectorIdentity(t *testing.T) {
 	}
 }
 
+func stubOwnerlessWakeRecovery(t *testing.T, root, handle string, pid int) {
+	t.Helper()
+	previous := runExactWakeRecoverOwner
+	t.Cleanup(func() { runExactWakeRecoverOwner = previous })
+	runExactWakeRecoverOwner = func(req amqCommandRequest) ([]byte, error) {
+		want := []string{"wake", "recover-owner", "--root", root, "--me", handle, "--json"}
+		if !reflect.DeepEqual(req.Arg, want) {
+			t.Fatalf("wake recover-owner args=%q want=%q", req.Arg, want)
+		}
+		return []byte(fmt.Sprintf(
+			`{"status":"refused","agent":%q,"root":%q,"pid":%d,"reason":%q,"next_action":%q}`,
+			handle,
+			root,
+			pid,
+			ownerlessWakeRecoveryReason,
+			ownerlessWakeRecoveryAction,
+		)), errors.New("exit status 1")
+	}
+}
+
 func TestReapRawWakeRetirementFallbackIsReported(t *testing.T) {
 	agentDir := t.TempDir()
 	root := filepath.Dir(agentDir)
@@ -81,6 +101,7 @@ func TestReapExactWakeRetirementRecognizesSelfCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	stubOwnerlessWakeRecovery(t, root, "qa", 4242)
 	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
 		if err := os.Remove(wakeLockPath(agentDir)); err != nil {
 			t.Fatal(err)
@@ -99,6 +120,7 @@ func TestReapExactWakeRetirementRefusalNeverFallsBackToSignal(t *testing.T) {
 	agentDir := t.TempDir()
 	root := filepath.Dir(agentDir)
 	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	stubOwnerlessWakeRecovery(t, root, "qa", 4242)
 	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
 		return []byte(fmt.Sprintf(`{"status":"refused","agent":"qa","root":%q,"pid":4242,"reason":"target mismatch"}`, root)), errors.New("exit status 1")
 	}
@@ -115,6 +137,7 @@ func TestReapExactWakeRetirementSuccessNeverFallsBackToSignal(t *testing.T) {
 	agentDir := t.TempDir()
 	root := filepath.Dir(agentDir)
 	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	stubOwnerlessWakeRecovery(t, root, "qa", 4242)
 	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
 		// Deliberately leave the lock in place to prove native success can never
 		// fall through to the legacy signal path.
@@ -133,6 +156,7 @@ func TestReapExactWakeRetirementRejectsMismatchedPIDWithoutFallback(t *testing.T
 	agentDir := t.TempDir()
 	root := filepath.Dir(agentDir)
 	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	stubOwnerlessWakeRecovery(t, root, "qa", 4242)
 	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
 		return []byte(fmt.Sprintf(`{"status":"retired","agent":"qa","root":%q,"pid":5252,"reason":"exact target retired"}`, root)), nil
 	}
@@ -140,6 +164,99 @@ func TestReapExactWakeRetirementRejectsMismatchedPIDWithoutFallback(t *testing.T
 	result := reapStaleArtifacts(agentDir, "qa", root, false, launch.Record{AMQVersion: doctorMinAMQVersion, WakePID: 4242, WakeInjectVia: "/usr/bin/tmux"}, term, downFakeProbe(map[int]bool{4242: true, 5252: true}, map[int]bool{4242: true, 5252: true}))
 	if result.WakeRetirement != "amq_exact_refused" || !result.failed() || !strings.Contains(result.RetirementDetail, "mismatched pid=5252") || len(term.calls) != 0 {
 		t.Fatalf("mismatched pid result=%+v fallback calls=%v", result, term.calls)
+	}
+}
+
+func TestReapOwnerBoundWakeUsesRecoverOwnerWithoutOwnerlessRetire(t *testing.T) {
+	previousRecover := runExactWakeRecoverOwner
+	previousRetire := runExactWakeRetire
+	t.Cleanup(func() {
+		runExactWakeRecoverOwner = previousRecover
+		runExactWakeRetire = previousRetire
+	})
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	recoverCalls := 0
+	runExactWakeRecoverOwner = func(req amqCommandRequest) ([]byte, error) {
+		recoverCalls++
+		if recoverCalls == 1 {
+			return []byte(fmt.Sprintf(
+				`{"status":"refused","agent":"qa","root":%q,"pid":4242,"owner_pid":5151,"owner_session":99,"reason":"handle qa is owned by live process","next_action":"exit owner"}`,
+				root,
+			)), errors.New("exit status 1")
+		}
+		if err := os.Remove(wakeLockPath(agentDir)); err != nil {
+			t.Fatal(err)
+		}
+		return []byte(fmt.Sprintf(
+			`{"status":"recovered","agent":"qa","root":%q,"pid":4242,"owner_pid":5151,"owner_session":99,"reason":"exact owner claim released"}`,
+			root,
+		)), nil
+	}
+	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
+		t.Fatal("owner-bound recovery must not call ownerless wake retire")
+		return nil, nil
+	}
+	previousTimeout := wakeOwnerRecoveryTimeout
+	previousPoll := wakeOwnerRecoveryPoll
+	wakeOwnerRecoveryTimeout = time.Second
+	wakeOwnerRecoveryPoll = time.Millisecond
+	t.Cleanup(func() {
+		wakeOwnerRecoveryTimeout = previousTimeout
+		wakeOwnerRecoveryPoll = previousPoll
+	})
+	result := reapStaleArtifacts(
+		agentDir,
+		"qa",
+		root,
+		false,
+		launch.Record{CWD: t.TempDir(), AgentPID: 5151, WakePID: 4242, WakeInjectVia: "/usr/bin/tmux"},
+		&recordingTerminator{},
+		downFakeProbe(map[int]bool{4242: false}, nil),
+	)
+	if result.failed() || result.WakeRetirement != "amq_owner_recovered" || !result.LockRemoved || recoverCalls != 2 {
+		t.Fatalf("owner-bound recovery result=%+v calls=%d", result, recoverCalls)
+	}
+}
+
+func TestReapOwnerRecoveryRejectsMismatchedOwnerWithoutFallback(t *testing.T) {
+	previousRecover := runExactWakeRecoverOwner
+	previousRetire := runExactWakeRetire
+	t.Cleanup(func() {
+		runExactWakeRecoverOwner = previousRecover
+		runExactWakeRetire = previousRetire
+	})
+	agentDir := t.TempDir()
+	root := filepath.Dir(agentDir)
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	runExactWakeRecoverOwner = func(amqCommandRequest) ([]byte, error) {
+		return []byte(fmt.Sprintf(
+			`{"status":"refused","agent":"qa","root":%q,"pid":4242,"owner_pid":6161,"reason":"live owner"}`,
+			root,
+		)), errors.New("exit status 1")
+	}
+	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
+		t.Fatal("mismatched owner must not fall back to ownerless retire")
+		return nil, nil
+	}
+	term := &recordingTerminator{}
+	result := reapStaleArtifacts(
+		agentDir,
+		"qa",
+		root,
+		false,
+		launch.Record{AgentPID: 5151, WakePID: 4242, WakeInjectVia: "/usr/bin/tmux"},
+		term,
+		downFakeProbe(map[int]bool{4242: true}, map[int]bool{4242: true}),
+	)
+	if !result.failed() || result.WakeRetirement != "amq_owner_recovery_refused" ||
+		!strings.Contains(result.RetirementDetail, "owner pid=6161, want persisted agent pid=5151") ||
+		len(term.calls) != 0 {
+		t.Fatalf("mismatched owner result=%+v fallback calls=%v", result, term.calls)
 	}
 }
 
@@ -424,6 +541,7 @@ func TestExecuteDownDeadPreparedAgentAllowsExactStaleWakeCleanup(t *testing.T) {
 		WakeInjectVia: "/usr/bin/tmux", PreparedRunGeneration: "g", PreparedRunDigest: "d", PreparedRunLaunchAttempt: "a",
 	})
 	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	stubOwnerlessWakeRecovery(t, root, "cto", 4242)
 	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
 		if err := os.Remove(wakeLockPath(agentDir)); err != nil {
 			t.Fatal(err)
