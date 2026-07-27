@@ -326,15 +326,36 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 					// was supplying both belts the code had stopped asking for.
 					//
 					// The target is PINNED: anything other than the exact-match form is an error, so
-					// dropping "=" fails every positive row. The rows are SEMANTIC and the wire text
-					// is rendered from the requested format, so dropping #{session_name} drops the
-					// column and the parser's field count refuses.
+					// dropping "=" fails every positive row. The rows are SEMANTIC and the wire text is
+					// rendered from the requested format, so dropping #{session_name} shifts every
+					// column left -- and the row then fails at the SESSION EQUALITY check, because
+					// fields[0] holds a pane id rather than the session name. Traced rather than
+					// assumed: my earlier comment credited the field-count guard, which is not the
+					// branch that actually rejects it.
 					// The claim is about the -t VALUE, so check that, not mere token presence:
 					// containsArg would pass if "=issue-96" appeared anywhere, including in a format
 					// string. Exactly one -t, and its value must be the exact-match form.
+					// #577 round 7 F1: the fake ignored the -s SCOPE flag, so deleting it from
+					// production stayed green -- while real tmux without -s enumerates only ONE
+					// window. An existing role window missing from the before-snapshot could then be
+					// attributed to this create and destroyed. Same posture as the =target check:
+					// the fake refuses an invocation real tmux would answer differently.
+					if !hasFlag(args, "-s") {
+						return "", fmt.Errorf("list-panes must pass -s to enumerate the whole session; without it tmux returns one window only: %s", call)
+					}
+					// The sentinel is not "=issue-96", so a lone dangling -t already fails this
+					// comparison -- stated because it is luck of the exact-value check, not a property
+					// of the count, and the next flag guard should not copy the count-only shape.
 					targets := targetArgs(args)
 					if len(targets) != 1 || targets[0] != "=issue-96" {
 						return "", fmt.Errorf("list-panes must pass exactly one -t whose value is =issue-96; got %v in %s", targets, call)
+					}
+					// Count AND validity, decided in ONE place (paneListFormatArg) that the direct
+					// test also calls -- so removing the rejection there fails the named test instead
+					// of only surfacing as a downstream render failure.
+					format, formatErr := paneListFormatArg(args)
+					if formatErr != nil {
+						return "", fmt.Errorf("%w in %s", formatErr, call)
 					}
 					rows := tc.before
 					// #577 round 6 F4: when after is unset the modeled world must not EMPTY itself
@@ -344,7 +365,7 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 					if created && tc.after != nil {
 						rows = tc.after
 					}
-					return renderPaneRows(rows, paneListFormatArg(args)), nil
+					return renderPaneRows(rows, format), nil
 				case strings.Contains(call, "#{pane_dead}"):
 					// Delegated to the shared helper so the liveness wire format lives in ONE place.
 					// #577 round 5 restored the id echo here; a local literal would have needed
@@ -561,15 +582,63 @@ func renderPaneRows(rows []paneRow, format string) string {
 	return out.String()
 }
 
-// paneListFormatArg returns the -F format argument, so the fake answers the question actually
-// asked rather than the one it remembers.
-func paneListFormatArg(args []string) string {
+// danglingFlagSentinel marks a flag that appeared with NO value. It is a distinguishable value
+// rather than an empty string so a caller can reject it explicitly: an empty string is also what
+// a legitimately empty argument looks like, and conflating them is how the lone-dangling case
+// slipped past a count-only guard.
+const danglingFlagSentinel = "<dangling flag with no value>"
+
+// formatArgs returns every -F value, counting a DANGLING -F via a sentinel.
+//
+// #577 round 7 F2: paneListFormatArg returned the FIRST valid -F and silently ignored later
+// ones, so a duplicate or dangling second -F stayed green where real tmux rejects the
+// invocation. Same fix as the dangling -t sentinel: a valueless flag must COUNT, or "exactly
+// one" is a claim about value-bearing pairs rather than about flags.
+func formatArgs(args []string) []string {
+	var formats []string
 	for i, a := range args {
-		if a == "-F" && i+1 < len(args) {
-			return args[i+1]
+		if a != "-F" {
+			continue
+		}
+		if i+1 >= len(args) {
+			formats = append(formats, danglingFlagSentinel)
+			continue
+		}
+		formats = append(formats, args[i+1])
+	}
+	return formats
+}
+
+// paneListFormatArg is the ONE decision function for -F validity: exactly one flag, carrying a
+// value. It returns the format or the reason it is unacceptable.
+//
+// #577 round 7 re-review: count and validity used to be checked by an INLINE clause in the fake,
+// while the direct test exercised only formatArgs. Deleting that inline clause left the test
+// green -- it proved the helper emitted a sentinel, not that anything REJECTED one. Plumbing as
+// evidence, for the second time tonight.
+//
+// Factoring the decision here means the fake and the test falsify the SAME function, which is the
+// same shared-decider principle as #573's predicate: two places deciding one thing is how they
+// come to disagree, and a test that does not call the decider proves nothing about it.
+func paneListFormatArg(args []string) (string, error) {
+	formats := formatArgs(args)
+	if len(formats) != 1 {
+		return "", fmt.Errorf("list-panes must pass exactly one -F; got %d (%v)", len(formats), formats)
+	}
+	if formats[0] == danglingFlagSentinel {
+		return "", fmt.Errorf("list-panes passed a -F with no value; real tmux rejects the invocation")
+	}
+	return formats[0], nil
+}
+
+// hasFlag reports whether a bare flag is present, for flags that take no value.
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 // targetArgs returns every value that immediately follows a -t flag.
@@ -590,10 +659,55 @@ func targetArgs(args []string) []string {
 			// that exactly one -t is required -- and real tmux would reject the malformed
 			// invocation outright. The sentinel makes a valueless flag COUNT, so any second -t
 			// fails whether or not it carries a value.
-			targets = append(targets, "<dangling -t with no value>")
+			targets = append(targets, danglingFlagSentinel)
 			continue
 		}
 		targets = append(targets, args[i+1])
 	}
 	return targets
+}
+
+// #577 round 7 re-review: this test must falsify the DECISION, not the plumbing.
+//
+// The previous version called formatArgs and asserted a sentinel came back, which stayed green
+// if the rejection clause was deleted -- it proved a helper's output, not that anything refused.
+// It now calls paneListFormatArg, the same decider the list-panes fake uses, so removing either
+// the count check or the sentinel check inside it fails THIS test by name.
+func TestPaneListFormatArgRejectsDanglingAndDuplicateFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			// The case that slipped a count-only guard: ONE flag, no value.
+			name: "lone dangling -F", args: []string{"list-panes", "-s", "-t", "=issue-96", "-F"},
+			wantErr: "no value",
+		},
+		{
+			name: "duplicate -F", args: []string{"-F", "#{pane_id}", "-F", "#{window_id}"},
+			wantErr: "exactly one",
+		},
+		{
+			name: "no -F at all", args: []string{"list-panes", "-s"},
+			wantErr: "exactly one",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := paneListFormatArg(tc.args)
+			if err == nil {
+				t.Fatalf("must be rejected; got format %q", got)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("refusal must say why (%q): %v", tc.wantErr, err)
+			}
+		})
+	}
+
+	// The companion property: a well-formed single -F is ACCEPTED, so the rejections above
+	// cannot pass by refusing everything.
+	format, err := paneListFormatArg([]string{"-F", "#{pane_id}"})
+	if err != nil || format != "#{pane_id}" {
+		t.Errorf("a valid single -F must be accepted unchanged; got %q, %v", format, err)
+	}
 }
