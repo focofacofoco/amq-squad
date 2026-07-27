@@ -267,12 +267,13 @@ Per-member `claude_args` / `codex_args` in `team.json` (v1.8.0+) carry native
 CLI args for one member only — the overlay verb above generates the flagship
 case (a `--settings` overlay that trims a worker's plugins/hooks) and wires it
 for you. Plan emission fails fast when a referenced `--settings` file is
-missing. AMQ floor (v2.20.0+): amq-squad requires amq 0.42.1+. AMQ 0.42.1 is
-the first supported complete identity-pin contract. The minimum 0.42.1
-compatibility floor is unchanged. This release is explicitly validated against
-pinned 0.45.0; latest remains a forward-compatibility canary. After upgrading
-AMQ, stop and resume/relaunch agents so their parent shells refresh the complete
-identity tuple; a child command cannot repair stale injected environment.
+missing. AMQ 0.49.x is the supported series, with 0.49.0 as the minimum
+supported release and compatibility tested through 0.49.1. Both real-AMQ
+matrices validate pinned v0.49.0, pinned v0.49.1, and `latest`; `latest`
+remains a forward-compatibility canary. Releases older than 0.49.0 are rejected
+fail-closed; upgrade to v0.49.0 or newer and stop/resume agents so their parent
+shells refresh the complete identity tuple. A child command cannot repair stale
+injected environment.
 Default profiles use `AM_ROOT=AM_BASE_ROOT/AM_SESSION` with a non-empty
 `AM_SESSION`; named profiles use an exact root with `AM_ROOT=AM_BASE_ROOT` and
 omit `AM_SESSION`. Run
@@ -616,7 +617,7 @@ convention as a generated line in their `## Orchestration` norm.
 ### Recover
 
 ```sh
-amq-squad resume --session issue-96      # re-orient a stalled/stopped session
+amq-squad resume --session issue-96      # PLAN ONLY; add --exec to reopen panes
 amq-squad agent resume fullstack         # revive one child from its saved record
 ```
 
@@ -748,8 +749,27 @@ cd ~/Code/my-project
 | Shift+Enter doesn't submit in a tmux window | `doctor` warns when tmux `extended-keys` is off; opening under iTerm2 `tmux -CC` (the `attach_control` action) makes it work natively. |
 | Custom role rejected | A custom role needs an explicit `--binary <role>=<cli>` (no catalog default). |
 
-For anything below the skills — the binary's verbs, JSON envelopes, tmux
-targets, profiles, and [cross-project teams](../README.md#cross-project-teams)
-— see the [README](../README.md). Each
-skill's full instructions live in its `SKILL.md` under
-`plugins/{claude,codex}/skills/<skill>/`.
+## Where the authoritative instructions live
+
+This guide is orientation. It is **not** the source of truth for how to run a squad.
+
+Each skill's authoritative instructions live in its canonical source, and the long-form
+material extracted from this guide lives beside them:
+
+| skill | authoritative source | extracted references |
+| --- | --- | --- |
+| `amq-squad:wizard` | `plugins/skills-src/wizard/SKILL.md` | `references/{stages,readiness,roles,worktrees}.md`, `LEARNINGS.md` |
+| `amq-squad:cli` | `plugins/skills-src/cli/SKILL.md` | `references/{daily-loop,primitives,troubleshooting}.md`, `LEARNINGS.md` |
+| `amq-squad:orchestrator` | `plugins/skills-src/orchestrator/SKILL.md` | `references/{lead-loop,agent-events,recovery}.md`, `LEARNINGS.md` |
+
+`plugins/{claude,codex}/skills/<skill>/` are GENERATED mirrors of those sources. Edit the
+source and run `make skills-generate`; editing a mirror is lost on the next generation and
+`--check` will fail.
+
+When this guide and a `SKILL.md` disagree, **the `SKILL.md` is correct** — its commands are
+verified against the live binary surface on every CI run by
+`scripts/check-skill-commands.py`, and this guide is not.
+
+For anything below the skills — the binary's verbs, JSON envelopes, tmux targets,
+profiles, and [cross-project teams](../README.md#cross-project-teams) — see the
+[README](../README.md).
