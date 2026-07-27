@@ -46,3 +46,40 @@ namespace and evidence-lifecycle traps found since.
 | `monitor` exited 0 and nothing had happened | 0 means fired **or** idled out cleanly | Read the event count in the output, not the exit code |
 | `next` exited 1 and looked broken | 1 means idle | Only above 1 is an error |
 | A turn burned per tick | `monitor` ran in the foreground | Run it as a background task so the harness re-invokes on exit |
+
+## `verify release-plan` needs a full explicit input set
+
+Every input is explicit by design: the command freezes repository, branch, candidate,
+tag/signing, evidence and title/notes identity, so it refuses to infer any of them. There
+is no `--list` discovery mode, and short forms ERROR rather than defaulting.
+
+Fourteen flags are required. This invocation was executed and returned exit 0 with
+`ready=true`:
+
+```sh
+amq-squad verify release-plan \
+  --project . \
+  --repository OWNER/REPO \
+  --remote-url https://github.com/OWNER/REPO.git \
+  --remote origin --branch main \
+  --tag vX.Y.Z --version vX.Y.Z \
+  --head <40-hex-sha> \
+  --annotation <tag-annotation> \
+  --worktree-state clean \
+  --preflight-state passed --preflight-sha256 <64-hex> \
+  --release-title "<title>" \
+  --notes-policy generated
+```
+
+The command is READ-ONLY: it performs no git, gh, network or filesystem mutation, and
+emits the exact gate bodies and non-force refspecs a later push would use.
+
+Discovering the set is mechanical, because each error names exactly one missing input:
+run it, read the error, add that flag, repeat. `--repository` must be canonical
+`OWNER/REPO` with no `.git`; `--head` must be one lowercase 40- or 64-hex SHA;
+`--notes-policy` must be `file` or `generated`.
+
+A caution learned the hard way here: `amq-squad verify merge` and
+`amq-squad verify release-plan` do NOT accept `--session`, unlike almost every other
+command in this skill. Passing it fails with `flag provided but not defined`.
+

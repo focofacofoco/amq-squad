@@ -120,10 +120,19 @@ func TestDoctorAcceptsTheRealShippedBundle(t *testing.T) {
 // hiding a real consumer.
 func TestNoGoCodeReadsTheDeletedMarker(t *testing.T) {
 	const marker = "Skill version:"
-	root := filepath.Join("..", "..", "internal")
+	// Consumers 6 and 7 (.amq-squad/team-rules.md and RELEASING.md) hid OUTSIDE internal/,
+	// so an internal-only walk could not see them. The roots below are the tracked
+	// surfaces that instruct agents or releasers; scripts/ is deliberately excluded
+	// because check-release-version.py is #558-owned and legitimately still pins the old
+	// sentence until that PR lands.
+	roots := []string{
+		filepath.Join("..", "..", "internal"),
+		filepath.Join("..", "..", ".amq-squad"),
+	}
+	extraFiles := []string{filepath.Join("..", "..", "RELEASING.md")}
 
 	var offenders []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	walk := func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -152,14 +161,30 @@ func TestNoGoCodeReadsTheDeletedMarker(t *testing.T) {
 			}
 		}
 		return nil
-	})
-	if err != nil {
-		t.Fatalf("walk %s: %v", root, err)
+	}
+	for _, root := range roots {
+		if _, statErr := os.Stat(root); statErr != nil {
+			continue
+		}
+		if err := filepath.Walk(root, walk); err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	for _, file := range extraFiles {
+		info, statErr := os.Stat(file)
+		if statErr != nil {
+			// Not skipped silently: RELEASING.md is tracked, so an absent one is a
+			// broken checkout rather than an optional file.
+			t.Fatalf("stat %s: %v", file, statErr)
+		}
+		if err := walk(file, info, nil); err != nil {
+			t.Fatalf("walk %s: %v", file, err)
+		}
 	}
 
 	// Anti-vacuity: prove the walk actually inspected the files it claims to cover. An
 	// empty result from a walk that visited nothing would otherwise read as a pass.
-	if got := countGoFiles(t, root); got < 50 {
+	if got := countGoFiles(t, roots[0]); got < 50 {
 		t.Fatalf("walk inspected only %d non-test .go files; the traversal is broken", got)
 	}
 

@@ -12,9 +12,9 @@ Checks, per plugins/*/skills/*/SKILL.md:
   - it parses as a YAML mapping,
   - `name` and `description` are present and non-empty.
 
-Also checks that the `Skill version: X.Y.Z` marker in each mirror's amq-squad
-skill (which the agent echoes on startup) matches that mirror's plugin manifest
-version, so the echoed version can never silently drift from the release.
+Also checks that the frontmatter `version:` field in each mirror's amq-squad skill
+matches that mirror's plugin manifest version, so the shipped version can never
+silently drift from the release.
 
 Exits non-zero (with a per-file report) if any check fails.
 """
