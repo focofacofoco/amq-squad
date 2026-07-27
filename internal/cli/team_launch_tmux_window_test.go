@@ -184,7 +184,7 @@ func TestRunTmuxWindowsPlanAddsWindowsToExistingDetachedSession(t *testing.T) {
 		}
 		// #571 reads #{pane_pid} after delivery to prove the command started.
 		if strings.Contains(call, "#{pane_pid}") {
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		}
 		return "", fmt.Errorf("unexpected tmux output command: %s", call)
 	}
@@ -243,8 +243,8 @@ func TestRunTmuxWindowsPlanResultFailureSendsNoAgentCommands(t *testing.T) {
 		call := strings.Join(args, " ")
 		switch {
 		case strings.Contains(call, "#{pane_pid}"):
-			// #571: the launcher now reads the pane ROOT pid to verify the agent started.
-			return "4242\n", nil
+			// #571 reads the pane ROOT pid; #577 also checks identity and pane_dead.
+			return fakePaneIdentityReply(args), nil
 		case strings.Contains(call, "#{session_name}"):
 			return "operator-session\n", nil
 		case len(args) > 0 && args[0] == "new-window":
@@ -255,7 +255,7 @@ func TestRunTmuxWindowsPlanResultFailureSendsNoAgentCommands(t *testing.T) {
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
 		case strings.Contains(call, "#{pane_pid}"):
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}

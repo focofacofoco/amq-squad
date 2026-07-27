@@ -116,8 +116,8 @@ func TestPreparedStagedParentTransactionHundredIterationITerm2ControlModeHarness
 					return currentWindow + "\n", nil
 				default:
 					if strings.Contains(call, "#{pane_pid}") {
-						// #571: launcher verifies the pane ROOT pid after delivery.
-						return "4242\n", nil
+						// #571 pid; #577 identity + pane_dead.
+						return fakePaneIdentityReply(args), nil
 					}
 					return "", fmt.Errorf("unexpected tmux output command: %s", call)
 				}
@@ -383,8 +383,8 @@ func TestPreparedStagedLaunchConcurrentAttemptsForSameClaimYieldExactlyOneWinner
 			return currentWindow + "\n", nil
 		default:
 			if strings.Contains(call, "#{pane_pid}") {
-				// #571: launcher verifies the pane ROOT pid after delivery.
-				return "4242\n", nil
+				// #571 pid; #577 identity + pane_dead.
+				return fakePaneIdentityReply(args), nil
 			}
 			return "", fmt.Errorf("unexpected tmux output command: %s", call)
 		}

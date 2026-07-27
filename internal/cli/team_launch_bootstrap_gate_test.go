@@ -67,8 +67,8 @@ func (f *fakeTmuxLaunch) install(t *testing.T) {
 			f.created = append(f.created, id)
 			return id + "\n", nil
 		case strings.Contains(call, "#{pane_pid}"):
-			// #571: the launcher now reads the pane ROOT pid to verify the agent started.
-			return "4242\n", nil
+			// #571 reads the pane ROOT pid; #577 also checks identity and pane_dead.
+			return fakePaneIdentityReply(args), nil
 		case strings.Contains(call, "#{session_name}:#{window_index}"):
 			return "harness:0\n", nil
 		case strings.Contains(call, "#{session_name}"):

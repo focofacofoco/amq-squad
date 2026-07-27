@@ -360,17 +360,45 @@ func deliverPaneCommand(target, command string) error {
 	return tmuxRunCommand("tmux", "respawn-pane", "-k", "-t", target, command)
 }
 
-// verifyPaneProcessLaunched reads the pane root PID after delivery and reports it. An empty
-// or zero PID means the pane has no process: the command did not start, and the caller must
-// NOT count the worker as launched.
-func verifyPaneProcessLaunched(target string) (string, error) {
-	out, err := tmuxOutputCommand("tmux", "display-message", "-p", "-t", target, "#{pane_pid}")
-	if err != nil {
-		return "", fmt.Errorf("read pane process id for %s: %w", target, err)
+// verifyPaneProcessLaunched proves the REQUESTED pane is alive and running a process after
+// delivery. It takes a pane ID, never a name.
+//
+// #577 finding 2: the first version accepted any nonempty #{pane_pid}, which is not proof of
+// anything. Three ways it passed while the worker had not launched:
+//
+//   - tmux falls back to the ACTIVE pane when a target does not resolve, so a fast-exiting
+//     worker returned the LAUNCHER SHELL's pid and was accepted. Comparing the returned
+//     #{pane_id} against the requested one is what closes this: a fallback answers about a
+//     different pane and is now a hard error rather than a success.
+//   - remain-on-exit keeps a dead pane, and a dead pane still reports its last pid. So
+//     #{pane_dead} must be 0; a pid alone cannot distinguish running from just-exited.
+//   - an incomplete reply (fewer fields than requested) was never checked, so a partial read
+//     could be parsed as a pid.
+//
+// I claimed in the #571 PR body that this check was "strictly stronger" than the previous
+// behaviour. That was false while the fallback could hand back the launcher's own shell.
+func verifyPaneProcessLaunched(paneID string) (string, error) {
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		return "", fmt.Errorf("cannot verify launch: no pane identity was captured")
 	}
-	pid := strings.TrimSpace(out)
+	out, err := tmuxOutputCommand("tmux", "display-message", "-p", "-t", paneID, "#{pane_id}\t#{pane_pid}\t#{pane_dead}")
+	if err != nil {
+		return "", fmt.Errorf("read pane process id for %s: %w", paneID, err)
+	}
+	fields := strings.Split(strings.TrimSpace(out), "\t")
+	if len(fields) != 3 {
+		return "", fmt.Errorf("pane %s returned an incomplete identity %q: cannot confirm the command started", paneID, strings.TrimSpace(out))
+	}
+	gotPane, pid, dead := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1]), strings.TrimSpace(fields[2])
+	if gotPane != paneID {
+		return "", fmt.Errorf("tmux resolved target %s to a DIFFERENT pane %s: the requested pane is gone and this pid belongs to another process (likely the launcher), so the worker is NOT launched", paneID, gotPane)
+	}
+	if dead != "0" {
+		return "", fmt.Errorf("pane %s is dead (pane_dead=%s) after command delivery: the command exited immediately", paneID, dead)
+	}
 	if pid == "" || pid == "0" {
-		return "", fmt.Errorf("pane %s has no running process after command delivery: the command did not start", target)
+		return "", fmt.Errorf("pane %s has no running process after command delivery: the command did not start", paneID)
 	}
 	return pid, nil
 }

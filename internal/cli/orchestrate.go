@@ -321,7 +321,32 @@ PREVIEW only -- nothing launched. Re-run with --go to open the window.
 	// the agent process. The registry can therefore bind a positive PID before
 	// dispatch and activate only after the canonical PID classifier observes
 	// the expected binary.
-	command := "exec " + shellCommand(agentArgv[0], agentArgv[1:]...)
+	//
+	// #577 finding 1: this is a FOURTH delivery path and it still types the command, so it
+	// carried the whole #454 NOC bootstrap -- at least 1,783 bytes before quoting -- through
+	// the pane tty, deterministically past the 1,024-byte MAX_CANON boundary. global start
+	// --go could silently lose the command and then die in an identity timeout: the exact
+	// #571 defect on the path #454 shipped.
+	//
+	// The other three sites switched to respawn-pane, and that would be WRONG here.
+	// respawn-pane replaces the pane's process and therefore its PID, while this path
+	// deliberately relies on exec KEEPING the pane PID that beginGlobalNOCLaunch has already
+	// persisted above; waitForGlobalNOCPIDIdentity then watches that same PID become the
+	// agent binary. Copying the earlier fix would have broken the #454 durable generation
+	// contract to fix a length bug.
+	//
+	// So the payload moves OFF the tty instead of the mechanism changing: the bootstrap is
+	// written beside the launch generation and the typed line substitutes it back in. The
+	// line stays a fixed ~150 bytes regardless of bootstrap size, exec still preserves the
+	// PID, and the agent receives byte-identical text. Double quotes are required -- bare
+	// $(cat ...) would word-split the prompt into hundreds of arguments.
+	promptPath, err := writeGlobalNOCBootstrapPayload(controlRoot, launchID, bootstrap)
+	if err != nil {
+		_ = transitionGlobalNOCLaunch(controlRoot, launchID, globalNOCLaunchFailed, "bootstrap payload write failed: "+err.Error(), globalNOCNow().UTC())
+		_ = orchestrateTmuxRun("kill-window", "-t", paneID)
+		return fmt.Errorf("write NOC bootstrap payload: %w", err)
+	}
+	command := nocDispatchCommand(agentArgv, promptPath)
 	if err := orchestrateTmuxRun("send-keys", "-t", paneID, command, "C-m"); err != nil {
 		_ = transitionGlobalNOCLaunch(controlRoot, launchID, globalNOCLaunchFailed, "agent command dispatch failed: "+err.Error(), globalNOCNow().UTC())
 		_ = orchestrateTmuxRun("kill-window", "-t", paneID)
@@ -1901,4 +1926,28 @@ func appendPassthroughArgs(dst []string, model, codexArgs, claudeArgs string) []
 		dst = append(dst, "--claude-args", claudeArgs)
 	}
 	return dst
+}
+
+// nocDispatchCommand builds the exact line typed into the NOC pane.
+//
+// Extracted so the test asserts on PRODUCTION's construction rather than rebuilding the same
+// string beside it. A test that composes its own command proves the technique works; it does
+// not prove this code uses it, so reverting production would leave it green. That is the
+// vacuity flavour this milestone has already paid for more than once.
+//
+// agentArgv arrives with the bootstrap prompt as its LAST element (appendGeneratedBootstrapPrompt
+// puts it after "--"). That element is dropped from the typed line and substituted back from
+// promptPath, so the line length is independent of bootstrap size. exec is preserved because
+// this path relies on the pane PID surviving dispatch.
+func nocDispatchCommand(agentArgv []string, promptPath string) string {
+	if len(agentArgv) == 0 {
+		return ""
+	}
+	promptless := agentArgv[:len(agentArgv)-1]
+	if len(promptless) == 0 {
+		return ""
+	}
+	// Double quotes are load-bearing: bare $(cat ...) word-splits the prompt into hundreds
+	// of arguments.
+	return "exec " + shellCommand(promptless[0], promptless[1:]...) + " \"$(cat " + shellQuote(promptPath) + ")\""
 }

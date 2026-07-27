@@ -41,7 +41,7 @@ func TestRunTmuxCurrentWindowMapsExactResultToConfiguredNonFirstLead(t *testing.
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
 		case strings.Contains(call, "#{pane_pid}"):
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -87,7 +87,7 @@ func TestRunTmuxCurrentWindowResultFailureSendsNoAgentCommands(t *testing.T) {
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
 		case strings.Contains(call, "#{pane_pid}"):
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -127,7 +127,7 @@ func TestRunTmuxOneWindowMapsExactResultToConfiguredNonFirstLead(t *testing.T) {
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
 		case strings.Contains(call, "#{pane_pid}"):
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -170,7 +170,7 @@ func TestRunTmuxNewSessionWithResultCapturesExactFirstPaneBeforeSend(t *testing.
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
 		case strings.Contains(call, "#{pane_pid}"):
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -204,7 +204,7 @@ func TestRunTmuxNewSessionResumeStageReusesExistingLeadSession(t *testing.T) {
 		}
 		// #571 reads #{pane_pid} after delivery to prove the command started.
 		if strings.Contains(strings.Join(args, " "), "#{pane_pid}") {
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		}
 		return "", fmt.Errorf("unexpected output command: %s %s", name, strings.Join(args, " "))
 	})
@@ -251,7 +251,7 @@ func TestPreparedRunGuardRollsBackCurrentWindowBeforeSecondPane(t *testing.T) {
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
 		case strings.Contains(call, "#{pane_pid}"):
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -293,7 +293,7 @@ func TestPreparedRunGuardRollsBackNewWindowsBeforeSecondMember(t *testing.T) {
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
 		case strings.Contains(call, "#{pane_pid}"):
-			return "4242\n", nil
+			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
