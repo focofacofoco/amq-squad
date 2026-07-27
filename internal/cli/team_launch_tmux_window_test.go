@@ -41,16 +41,18 @@ func TestTmuxDryRunNewWindowOneWindowPerAgent(t *testing.T) {
 	if c := strings.Count(joined, "tmux new-window"); c != 2 {
 		t.Errorf("expected 2 tmux new-window invocations (one per agent), got %d:\n%s", c, joined)
 	}
-	if c := strings.Count(joined, "tmux send-keys"); c != 2 {
-		t.Errorf("expected one send-keys per agent, got %d:\n%s", c, joined)
+	// #571 delivers as the pane root process; counting send-keys here would count a
+	// verb the launcher no longer issues and pass while asserting nothing.
+	if c := strings.Count(joined, "tmux respawn-pane"); c != 2 {
+		t.Errorf("expected one respawn-pane per agent, got %d:\n%s", c, joined)
 	}
 	for _, line := range strings.Split(joined, "\n") {
-		if strings.Contains(line, "tmux send-keys") && strings.Contains(line, "TMUX_PANE") {
+		if strings.Contains(line, "tmux respawn-pane") && strings.Contains(line, "TMUX_PANE") {
 			t.Fatalf("spawn command must target the new agent pane, not the launching/lead pane:\n%s\nfull plan:\n%s", line, joined)
 		}
 	}
 	for _, target := range []string{"$win_0", "$win_1"} {
-		if !strings.Contains(joined, "tmux send-keys -t \""+target+"\"") {
+		if !strings.Contains(joined, "tmux respawn-pane -k -t \""+target+"\"") {
 			t.Fatalf("new-window plan should send spawn command to %s:\n%s", target, joined)
 		}
 	}
@@ -180,6 +182,10 @@ func TestRunTmuxWindowsPlanAddsWindowsToExistingDetachedSession(t *testing.T) {
 		if len(args) > 0 && args[0] == "new-window" {
 			return fmt.Sprintf("%%%d\n", len(outputCalls)), nil
 		}
+		// #571 reads #{pane_pid} after delivery to prove the command started.
+		if strings.Contains(call, "#{pane_pid}") {
+			return "4242\n", nil
+		}
 		return "", fmt.Errorf("unexpected tmux output command: %s", call)
 	}
 	var runCalls []string
@@ -214,7 +220,7 @@ func TestRunTmuxWindowsPlanAddsWindowsToExistingDetachedSession(t *testing.T) {
 		t.Fatalf("new windows should target existing detached session:\n%s", joinedOutput)
 	}
 	joinedRun := strings.Join(runCalls, "\n")
-	for _, want := range []string{"select-pane -t %1 -T amq:issue-96:qa", "select-pane -t %2 -T amq:issue-96:reviewer", "send-keys -t %1", "send-keys -t %2"} {
+	for _, want := range []string{"select-pane -t %1 -T amq:issue-96:qa", "select-pane -t %2 -T amq:issue-96:reviewer", "respawn-pane -k -t %1", "respawn-pane -k -t %2"} {
 		if !strings.Contains(joinedRun, want) {
 			t.Fatalf("missing run call %q in:\n%s", want, joinedRun)
 		}
@@ -245,6 +251,11 @@ func TestRunTmuxWindowsPlanResultFailureSendsNoAgentCommands(t *testing.T) {
 			return "%2\n", nil
 		case strings.Contains(call, "#{window_id}"):
 			return "", fmt.Errorf("window id unavailable")
+		// #571 delivers the command as the pane ROOT PROCESS and then reads
+		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
+		// the launch counts as verified; the empty-pid refusal has its own test.
+		case strings.Contains(call, "#{pane_pid}"):
+			return "4242\n", nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}

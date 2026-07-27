@@ -37,6 +37,11 @@ func TestRunTmuxCurrentWindowMapsExactResultToConfiguredNonFirstLead(t *testing.
 			return fmt.Sprintf("%%%d\n", nextPane), nil
 		case strings.Contains(call, "#{window_id}"):
 			return "@7\n", nil
+		// #571 delivers the command as the pane ROOT PROCESS and then reads
+		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
+		// the launch counts as verified; the empty-pid refusal has its own test.
+		case strings.Contains(call, "#{pane_pid}"):
+			return "4242\n", nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -61,7 +66,7 @@ func TestRunTmuxCurrentWindowMapsExactResultToConfiguredNonFirstLead(t *testing.
 	if plan.LeadPaneID != "%3" || plan.LeadWindowID != "@7" {
 		t.Fatalf("configured lead plan = %+v", plan)
 	}
-	if got := strings.Count(strings.Join(*runCalls, "\n"), "send-keys"); got != 2 {
+	if got := strings.Count(strings.Join(*runCalls, "\n"), "respawn-pane"); got != 2 {
 		t.Fatalf("send calls = %v", *runCalls)
 	}
 }
@@ -78,6 +83,11 @@ func TestRunTmuxCurrentWindowResultFailureSendsNoAgentCommands(t *testing.T) {
 			return "%2\n", nil
 		case strings.Contains(call, "#{window_id}"):
 			return "", fmt.Errorf("window id unavailable")
+		// #571 delivers the command as the pane ROOT PROCESS and then reads
+		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
+		// the launch counts as verified; the empty-pid refusal has its own test.
+		case strings.Contains(call, "#{pane_pid}"):
+			return "4242\n", nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -113,6 +123,11 @@ func TestRunTmuxOneWindowMapsExactResultToConfiguredNonFirstLead(t *testing.T) {
 			return "@2\n", nil
 		case strings.Contains(call, "#{window_id}") && strings.Contains(call, "%3"):
 			return "@3\n", nil
+		// #571 delivers the command as the pane ROOT PROCESS and then reads
+		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
+		// the launch counts as verified; the empty-pid refusal has its own test.
+		case strings.Contains(call, "#{pane_pid}"):
+			return "4242\n", nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -134,7 +149,7 @@ func TestRunTmuxOneWindowMapsExactResultToConfiguredNonFirstLead(t *testing.T) {
 	if plan.LeadPaneID != "%3" || plan.LeadWindowID != "@3" {
 		t.Fatalf("configured lead plan = %+v result=%+v", plan, result)
 	}
-	if got := strings.Count(strings.Join(*runCalls, "\n"), "send-keys"); got != 2 {
+	if got := strings.Count(strings.Join(*runCalls, "\n"), "respawn-pane"); got != 2 {
 		t.Fatalf("send calls = %v", *runCalls)
 	}
 }
@@ -151,6 +166,11 @@ func TestRunTmuxNewSessionWithResultCapturesExactFirstPaneBeforeSend(t *testing.
 			return "%9\n", nil
 		case strings.Contains(call, "#{window_id}"):
 			return "@4\n", nil
+		// #571 delivers the command as the pane ROOT PROCESS and then reads
+		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
+		// the launch counts as verified; the empty-pid refusal has its own test.
+		case strings.Contains(call, "#{pane_pid}"):
+			return "4242\n", nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -165,7 +185,7 @@ func TestRunTmuxNewSessionWithResultCapturesExactFirstPaneBeforeSend(t *testing.
 	if len(result.Panes) != 1 || result.Panes[0].PaneID != "%9" || result.Panes[0].WindowID != "@4" {
 		t.Fatalf("result = %+v", result)
 	}
-	if got := strings.Count(strings.Join(*runCalls, "\n"), "send-keys"); got != 1 {
+	if got := strings.Count(strings.Join(*runCalls, "\n"), "respawn-pane"); got != 1 {
 		t.Fatalf("send calls = %v", *runCalls)
 	}
 }
@@ -182,6 +202,10 @@ func TestRunTmuxNewSessionResumeStageReusesExistingLeadSession(t *testing.T) {
 		if len(args) > 0 && args[0] == "split-window" {
 			return "%10\n", nil
 		}
+		// #571 reads #{pane_pid} after delivery to prove the command started.
+		if strings.Contains(strings.Join(args, " "), "#{pane_pid}") {
+			return "4242\n", nil
+		}
 		return "", fmt.Errorf("unexpected output command: %s %s", name, strings.Join(args, " "))
 	})
 
@@ -193,7 +217,7 @@ func TestRunTmuxNewSessionResumeStageReusesExistingLeadSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(*runCalls, "\n")
-	if !strings.Contains(joined, "select-pane -t %10 -T amq:issue-473:qa") || !strings.Contains(joined, "send-keys -t %10") {
+	if !strings.Contains(joined, "select-pane -t %10 -T amq:issue-473:qa") || !strings.Contains(joined, "respawn-pane -k -t %10") {
 		t.Fatalf("dependent stage calls = %s", joined)
 	}
 }
@@ -223,6 +247,11 @@ func TestPreparedRunGuardRollsBackCurrentWindowBeforeSecondPane(t *testing.T) {
 		case len(args) > 0 && args[0] == "split-window":
 			nextPane++
 			return fmt.Sprintf("%%%d\n", nextPane), nil
+		// #571 delivers the command as the pane ROOT PROCESS and then reads
+		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
+		// the launch counts as verified; the empty-pid refusal has its own test.
+		case strings.Contains(call, "#{pane_pid}"):
+			return "4242\n", nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
@@ -260,6 +289,11 @@ func TestPreparedRunGuardRollsBackNewWindowsBeforeSecondMember(t *testing.T) {
 		case len(args) > 0 && args[0] == "new-window":
 			nextPane++
 			return fmt.Sprintf("%%%d\n", nextPane), nil
+		// #571 delivers the command as the pane ROOT PROCESS and then reads
+		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
+		// the launch counts as verified; the empty-pid refusal has its own test.
+		case strings.Contains(call, "#{pane_pid}"):
+			return "4242\n", nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
 		}
