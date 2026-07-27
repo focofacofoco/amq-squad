@@ -227,6 +227,37 @@ CLI process to exit, then uses the exact pane/window IDs returned synchronously
 by the spawn backend. Missing IDs or tmux failures leave every agent running
 and surface a persistent `layout_finalization` warning in text and JSON status.
 
+## Read-only native goal supervision
+
+`status --json`, board session rows, and the doctor check with
+`kind: "goal_supervision"` project one shared assessment of the visible lead's
+native goal state. The object is schema-versioned, time-bounded, and
+fingerprinted across the exact project/profile/session namespace, lead and
+launch identity, recorded managed pane, prepared run, native goal attempt,
+pause generation, blocker/gate evidence, invariants, policy revision, claim
+projection, and retry budget.
+
+The state vocabulary is deliberately closed:
+
+- `running`, `parked_waiting_amq`, and `goal_terminal` are non-attention
+  lifecycle states.
+- `native_goal_paused_eligible` means every positive eligibility fact is
+  present.
+- `native_goal_blocked_human` means a known human decision, local input, open
+  gate, or unresolved known blocker remains.
+- `native_goal_blocked_unknown` means evidence is missing, stale,
+  contradictory, or ambiguous.
+- `lead_down` and `pane_busy_or_unverified` require restoration or inspection,
+  never inferred delivery.
+
+Policy modes are `manual`, `notify-only`, and `safe-auto`; missing policy is
+compatibility-safe `manual` revision 1, and cloned profiles discard the source
+policy. This assessment layer is read-only: it cannot claim an attempt, send a
+message, or inject `/goal resume`. A later delivery layer must consume the
+same fresh fingerprint and atomically establish claim-once state before any
+mutation. Fuzzy pane discovery, legacy name matching, raw tmux send-keys, and
+unknown source states are not eligible fallbacks.
+
 ## Wake outside a managed pane
 
 If a lead/orchestrator runs in a plain terminal **outside tmux**, the default
