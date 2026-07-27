@@ -84,6 +84,9 @@ CLAUDE_META = {
 }
 
 
+COMPANION_FILES = ("LEARNINGS.md",)
+
+
 def split_frontmatter(text: str, path: Path) -> tuple[dict, str]:
     match = FRONTMATTER.match(text)
     if not match:
@@ -124,6 +127,19 @@ def generated_skill_text(skill: str, mirror: str) -> str:
     return render_frontmatter(skill, mirror, data) + body
 
 
+def sync_bytes(source: Path, dest: Path, check: bool, stale: list[str]) -> None:
+    expected = source.read_bytes()
+    actual = dest.read_bytes() if dest.exists() else None
+    if actual == expected:
+        return
+    display = str(dest.relative_to(ROOT))
+    if check:
+        stale.append(display)
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(expected)
+
+
 def sync_references(skill: str, mirror: str, check: bool, stale: list[str]) -> None:
     source_refs = SOURCE_ROOT / skill / "references"
     if not source_refs.is_dir():
@@ -132,18 +148,20 @@ def sync_references(skill: str, mirror: str, check: bool, stale: list[str]) -> N
     for source in sorted(source_refs.rglob("*")):
         if not source.is_file():
             continue
-        rel = source.relative_to(source_refs)
-        dest = dest_refs / rel
-        expected = source.read_bytes()
-        actual = dest.read_bytes() if dest.exists() else None
-        if actual == expected:
+        sync_bytes(source, dest_refs / source.relative_to(source_refs), check, stale)
+
+
+def sync_companions(skill: str, mirror: str, check: bool, stale: list[str]) -> None:
+    """Mirror skill-owned files that sit beside SKILL.md rather than under references/.
+
+    SKILL.md links these, so a file present in skills-src but absent from a mirror
+    ships a broken link. Anything a SKILL.md may reference belongs here.
+    """
+    for name in COMPANION_FILES:
+        source = SOURCE_ROOT / skill / name
+        if not source.is_file():
             continue
-        display = str(dest.relative_to(ROOT))
-        if check:
-            stale.append(display)
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(expected)
+        sync_bytes(source, ROOT / "plugins" / mirror / "skills" / skill / name, check, stale)
 
 
 def write_or_check(path: Path, expected: str, check: bool, stale: list[str]) -> None:
@@ -179,6 +197,7 @@ def main() -> int:
             dest = ROOT / "plugins" / mirror / "skills" / skill / "SKILL.md"
             write_or_check(dest, generated_skill_text(skill, mirror), args.check, stale)
             sync_references(skill, mirror, args.check, stale)
+            sync_companions(skill, mirror, args.check, stale)
 
     if stale:
         sys.stderr.write("\nGenerated skill files are stale; run `make skills-generate`.\n")

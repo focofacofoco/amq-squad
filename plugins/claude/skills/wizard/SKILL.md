@@ -14,6 +14,46 @@ Use this operator-facing skill before a new squad launches. It owns goal intake,
 artifact preparation, readiness, and final launch preview. It never treats a
 syntactically valid launch command as proof that the team is ready.
 
+## Output rule: the CLI renders, you pass it through
+
+Print CLI output **verbatim in a fenced block** — the proposal, the readiness table,
+the digest. Do not re-typeset and do not re-summarise.
+
+This matters most at the launch gate. `--prepare-plan` emits a digest and `--go
+--goal-digest` consumes it: the digest **is** the proof the operator approved that
+exact plan. Re-summarising before asking invites approval of something textually
+different from what was accepted, and a re-rendered readiness table cannot be diffed
+against the next run.
+
+## Task Routing
+
+| Operator says | Run |
+|---|---|
+| "set up a squad for X" | Full flow: `wizard <request>` |
+| "show me the plan, don't write anything" | `run start ... --prepare-plan` |
+| "go ahead and prepare it" | `run start ... --prepare` |
+| "is it ready" | `run start ... --readiness-json` |
+| "launch it" | `run start ... --go --goal-digest 'sha256:<accepted>'` |
+| "just the roles stage" | `stage roles <request>` |
+| "why did readiness block" | Read the blocked row's `fix` field; it names the exact command |
+| "it launched but agents died" | Wrong skill for recovery → `amq-squad:cli`, then `doctor` |
+
+## Gotchas
+
+Every row below was hit in a real wizard run during v2.25.0. Items marked **fixed in
+v2.25.0** still apply when an operator is on an older build, so the recovery is kept.
+
+| Symptom | Cause | Exact fix |
+|---|---|---|
+| Readiness blocks on `worktree_isolation` naming a `--cwd` you cannot find | The fix text named a flag without naming a command (#538) | Give each mutation-capable member its own directory at creation with `new profile NAME --cwd "role=path,..."`, or on an existing roster with `team member update ROLE --cwd PATH`. **Fixed in v2.25.0**: the row now names scoped commands |
+| You try `team shared-cwd-exception set` after a failed `--prepare` and it reports no profile | Preparation is transactional, so a profile it created was rolled back (#538) | Apply the fix at creation time: `new profile NAME --shared-cwd-exception "<reason>"`. **Fixed in v2.25.0**: the failure now says whether the profile was created-and-removed or restored |
+| `new profile NAME --actor-mode ...` fails with "takes exactly one profile name" | Value-taking flags were dropped by the argument peeler, so the value fell through as a positional (#538) | **Fixed in v2.25.0**. On older builds, set actor modes with `team member update ROLE --actor-mode ...` after creation |
+| Every agent dies at bootstrap with `namespace drift: accepted=X current=X` | `--project` was relative; the identity tuple compared a relative recording against a resolved path (#540) | **Fixed in v2.25.0**. On older builds, always pass an absolute `--project` |
+| `--go` fails with a tool-policy source-set change listing the same files twice | Capability sources were recorded relative and compared absolute (#539) | **Fixed in v2.25.0**. On older builds, run the member at `full` tool profile to get past it |
+| `up` reports success but panes sit at a shell prompt | Agent bootstrap failure was not surfaced to the launcher (#540) | **Fixed in v2.25.0**: the launch now fails and names the member and its pane error. On older builds, read each pane before trusting the success line |
+| Readiness passes every row and then `--go` fails | Readiness was not checking what spawn checks (#539) | **Fixed in v2.25.0**: both call one predicate. On older builds, treat readiness as necessary but not sufficient |
+| An unscoped command mutates the wrong roster | Named profiles need `--profile`; unscoped resolution may pick another live record | Always pass `--project` and, for named profiles, `--profile` |
+
 ## Immutable stage contract
 
 The stages are `goal`, `brief`, `rules`, `roles`, `profile`, `readiness`, and
@@ -104,6 +144,21 @@ profile (`minimal`, `coding`, `browser`, `data`, or explicit `full`). Show the
 effective policy and source for each member. Claude settings overlays and Codex
 profiles must be materialized before the binary starts. Never silently remove a
 capability the operator explicitly requested.
+
+## References
+
+- `LEARNINGS.md` — field failures from real preparation and launch runs
+- `references/stages.md` — the seven stages, what each consumes and produces, and
+  which are read-only
+- `references/roles.md` — role selection, custom role contracts, and the templates
+- `references/readiness.md` — every readiness row, what blocks it, and the exact fix
+- `references/worktrees.md` — worktree isolation, why 2+ mutation-capable members
+  need separate directories, and how to give them one
+- `references/team-archetypes.md` — roster shapes and when each fits
+- `references/briefs-template.md` — the brief structure preparation writes
+- `references/pointer-stub-template.md` — the managed block `team sync --apply` writes
+- `../amq-squad/references/team-rules-template.md` — team-rules starting point; it
+  stays under the router because the binary's tests pin that path
 
 ## Invocation
 
