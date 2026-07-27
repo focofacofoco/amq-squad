@@ -56,7 +56,7 @@ func (a preparedRunAdmission) required() bool { return a.Governed }
 // same disagreement.
 //
 // rec may be nil, meaning "no persisted record was found": that is not bindable.
-func preparedRunActorAdmission(manifest preparedRunManifest, prepared bool, role, handle string, rec *launch.Record) preparedRunAdmission {
+func preparedRunActorAdmission(manifest preparedRunManifest, digest string, prepared bool, role, handle string, rec *launch.Record) preparedRunAdmission {
 	adm := preparedRunAdmission{Generation: strings.TrimSpace(manifest.Generation)}
 
 	// #579 finding 1: Bindable required all four GENERATION fields and ignored
@@ -65,10 +65,20 @@ func preparedRunActorAdmission(manifest preparedRunManifest, prepared bool, role
 	// refused it at prepared_run_state.go:312 -- the exact defect this predicate exists to kill,
 	// one field over. Bindable now means "the managed restore path can actually bind this",
 	// which requires the attempt.
+	// #579 round 3 F1: shape is not agreement. A COMPLETE, claim-bound token from a SUPERSEDED
+	// generation satisfied every field check, previewed as bindable (team_resume treats Bindable
+	// as not-blocked and offers `agent resume <role>`), and exec-side validation then refused it
+	// -- the refuse-on-exec/allow-in-preview defect this predicate exists to kill, one comparison
+	// short. samePreparedRunGeneration exists for exactly this comparison.
+	//
+	// My round-2 commit claimed "Bindable now means the managed restore path can actually bind
+	// this". That was false until this AND: it meant "the token has the right shape".
 	bindable := false
 	if rec != nil {
 		token := preparedRunTokenFromRecord(*rec)
-		bindable = token.complete() && strings.TrimSpace(token.LaunchAttempt) != ""
+		bindable = token.complete() &&
+			strings.TrimSpace(token.LaunchAttempt) != "" &&
+			samePreparedRunGeneration(token, preparedRunTokenFromSnapshot(manifest, digest))
 	}
 
 	if !prepared {
@@ -78,10 +88,18 @@ func preparedRunActorAdmission(manifest preparedRunManifest, prepared bool, role
 		// manifest that is absent or different. A token-bearing record in a session with no
 		// accepted generation is CONTRADICTORY evidence, and contradictory evidence is
 		// ineligible, never best-effort.
-		if rec != nil && !preparedRunTokenFromRecord(*rec).empty() {
+		// #579 round 3 F2: empty() checks ONLY the four generation fields -- LaunchAttempt is not
+		// among them -- so a record carrying an orphaned attempt and nothing else fell through as
+		// UNGOVERNED and previewed a plain launch. An orphaned attempt IS prepared-run evidence,
+		// and evidence that contradicts an unprepared session must be governed, not ignored.
+		if rec != nil && recordCarriesPreparedRunEvidence(*rec) {
 			adm.Governed = true
 			adm.Reason = fmt.Sprintf("actor %s/%s carries a prepared-run token but this session has no accepted prepared generation; the token cannot be validated and execution will refuse it", role, handle)
-			adm.Recovery = "amq-squad run start --project " + shellQuote(strings.TrimSpace(manifest.Project)) + " --profile <profile> --session <session>"
+			// Fold-in of the round-2 residual: this branch has no accepted manifest, so
+			// manifest.Project is the zero value and the emitted form was --project '' -- an
+			// empty-quoted flag that LOOKS filled beside placeholders that look like
+			// placeholders. Blank fields render as visible placeholders.
+			adm.Recovery = "amq-squad run start --project " + projectOrPlaceholder(manifest.Project) + " --profile <profile> --session <session>"
 			return adm
 		}
 		return adm
@@ -117,14 +135,18 @@ func preparedRunActorAdmission(manifest preparedRunManifest, prepared bool, role
 		if rec != nil && strings.TrimSpace(rec.Binary) != "" {
 			binary = strings.TrimSpace(rec.Binary)
 		}
-		adm.Recovery = "amq-squad agent up " + binary + " --role " + shellQuote(role) +
+		// #579 round 3 F4: rec.Binary was concatenated RAW. A path with spaces malforms the
+		// command and a metacharacter becomes syntax the moment the operator copies it. This
+		// disproved my round-2 claim that every emitted form was checked against the real command
+		// surface -- I checked the FLAGS, never the interpolated value.
+		adm.Recovery = "amq-squad agent up " + shellQuote(binary) + " --role " + shellQuote(role) +
 			" --staged-spawn --staged-claim <exact active claim ID from: amq-squad status --json>"
 	default:
 		// Prepared, not staged, and not bindable: no operator-typable token flag exists, so
 		// point at the command that re-reserves rather than inventing one.
-		adm.Recovery = "amq-squad run start --project " + shellQuote(strings.TrimSpace(manifest.Project)) +
-			" --profile " + shellQuote(strings.TrimSpace(manifest.Profile)) +
-			" --session " + shellQuote(strings.TrimSpace(manifest.Session))
+		adm.Recovery = "amq-squad run start --project " + projectOrPlaceholder(manifest.Project) +
+			" --profile " + fieldOrPlaceholder(manifest.Profile, "profile") +
+			" --session " + fieldOrPlaceholder(manifest.Session, "session")
 	}
 	return adm
 }
@@ -137,9 +159,37 @@ func preparedRunActorAdmission(manifest preparedRunManifest, prepared bool, role
 // would almost certainly collapse that distinction into "not prepared", which is fail-OPEN
 // in the planner and would preview a command admission rejects -- #573 again.
 func preparedRunAdmissionForMember(project, profile, session, role, handle string, rec *launch.Record) (preparedRunAdmission, error) {
-	manifest, _, prepared, err := preparedRunManifestForProjection(project, profile, session)
+	manifest, digest, prepared, err := preparedRunManifestForProjection(project, profile, session)
 	if err != nil {
 		return preparedRunAdmission{}, err
 	}
-	return preparedRunActorAdmission(manifest, prepared, role, handle, rec), nil
+	return preparedRunActorAdmission(manifest, digest, prepared, role, handle, rec), nil
+}
+
+// recordCarriesPreparedRunEvidence reports whether a launch record carries ANY prepared-run
+// field, including an orphaned launch attempt.
+//
+// #579 round 3 F2: token.empty() answers a narrower question -- are the four GENERATION fields
+// all blank -- and LaunchAttempt is not one of them. Using empty() to mean "no prepared-run
+// evidence" let a record with only an attempt read as an ordinary actor.
+func recordCarriesPreparedRunEvidence(rec launch.Record) bool {
+	token := preparedRunTokenFromRecord(rec)
+	return !token.empty() || strings.TrimSpace(token.LaunchAttempt) != ""
+}
+
+// projectOrPlaceholder renders a project path for a COPYABLE command, or a visible placeholder
+// when it is blank.
+//
+// A blank value shell-quotes to ” , which looks like a filled argument and fails at runtime.
+// A placeholder looks unfinished, which is the honest rendering of an unknown value -- the same
+// executable-not-plausible rule that produced findings F3 and F4.
+func projectOrPlaceholder(project string) string {
+	return fieldOrPlaceholder(project, "project")
+}
+
+func fieldOrPlaceholder(value, name string) string {
+	if strings.TrimSpace(value) == "" {
+		return "<" + name + ">"
+	}
+	return shellQuote(strings.TrimSpace(value))
 }

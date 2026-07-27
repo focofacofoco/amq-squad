@@ -21,12 +21,19 @@ import (
 // sufficient: correct verdicts in a predicate nobody calls fixes nothing, and a shared call
 // whose verdicts are wrong is worse than none.
 func TestPreparedRunActorAdmissionClassifiesEveryState(t *testing.T) {
+	// GoalNamespace and GoalDigest are REQUIRED here, not decoration: #579 round 3 F1 makes
+	// Bindable depend on the record's token AGREEING with the accepted generation, and
+	// preparedRunTokenFromSnapshot derives that generation from these fields. Omitting them made
+	// the fixture unable to model agreement at all -- every bindable row failed, and it would have
+	// been easy to misread that as the F1 fix being wrong rather than the fixture being incomplete.
 	manifest := preparedRunManifest{
-		Generation:   "g-7",
-		Project:      "/repo",
-		Profile:      "squad",
-		Session:      "v2-25-0",
-		StagedRoster: []string{"qa"},
+		Generation:    "g-7",
+		Project:       "/repo",
+		Profile:       "squad",
+		Session:       "v2-25-0",
+		GoalNamespace: "squad/v2-25-0",
+		GoalDigest:    "gd-7",
+		StagedRoster:  []string{"qa"},
 	}
 	// A record the managed path can ACTUALLY bind: complete generation AND the reserved launch
 	// attempt. #579 finding 1 -- the attempt was missing from this fixture and from the
@@ -96,9 +103,32 @@ func TestPreparedRunActorAdmissionClassifiesEveryState(t *testing.T) {
 			name: "token-bearing record in an UNPREPARED session is governed", prepared: false, role: "qa", rec: bound,
 			wantRequired: true, wantStaged: false, wantBindable: false, wantRecovery: "run start",
 		},
+		// #579 round 3. Each row below is the FALSIFYING INPUT for a claim my round-2 commit
+		// message made and my round-2 checks could not disprove, because those checks confirmed a
+		// line existed rather than testing what would make the sentence false.
+		{
+			// F1's falsifying input: a COMPLETE, claim-bound token from a SUPERSEDED generation.
+			// Shape-perfect, agreement-absent. Round 2 called this bindable and offered
+			// `agent resume <role>`; exec-side validation refuses it.
+			name: "stale-generation token is NOT bindable", prepared: true, role: "qa",
+			rec: &launch.Record{
+				PreparedRunGeneration: "g-OLD", PreparedRunDigest: "d-OLD",
+				PreparedRunGoalNamespace: "squad/v2-25-0", PreparedRunGoalDigest: "gd-OLD",
+				PreparedRunLaunchAttempt: "a-1",
+			},
+			wantRequired: true, wantStaged: true, wantBindable: false, wantRecovery: "--staged-spawn",
+		},
+		{
+			// F2's falsifying input: ONLY an orphaned launch attempt. token.empty() is TRUE here --
+			// it checks only the four generation fields -- so round 2 let this fall through as an
+			// ordinary actor in an unprepared session.
+			name: "attempt-only record in an UNPREPARED session is governed", prepared: false, role: "qa",
+			rec:          &launch.Record{PreparedRunLaunchAttempt: "a-orphan"},
+			wantRequired: true, wantStaged: false, wantBindable: false, wantRecovery: "run start",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			adm := preparedRunActorAdmission(manifest, tc.prepared, tc.role, "handle-"+tc.role, tc.rec)
+			adm := preparedRunActorAdmission(manifest, "d-7", tc.prepared, tc.role, "handle-"+tc.role, tc.rec)
 
 			if adm.required() != tc.wantRequired {
 				t.Errorf("required() = %v, want %v", adm.required(), tc.wantRequired)
@@ -131,6 +161,11 @@ func TestPreparedRunActorAdmissionClassifiesEveryState(t *testing.T) {
 			// The recovery command must be runnable, not a description of one.
 			if !strings.HasPrefix(adm.Recovery, "amq-squad ") {
 				t.Errorf("Recovery must be an exact command starting with amq-squad; got %q", adm.Recovery)
+			}
+			// #579 round 3 fold-in: a BLANK field must render as a visible placeholder, never as
+			// '' -- an empty-quoted flag looks filled and fails at runtime.
+			if strings.Contains(adm.Recovery, "''") {
+				t.Errorf("Recovery contains an empty-quoted argument, which looks filled and is not: %q", adm.Recovery)
 			}
 		})
 	}
@@ -188,31 +223,67 @@ func TestBothSurfacesConsumeThePredicateVerdict(t *testing.T) {
 					"decide, and a result that is not bound cannot be consumed", tc.file, tc.symbol)
 			}
 
+			// #579 round 3 F3: the previous version accepted ANY same-named required() receiver
+			// anywhere in the file, so a dead `_ = adm.required()` sitting beside an independent
+			// verdict computer passed. Consumption is not control.
+			//
+			// The verdict must appear in the CONDITION of an if that controls a refusal, so the
+			// branch is actually governed by the predicate. This is the seventh shape-versus-proof
+			// item in this milestone and the review reopened for safety anyway, so it is fixed
+			// rather than declared.
 			consumed := false
 			ast.Inspect(parsed, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
+				ifs, ok := n.(*ast.IfStmt)
+				if !ok || ifs.Cond == nil {
 					return true
 				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel == nil || sel.Sel.Name != "required" {
-					return true
-				}
-				recv, ok := sel.X.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				for _, name := range assigned {
-					if recv.Name == name {
-						consumed = true
+				// Does this if's CONDITION call required() on one of the bound identifiers?
+				governed := false
+				ast.Inspect(ifs.Cond, func(c ast.Node) bool {
+					call, isCall := c.(*ast.CallExpr)
+					if !isCall {
+						return true
 					}
+					sel, isSel := call.Fun.(*ast.SelectorExpr)
+					if !isSel || sel.Sel == nil || sel.Sel.Name != "required" {
+						return true
+					}
+					recv, isID := sel.X.(*ast.Ident)
+					if !isID {
+						return true
+					}
+					for _, name := range assigned {
+						if recv.Name == name {
+							governed = true
+						}
+					}
+					return true
+				})
+				if !governed {
+					return true
 				}
+				// And does that if's body actually REFUSE -- return an error or set the blocked
+				// action? A governed condition guarding nothing is still not control.
+				ast.Inspect(ifs.Body, func(b ast.Node) bool {
+					switch node := b.(type) {
+					case *ast.ReturnStmt:
+						if len(node.Results) > 0 {
+							consumed = true
+						}
+					case *ast.Ident:
+						if node.Name == "resumeBlocked" {
+							consumed = true
+						}
+					}
+					return true
+				})
 				return true
 			})
 			if !consumed {
-				t.Errorf("%s calls %s but never consumes required() from its result -- so it is using "+
-					"the predicate for WORDING while computing its own verdict. A predicate change would "+
-					"move one surface and not the other, which is the disagreement #573 exists to end.",
+				t.Errorf("%s calls %s but its required() verdict never CONTROLS a refusing branch -- "+
+					"a dead `_ = x.required()` beside an independent verdict computer would look identical. "+
+					"The predicate must govern the condition, or a predicate change moves one surface and "+
+					"not the other, which is the disagreement #573 exists to end.",
 					tc.file, tc.symbol)
 			}
 		})
@@ -293,5 +364,32 @@ func TestPreviewAndAdmissionShareOnePredicate(t *testing.T) {
 	if !routed {
 		t.Errorf("%s must delegate to %s; otherwise the planner and admission answer independently "+
 			"while appearing to share a definition", loader, predicate)
+	}
+}
+
+// #579 round 3 F4's falsifying input. The round-2 check asserted the command prefix and the
+// --staged-spawn flag, both of which pass with the binary missing entirely or unquoted -- I
+// checked the FLAGS and never the interpolated value, then claimed every emitted form was
+// checked against the real command surface.
+//
+// This uses a binary path that BREAKS an unquoted command: a space plus a metacharacter.
+func TestStagedRecoveryQuotesTheInterpolatedBinary(t *testing.T) {
+	manifest := preparedRunManifest{
+		Generation: "g-7", Project: "/repo", Profile: "squad", Session: "v2-25-0",
+		GoalNamespace: "squad/v2-25-0", GoalDigest: "gd-7",
+		StagedRoster: []string{"qa"},
+	}
+	rec := &launch.Record{Binary: "/opt/my tools/codex;rm -rf x"}
+
+	adm := preparedRunActorAdmission(manifest, "d-7", true, "qa", "qa", rec)
+
+	if !strings.Contains(adm.Recovery, shellQuote(rec.Binary)) {
+		t.Errorf("the interpolated binary must be shell-quoted, or a path with spaces malforms the\n"+
+			"command and a metacharacter becomes SYNTAX when the operator copies it.\ngot: %s", adm.Recovery)
+	}
+	// The raw form must NOT appear unquoted: asserting the quoted form alone would also pass if
+	// both were present.
+	if strings.Contains(adm.Recovery, "codex;rm -rf x") && !strings.Contains(adm.Recovery, shellQuote(rec.Binary)) {
+		t.Errorf("recovery carries the raw unquoted binary: %s", adm.Recovery)
 	}
 }

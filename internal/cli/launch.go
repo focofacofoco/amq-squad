@@ -587,11 +587,13 @@ Examples:
 		// persisted one. Passing the record would set Bindable and change nothing about the
 		// verdict, while implying admission consults record state, which it does not.
 		var manifest preparedRunManifest
+		var manifestDigest string
 		prepared := preparedLaunchContext != nil
 		if prepared {
 			manifest = preparedLaunchContext.Manifest
+			manifestDigest = preparedLaunchContext.Digest
 		}
-		adm := preparedRunActorAdmission(manifest, prepared, rec.Role, rec.Handle, nil)
+		adm := preparedRunActorAdmission(manifest, manifestDigest, prepared, rec.Role, rec.Handle, nil)
 		if adm.required() {
 			return fmt.Errorf("agent up refused before launch-record or process side effects: %s", adm.Reason)
 		}
