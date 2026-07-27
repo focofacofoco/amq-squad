@@ -195,6 +195,11 @@ type statusRecord struct {
 	// client can positively identify the wakeable orchestrator identity rather
 	// than inferring it from lead role alone. Set from launch.Record.External.
 	External bool `json:"external,omitempty"`
+	// OrchestratorRegistration is the persisted provenance for the external
+	// orchestrator bound to this project run. Status exposes the exact policy,
+	// NOC launch generation, registration id, and timestamp rather than asking
+	// clients to infer registration from wake liveness or prose.
+	OrchestratorRegistration *launch.OrchestratorRegistration `json:"orchestrator_registration,omitempty"`
 	// WakeAutoDrain reports that this member's wake sidecar is configured to
 	// inject a drain instruction on each durable-message arrival (the launch
 	// record carries WakeInjectCmd). It means inbound messages are processed
@@ -1719,6 +1724,7 @@ func classifyMemberStatusWithReplacementResolver(t team.Team, profile string, m 
 		rec.Terminal = terminalRuntimeFromInfo(live.LaunchRecord.Terminal)
 		rec.goalBinding = live.LaunchRecord.GoalBinding
 		rec.External = live.LaunchRecord.External
+		rec.OrchestratorRegistration = live.LaunchRecord.OrchestratorRegistration
 		rec.WakeAutoDrain = strings.TrimSpace(live.LaunchRecord.WakeInjectCmd) != ""
 		rec.PreauthorizedActions = live.LaunchRecord.PreauthorizedActions
 		rec.AdoptionMode = strings.TrimSpace(live.LaunchRecord.AdoptionMode)
