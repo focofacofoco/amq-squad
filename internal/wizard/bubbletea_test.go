@@ -607,9 +607,18 @@ func TestGlobalBranchRunsThroughBothRealAdaptersToIdenticalReview(t *testing.T) 
 	if bubblePreview != numberedPreview || bubbleLive != numberedLive {
 		t.Fatalf("command forms differ: bubble=(%q, %q) numbered=(%q, %q)", bubblePreview, bubbleLive, numberedPreview, numberedLive)
 	}
-	for _, want := range []string{"Review", bubblePreview, bubbleLive, "owns no wake mailbox"} {
+	// Each adapter is asserted SEPARATELY. Checking only the numbered output left the
+	// bubble adapter's identical clause unpinned, so reverting it passed -- one assertion
+	// satisfied by either of two sources proves neither of them.
+	for _, want := range []string{"Review", bubblePreview, bubbleLive, "owns no wake mailbox unless a run registers it", "--register-orchestrator"} {
 		if !strings.Contains(numberedOut.String(), want) {
 			t.Fatalf("numbered global review missing %q:\n%s", want, numberedOut.String())
+		}
+	}
+	bubbleReview := bubbleModel.summary()
+	for _, want := range []string{"owns no wake mailbox unless a run registers it", "--register-orchestrator"} {
+		if !strings.Contains(bubbleReview, want) {
+			t.Fatalf("bubble global review missing %q:\n%s", want, bubbleReview)
 		}
 	}
 	if !strings.Contains(bubble.Spec.Scope, "global") || bubble.Spec.Backend != BackendGlobalStart {

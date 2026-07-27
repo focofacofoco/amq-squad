@@ -634,7 +634,7 @@ func runNumberedGlobal(r *bufio.Reader, out io.Writer, s Spec, loadCatalog func(
 	for _, warning := range effortCatalogWarnings(s, ProjectContext{Catalog: catalog}) {
 		fmt.Fprintln(out, warning)
 	}
-	fmt.Fprintf(out, "Scope: Global / NOC orchestrator\nNeutral root: %s\nAgent: %s\nModel: %s\nEffort: %s\nPosture: %s\nWindow: %s\nNOC contract: poll explicit project/profile/session namespaces; this global orchestrator owns no wake mailbox.\nPreview command: %s\nLive command: %s\n", s.GlobalRoot, s.GlobalAgent, displayValue(s.GlobalModel), defaultString(s.GlobalEffort, effortAutomatic), globalPostureReviewLine(s.GlobalAgent, s.GlobalPosture), s.GlobalWindow, previewCommand, liveCommand)
+	fmt.Fprintf(out, "Scope: Global / NOC orchestrator\nNeutral root: %s\nAgent: %s\nModel: %s\nEffort: %s\nPosture: %s\nWindow: %s\nNOC contract: poll explicit project/profile/session namespaces; this global orchestrator owns no wake mailbox unless a run registers it (--register-orchestrator), which upgrades that namespace to wake-first; prefer wake over polling wherever a run has registered it.\nPreview command: %s\nLive command: %s\n", s.GlobalRoot, s.GlobalAgent, displayValue(s.GlobalModel), defaultString(s.GlobalEffort, effortAutomatic), globalPostureReviewLine(s.GlobalAgent, s.GlobalPosture), s.GlobalWindow, previewCommand, liveCommand)
 	fmt.Fprintln(out, "Answers collected. Running the canonical preview next; live launch is a separate default-No decision.")
 	return s, nil
 }

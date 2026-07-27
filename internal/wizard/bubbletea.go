@@ -443,7 +443,7 @@ func (m BubbleModel) note() string {
 	case stageGlobalRoot:
 		return "This is a neutral control root, not a project profile or session."
 	case stageGlobalAgent:
-		return "The global orchestrator coordinates project namespaces but owns no project wake mailbox."
+		return "The global orchestrator coordinates project namespaces. By default it owns no project wake mailbox and must poll; a per-run `goal start --register-orchestrator` upgrades it to wake-first for that namespace."
 	case stageGlobalModel:
 		return "Catalog choices are suggestions; Custom accepts any model name."
 	case stageGlobalModelCustom:
@@ -601,7 +601,7 @@ func (m BubbleModel) summary() string {
 		parts = append(parts,
 			"Window    "+defaultString(m.spec.GlobalWindow, "global-orch"),
 			"Backend   "+string(BackendGlobalStart),
-			"NOC       polls explicit project/profile/session namespaces; owns no wake mailbox",
+			"NOC       polls explicit project/profile/session namespaces; owns no wake mailbox unless a run registers it (--register-orchestrator)",
 		)
 		if previewCommand, liveCommand, err := m.spec.CommandForms(); err == nil {
 			parts = append(parts, "Preview   "+previewCommand, "Live      "+liveCommand)

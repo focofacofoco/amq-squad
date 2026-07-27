@@ -845,7 +845,7 @@ func TestNumberedGlobalWizardWithoutScopeNeverDiscoversProject(t *testing.T) {
 	if inspections != 0 || len(*globalCalls) != 1 || hasWizardArg((*globalCalls)[0], "--go") {
 		t.Fatalf("inspections=%d global calls=%v", inspections, *globalCalls)
 	}
-	for _, want := range []string{"What do you want to run?", "Review", "Preview command:", "Live command:", "owns no wake mailbox"} {
+	for _, want := range []string{"What do you want to run?", "Review", "Preview command:", "Live command:", "owns no wake mailbox unless a run registers it", "--register-orchestrator"} {
 		if !strings.Contains(prompts.String(), want) {
 			t.Fatalf("global Review missing %q:\n%s", want, prompts.String())
 		}
