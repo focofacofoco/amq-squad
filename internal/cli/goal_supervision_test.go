@@ -12,6 +12,7 @@ import (
 
 	"github.com/omriariav/amq-squad/v2/internal/activity"
 	"github.com/omriariav/amq-squad/v2/internal/launch"
+	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
 	"github.com/omriariav/amq-squad/v2/internal/state"
 	"github.com/omriariav/amq-squad/v2/internal/team"
 	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
@@ -375,6 +376,22 @@ func TestGoalSupervisionManagedTmuxTargetRequiresCanonicalManagedTarget(t *testi
 			if got := goalSupervisionManagedTmuxTarget(tc.target); got != tc.want {
 				t.Fatalf("goalSupervisionManagedTmuxTarget(%q) = %t, want %t", tc.target, got, tc.want)
 			}
+
+			input := eligibleGoalSupervisionInput()
+			input.Binding.Pane.Target = tc.target
+			// Deliberately leave the projected bit true: restore must enforce
+			// the canonical target itself rather than trust a stale projection.
+			input.Binding.Pane.Managed = true
+			input.Binding.Runtime.Live = false
+			input.Binding.Runtime.PIDLive = false
+			input.Binding.Runtime.PaneLive = false
+			input.Binding.Runtime.PIDAlive = false
+			input.Binding.Runtime.BinaryMatch = false
+			assessment := assessGoalSupervision(input)
+			if assessment.Actions.Restore.Available != tc.want {
+				t.Fatalf("lead-down restore for target %q available = %t, want %t: %+v",
+					tc.target, assessment.Actions.Restore.Available, tc.want, assessment.Actions.Restore)
+			}
 		})
 	}
 }
@@ -455,6 +472,85 @@ func TestVerifyGoalSupervisionBlockedBindingContentsIsExact(t *testing.T) {
 	}
 }
 
+func TestBuildGoalSupervisionAssessmentContentVerificationDoesNotOverrideStatusVeto(t *testing.T) {
+	project := t.TempDir()
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	session := "release"
+	ns := squadnamespace.Resolve(project, team.DefaultProfile, session)
+	member := team.Member{Role: "cto", Handle: "cto", Binary: "codex"}
+	tm := team.Team{
+		Project: project, Orchestrated: true, Lead: member.Role,
+		ExecutionMode: executionModeProjectLead,
+		Members:       []team.Member{member},
+	}
+	agentDir := filepath.Join(ns.AMQRoot, "agents", member.Handle)
+	rec := launch.Record{
+		CWD: project, Binary: member.Binary, Handle: member.Handle, Role: member.Role,
+		Session: session, TeamProfile: team.DefaultProfile, AgentPID: 4242, StartedAt: now.Add(-time.Minute),
+		GoalBinding: &launch.GoalBinding{
+			Mode: "native_goal_blocked", NativeGoal: true, Source: "goal-runtime",
+			DeliveryState: "blocked", Goal: "ship", AttemptID: "attempt-1",
+			Command: "synthetic exact command", Detail: "waiting",
+		},
+	}
+	if err := launch.Write(agentDir, rec); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := launch.Read(agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []statusRecord{{
+		Role: member.Role, Handle: member.Handle, Binary: member.Binary,
+		Session: session, Namespace: ns, AgentDir: agentDir,
+		// A refused managed identity is stale, so status must veto the
+		// otherwise content-exact blocked binding.
+		Status:           statusStateStale,
+		LiveIdentityMode: "managed_refused",
+		goalBinding:      stored.GoalBinding,
+		liveness: agentLiveness{
+			LaunchFound: true, LaunchRecord: stored,
+		},
+		Activity: &activity.Snapshot{
+			Source: activity.SourceHeartbeat, WrittenAt: now.Add(-time.Second),
+			Phase: "goal_blocked",
+		},
+	}}
+	if binding := goalBindingForStatus(
+		ns, newSessionStatusContext(tm, team.DefaultProfile, session, ""), rows,
+	); binding.Verified {
+		t.Fatalf("stale/refused status unexpectedly verified binding: %+v", binding)
+	}
+
+	previousVerifier := goalSupervisionBlockedBindingVerifier
+	goalSupervisionBlockedBindingVerifier = func(
+		team.Team, string, string, team.Member, launch.Record,
+	) (string, string, error) {
+		return "ship", "attempt-1", nil
+	}
+	t.Cleanup(func() { goalSupervisionBlockedBindingVerifier = previousVerifier })
+
+	assessment := buildGoalSupervisionAssessment(
+		tm, team.DefaultProfile, session, ns, rows,
+		goalSupervisionGateObservation{Evidence: GoalSupervisionGateEvidence{Known: true}},
+		nil, nil,
+		duplicateLaunchProbe{
+			PIDAlive:         func(int) bool { return false },
+			ProcessMatch:     func(int, func(string) bool) bool { return false },
+			ProcessTTY:       func(int) (string, bool) { return "", false },
+			ProcessStartTime: func(int) (time.Time, bool) { return time.Time{}, false },
+			Now:              func() time.Time { return now },
+		},
+		now,
+	)
+	if assessment.Binding.Goal.StateKnown ||
+		assessment.Binding.Goal.Verified ||
+		assessment.Binding.Goal.ContentExact ||
+		assessment.Eligible {
+		t.Fatalf("content verification overrode status veto: %+v", assessment.Binding.Goal)
+	}
+}
+
 func TestVerifyGoalSupervisionPreparedGoalRejectsGoalOrGenerationDrift(t *testing.T) {
 	generation := strings.Repeat("a", 32)
 	launchAttempt := strings.Repeat("b", 32)
@@ -509,6 +605,16 @@ func TestGoalSupervisionLifecycleObservationFailsClosed(t *testing.T) {
 		"future": {
 			Source:    activity.SourceHeartbeat,
 			WrittenAt: now.Add(time.Nanosecond),
+		},
+		"missing phase": {
+			Source:    activity.SourceHeartbeat,
+			WrittenAt: now.Add(-time.Second),
+			Phase:     "  ",
+		},
+		"unrecognized phase": {
+			Source:    activity.SourceHeartbeat,
+			WrittenAt: now.Add(-time.Second),
+			Phase:     "testing",
 		},
 		"task store": {
 			Source:    activity.SourceTaskStore,
@@ -572,6 +678,41 @@ func TestGoalSupervisionFingerprintIgnoresObservationTimeButBindsAttempt(t *test
 	changed := assessGoalSupervision(secondInput)
 	if first.Fingerprint == changed.Fingerprint {
 		t.Fatalf("attempt change did not change fingerprint %q", first.Fingerprint)
+	}
+}
+
+func TestGoalSupervisionPauseGenerationIgnoresUnrelatedLaunchRecordDrift(t *testing.T) {
+	binding := eligibleGoalSupervisionInput().Binding
+	first := goalSupervisionPauseGeneration(binding)
+
+	unrelatedDrift := binding
+	unrelatedDrift.LaunchRecordDigest = "different-launch-record-digest"
+	unrelatedDrift.LaunchRecordModTime++
+	if got := goalSupervisionPauseGeneration(unrelatedDrift); got != first {
+		t.Fatalf("unrelated launch-record drift rotated pause generation: %q != %q", got, first)
+	}
+
+	for name, mutate := range map[string]func(*GoalSupervisionBinding){
+		"launch id": func(b *GoalSupervisionBinding) {
+			b.LaunchID = "different-launch"
+		},
+		"binding digest": func(b *GoalSupervisionBinding) {
+			b.Goal.BindingDigest = "different-binding"
+		},
+		"attempt id": func(b *GoalSupervisionBinding) {
+			b.Goal.AttemptID = "different-attempt"
+		},
+		"mode": func(b *GoalSupervisionBinding) {
+			b.Goal.Mode = "different-mode"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := binding
+			mutate(&changed)
+			if got := goalSupervisionPauseGeneration(changed); got == first {
+				t.Fatalf("%s did not rotate pause generation %q", name, got)
+			}
+		})
 	}
 }
 

@@ -267,9 +267,14 @@ observations unknown in production. Therefore its production assessment cannot
 reach `native_goal_paused_eligible` by absence. PR5 must populate all three
 from durable stores, revalidate the exact typed goal and attempt against the
 generated command and accepted prepared-run goal, and use
-`fingerprint + attempt_id` as the claim key. The projected resume action stays
-unavailable until that claim-once execution path exists; every mutating action
-still carries its fingerprint, attempt ID, and confirmation wording.
+`namespace_id + pause_generation + attempt_id` as the durable claim key.
+`pause_generation` is stable across unrelated launch-record drift and binds
+the launch ID, goal-binding digest, attempt ID, and mode. The claim record
+stores the preclaim fingerprint as a staleness check; the fingerprint plus
+attempt ID remains the action binding, not the durable claim identity. The
+projected resume action stays unavailable until that claim-once execution path
+exists; every mutating action still carries its fingerprint, attempt ID, and
+confirmation wording.
 
 ## Wake outside a managed pane
 

@@ -314,7 +314,7 @@ func goalSupervisionEligibilityReasons(a GoalSupervisionAssessment, in goalSuper
 		reason("exact_namespace", goalSupervisionAllNonBlank(b.Project, b.Profile, b.Session, b.NamespaceID), "project/profile/session/namespace must be exact"),
 		reason("exact_lead_identity", goalSupervisionAllNonBlank(b.LeadRole, b.LeadHandle), "lead role and handle must be exact"),
 		reason("lifecycle_known", a.Lifecycle.Known && a.Lifecycle.Fresh, "fresh durable lifecycle evidence is required"),
-		reason("resumable_lifecycle", a.Lifecycle.Known && a.Lifecycle.Fresh && a.Lifecycle.Phase != "parked_waiting_amq" && a.Lifecycle.Phase != "goal_terminal", "parked and terminal lifecycles are never resume-eligible"),
+		reason("resumable_lifecycle", a.Lifecycle.Known && a.Lifecycle.Fresh && a.Lifecycle.Phase == "goal_blocked", "only a fresh recognized goal_blocked lifecycle is resume-eligible"),
 		reason("native_goal_paused", nativePaused, "verified blocked native /goal binding required"),
 		reason("goal_binding_content", b.Goal.ContentExact, "typed goal and attempt must match the exact generated command and prepared-run goal"),
 		reason("goal_attempt", b.Goal.Mode == "native_goal_blocked" && goalSupervisionAllNonBlank(b.Goal.Source, b.Goal.DeliveryState, b.Goal.GoalDigest, b.Goal.AttemptID, b.Goal.BindingDigest, b.Goal.CommandDigest), "exact blocked native goal, attempt, binding, delivery, and command digests required"),
@@ -425,6 +425,8 @@ func goalSupervisionActions(a GoalSupervisionAssessment) GoalSupervisionActions 
 		goalSupervisionReasonPassed(a.Reasons, "exact_namespace") &&
 		goalSupervisionReasonPassed(a.Reasons, "exact_lead_identity") &&
 		goalSupervisionReasonPassed(a.Reasons, "launch_generation") &&
+		a.Binding.Pane.Managed &&
+		goalSupervisionManagedTmuxTarget(a.Binding.Pane.Target) &&
 		a.Gates.Known && a.Gates.Open == 0 && !a.Gates.Ambiguous &&
 		mutationBound
 	resumeReason := "claim-once native goal resume execution is reserved for PR5"
@@ -554,6 +556,8 @@ var goalSupervisionPaneBusy = func(paneID string) (busy bool, known bool) {
 var goalSupervisionPaneInspector = tmuxpane.InspectPaneExactByID
 
 var goalSupervisionLocalInputDetector = tmuxpane.DetectLocalInputBlocker
+
+var goalSupervisionBlockedBindingVerifier = verifyGoalSupervisionBlockedBinding
 
 func buildGoalSupervisionAssessment(
 	t team.Team,
@@ -703,7 +707,7 @@ func buildGoalSupervisionAssessment(
 			BindingDigest: digestJSON(*rec.GoalBinding), CommandDigest: digestGoalSupervisionString(rec.GoalBinding.Command),
 		}
 		if nativeGoalBindingBlocked(rec.GoalBinding) {
-			goal, attemptID, err := verifyGoalSupervisionBlockedBinding(
+			goal, attemptID, err := goalSupervisionBlockedBindingVerifier(
 				t, profile, session, leadMember, rec,
 			)
 			if err != nil {
@@ -711,20 +715,14 @@ func buildGoalSupervisionAssessment(
 				input.Binding.Goal.StateKnown = false
 				input.Binding.Goal.Verified = false
 			} else {
-				input.Binding.Goal.StateKnown = true
-				input.Binding.Goal.Verified = true
-				input.Binding.Goal.ContentExact = true
+				input.Binding.Goal.ContentExact = bindingData.Verified
 				input.Binding.Goal.GoalDigest = digestGoalSupervisionString(goal)
 				input.Binding.Goal.AttemptID = attemptID
 			}
 		} else {
 			input.Binding.Goal.ContentExact = bindingData.Verified
 		}
-		input.Binding.PauseGeneration = digestJSON(struct {
-			Launch  string
-			Binding string
-			Mode    string
-		}{digest, input.Binding.Goal.BindingDigest, rec.GoalBinding.Mode})
+		input.Binding.PauseGeneration = goalSupervisionPauseGeneration(input.Binding)
 	}
 	if goalSupervisionNativePaused(input.Binding.Goal) {
 		detail := strings.TrimSpace(rec.GoalBinding.Detail)
@@ -733,6 +731,20 @@ func buildGoalSupervisionAssessment(
 		}
 	}
 	return finish()
+}
+
+func goalSupervisionPauseGeneration(binding GoalSupervisionBinding) string {
+	return digestJSON(struct {
+		LaunchID      string
+		BindingDigest string
+		AttemptID     string
+		Mode          string
+	}{
+		LaunchID:      binding.LaunchID,
+		BindingDigest: binding.Goal.BindingDigest,
+		AttemptID:     binding.Goal.AttemptID,
+		Mode:          binding.Goal.Mode,
+	})
 }
 
 func readGoalSupervisionLaunchSnapshot(agentDir string) (launch.Record, string, int64, error) {
@@ -865,9 +877,22 @@ func goalSupervisionLifecycleObservation(
 		observedAt.Sub(snapshot.WrittenAt) > activity.DefaultStaleAfter {
 		return GoalSupervisionLifecycleEvidence{}
 	}
+	phase := strings.TrimSpace(snapshot.Phase)
+	if !goalSupervisionLifecyclePhaseKnown(phase) {
+		return GoalSupervisionLifecycleEvidence{}
+	}
 	return GoalSupervisionLifecycleEvidence{
 		Known: true, Fresh: true, Source: snapshot.Source,
-		Phase: strings.TrimSpace(snapshot.Phase),
+		Phase: phase,
+	}
+}
+
+func goalSupervisionLifecyclePhaseKnown(phase string) bool {
+	switch phase {
+	case "goal_blocked", "parked_waiting_amq", "goal_terminal":
+		return true
+	default:
+		return false
 	}
 }
 
