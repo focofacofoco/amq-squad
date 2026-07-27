@@ -810,7 +810,7 @@ func TestNumberedGlobalWizardDelegatesPreviewThenDefaultNo(t *testing.T) {
 	oldInput, oldOutput := runStartWizardInput, runStartWizardOutput
 	t.Cleanup(func() { runStartWizardInput, runStartWizardOutput = oldInput, oldOutput })
 	// Scope, root, agent, model, effort, Claude args, and window. EOF is default-No confirmation.
-	runStartWizardInput = strings.NewReader(strings.Repeat("\n", 7))
+	runStartWizardInput = strings.NewReader(strings.Repeat("\n", 8))
 	var prompts strings.Builder
 	runStartWizardOutput = &prompts
 	if err := runNumberedRunStartWizard([]string{"--scope", "global", "--root", t.TempDir()}, "test"); err != nil {
