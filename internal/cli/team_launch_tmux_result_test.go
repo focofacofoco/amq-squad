@@ -24,6 +24,7 @@ func stubTmuxResultCommands(t *testing.T, output func(string, ...string) (string
 }
 
 func TestRunTmuxCurrentWindowMapsExactResultToConfiguredNonFirstLead(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
 	t.Setenv("TMUX_PANE", "%1")
 	nextPane := 1
@@ -40,7 +41,7 @@ func TestRunTmuxCurrentWindowMapsExactResultToConfiguredNonFirstLead(t *testing.
 		// #571 delivers the command as the pane ROOT PROCESS and then reads
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
-		case strings.Contains(call, "#{pane_pid}"):
+		case strings.Contains(call, "#{pane_pid}"), strings.Contains(call, "#{pane_dead}"):
 			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
@@ -72,6 +73,7 @@ func TestRunTmuxCurrentWindowMapsExactResultToConfiguredNonFirstLead(t *testing.
 }
 
 func TestRunTmuxCurrentWindowResultFailureSendsNoAgentCommands(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
 	t.Setenv("TMUX_PANE", "%1")
 	runCalls := stubTmuxResultCommands(t, func(name string, args ...string) (string, error) {
@@ -86,7 +88,7 @@ func TestRunTmuxCurrentWindowResultFailureSendsNoAgentCommands(t *testing.T) {
 		// #571 delivers the command as the pane ROOT PROCESS and then reads
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
-		case strings.Contains(call, "#{pane_pid}"):
+		case strings.Contains(call, "#{pane_pid}"), strings.Contains(call, "#{pane_dead}"):
 			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
@@ -108,6 +110,7 @@ func TestRunTmuxCurrentWindowResultFailureSendsNoAgentCommands(t *testing.T) {
 }
 
 func TestRunTmuxOneWindowMapsExactResultToConfiguredNonFirstLead(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
 	t.Setenv("TMUX_PANE", "%1")
 	nextPane := 1
@@ -126,7 +129,7 @@ func TestRunTmuxOneWindowMapsExactResultToConfiguredNonFirstLead(t *testing.T) {
 		// #571 delivers the command as the pane ROOT PROCESS and then reads
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
-		case strings.Contains(call, "#{pane_pid}"):
+		case strings.Contains(call, "#{pane_pid}"), strings.Contains(call, "#{pane_dead}"):
 			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
@@ -155,6 +158,7 @@ func TestRunTmuxOneWindowMapsExactResultToConfiguredNonFirstLead(t *testing.T) {
 }
 
 func TestRunTmuxNewSessionWithResultCapturesExactFirstPaneBeforeSend(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "")
 	oldExists := tmuxSessionExists
 	tmuxSessionExists = func(string) bool { return false }
@@ -169,7 +173,7 @@ func TestRunTmuxNewSessionWithResultCapturesExactFirstPaneBeforeSend(t *testing.
 		// #571 delivers the command as the pane ROOT PROCESS and then reads
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
-		case strings.Contains(call, "#{pane_pid}"):
+		case strings.Contains(call, "#{pane_pid}"), strings.Contains(call, "#{pane_dead}"):
 			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
@@ -191,6 +195,7 @@ func TestRunTmuxNewSessionWithResultCapturesExactFirstPaneBeforeSend(t *testing.
 }
 
 func TestRunTmuxNewSessionResumeStageReusesExistingLeadSession(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "")
 	oldExists := tmuxSessionExists
 	tmuxSessionExists = func(session string) bool { return session == "squad" }
@@ -203,7 +208,7 @@ func TestRunTmuxNewSessionResumeStageReusesExistingLeadSession(t *testing.T) {
 			return "%10\n", nil
 		}
 		// #571 reads #{pane_pid} after delivery to prove the command started.
-		if strings.Contains(strings.Join(args, " "), "#{pane_pid}") {
+		if strings.Contains(strings.Join(args, " "), "#{pane_pid}") || strings.Contains(strings.Join(args, " "), "#{pane_dead}") {
 			return fakePaneIdentityReply(args), nil
 		}
 		return "", fmt.Errorf("unexpected output command: %s %s", name, strings.Join(args, " "))
@@ -223,6 +228,7 @@ func TestRunTmuxNewSessionResumeStageReusesExistingLeadSession(t *testing.T) {
 }
 
 func TestTmuxLaunchResultRejectsNameLikePaneAndWindowTargets(t *testing.T) {
+	stubExactPaneInspection(t)
 	oldOutput := tmuxOutputCommand
 	t.Cleanup(func() { tmuxOutputCommand = oldOutput })
 	tmuxOutputCommand = func(string, ...string) (string, error) { return "@1", nil }
@@ -236,6 +242,7 @@ func TestTmuxLaunchResultRejectsNameLikePaneAndWindowTargets(t *testing.T) {
 }
 
 func TestPreparedRunGuardRollsBackCurrentWindowBeforeSecondPane(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
 	t.Setenv("TMUX_PANE", "%1")
 	nextPane := 1
@@ -250,7 +257,7 @@ func TestPreparedRunGuardRollsBackCurrentWindowBeforeSecondPane(t *testing.T) {
 		// #571 delivers the command as the pane ROOT PROCESS and then reads
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
-		case strings.Contains(call, "#{pane_pid}"):
+		case strings.Contains(call, "#{pane_pid}"), strings.Contains(call, "#{pane_dead}"):
 			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
@@ -278,6 +285,7 @@ func TestPreparedRunGuardRollsBackCurrentWindowBeforeSecondPane(t *testing.T) {
 }
 
 func TestPreparedRunGuardRollsBackNewWindowsBeforeSecondMember(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
 	t.Setenv("TMUX_PANE", "%1")
 	nextPane := 1
@@ -292,7 +300,7 @@ func TestPreparedRunGuardRollsBackNewWindowsBeforeSecondMember(t *testing.T) {
 		// #571 delivers the command as the pane ROOT PROCESS and then reads
 		// #{pane_pid} to prove it started. These fakes answer with a fixed pid so
 		// the launch counts as verified; the empty-pid refusal has its own test.
-		case strings.Contains(call, "#{pane_pid}"):
+		case strings.Contains(call, "#{pane_pid}"), strings.Contains(call, "#{pane_dead}"):
 			return fakePaneIdentityReply(args), nil
 		default:
 			return "", fmt.Errorf("unexpected output command: %s %s", name, call)
@@ -318,6 +326,7 @@ func TestPreparedRunGuardRollsBackNewWindowsBeforeSecondMember(t *testing.T) {
 }
 
 func TestPreparedRunGuardSurfacesPrimaryAndCleanupFailure(t *testing.T) {
+	stubExactPaneInspection(t)
 	t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
 	t.Setenv("TMUX_PANE", "%1")
 	oldOutput, oldRun := tmuxOutputCommand, tmuxRunCommand
@@ -354,6 +363,7 @@ func TestPreparedRunGuardSurfacesPrimaryAndCleanupFailure(t *testing.T) {
 }
 
 func TestPreparedRunGuardBarrierRunsForAllRolesBeforeAnySend(t *testing.T) {
+	stubExactPaneInspection(t)
 	for _, tc := range []struct {
 		name       string
 		target     string
@@ -422,6 +432,7 @@ func TestPreparedRunGuardBarrierRunsForAllRolesBeforeAnySend(t *testing.T) {
 }
 
 func TestCompleteTeamLaunchResultFailsClosed(t *testing.T) {
+	stubExactPaneInspection(t)
 	panes := []teamLaunchPane{{Role: "cto"}, {Role: "qa"}}
 	for _, tc := range []struct {
 		name   string

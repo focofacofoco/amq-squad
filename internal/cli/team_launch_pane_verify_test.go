@@ -314,6 +314,14 @@ func TestDeliveredCommandCarriesTheLauncherPATH(t *testing.T) {
 // the only reply that models "the requested pane exists and is alive" without encoding a
 // specific pane into the harness.
 func fakePaneIdentityReply(args []string) string {
+	// #577 round 4 split the read: identity comes from the shared resolver via
+	// inspectPaneExact, and THIS seam is asked only for #{pane_dead}. Returning the old
+	// three-field reply for a pane_dead query made a live pane read as dead, which is how
+	// nine tests failed in CI after the focused set passed.
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "#{pane_dead}") {
+		return "0\n"
+	}
 	target := ""
 	for i, a := range args {
 		if a == "-t" && i+1 < len(args) {
@@ -321,6 +329,22 @@ func fakePaneIdentityReply(args []string) string {
 		}
 	}
 	return target + "\t4242\t0\n"
+}
+
+// stubExactPaneInspection installs a permissive shared-resolver fake: whatever pane is asked
+// about is Found, alive, with a fixed pid.
+//
+// Every launch test needs it now, because #577 round 4 routed pane identity through
+// tmuxpane.InspectPaneExactByID, whose own exec seam is package-private -- so a test that
+// fakes only tmuxOutputCommand reaches the REAL resolver and gets Unavailable/Malformed.
+// Naming it once beats nine copies drifting apart.
+func stubExactPaneInspection(t *testing.T) {
+	t.Helper()
+	old := inspectPaneExact
+	t.Cleanup(func() { inspectPaneExact = old })
+	inspectPaneExact = func(id string) tmuxpane.PaneInspection {
+		return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionFound, Pane: tmuxpane.TmuxPane{Pane: id, PID: 4242}}
+	}
 }
 
 // Distinct sentinels so the table can express "the tmux server is absent" (provable vacancy)

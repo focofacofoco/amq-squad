@@ -16,6 +16,7 @@ import (
 )
 
 func TestPreparedStagedParentTransactionHundredIterationITerm2ControlModeHarness(t *testing.T) {
+	stubExactPaneInspection(t)
 	for _, binary := range []string{"codex", "claude"} {
 		t.Run(binary, func(t *testing.T) {
 			project, manifest, token, claim := preparedStagedProjectionFixture(t, binary)
@@ -115,7 +116,7 @@ func TestPreparedStagedParentTransactionHundredIterationITerm2ControlModeHarness
 				case len(args) > 0 && args[0] == "display-message" && strings.Contains(call, "#{window_id}"):
 					return currentWindow + "\n", nil
 				default:
-					if strings.Contains(call, "#{pane_pid}") {
+					if strings.Contains(call, "#{pane_pid}") || strings.Contains(call, "#{pane_dead}") {
 						// #571 pid; #577 identity + pane_dead.
 						return fakePaneIdentityReply(args), nil
 					}
@@ -305,6 +306,7 @@ func TestPreparedStagedParentTransactionHundredIterationITerm2ControlModeHarness
 // command. This proves the caller must be the exact actor that authorized
 // the claim.
 func TestTeamMemberStagedLaunchRequiresCallerToBeExactClaimAuthorizer(t *testing.T) {
+	stubExactPaneInspection(t)
 	project, _, _, claim := preparedStagedProjectionFixture(t, "codex")
 	old := stagedAdmissionResolveAuthorizer
 	t.Cleanup(func() { stagedAdmissionResolveAuthorizer = old })
@@ -331,6 +333,7 @@ func TestTeamMemberStagedLaunchRequiresCallerToBeExactClaimAuthorizer(t *testing
 }
 
 func TestPreparedStagedLaunchConcurrentAttemptsForSameClaimYieldExactlyOneWinner(t *testing.T) {
+	stubExactPaneInspection(t)
 	project, manifest, token, claim := preparedStagedProjectionFixture(t, "codex")
 	t.Setenv("TMUX", "/tmp/race-tmux,1,0")
 	t.Setenv("TMUX_PANE", "%1")
@@ -382,7 +385,7 @@ func TestPreparedStagedLaunchConcurrentAttemptsForSameClaimYieldExactlyOneWinner
 		case len(args) > 0 && args[0] == "display-message" && strings.Contains(call, "#{window_id}"):
 			return currentWindow + "\n", nil
 		default:
-			if strings.Contains(call, "#{pane_pid}") {
+			if strings.Contains(call, "#{pane_pid}") || strings.Contains(call, "#{pane_dead}") {
 				// #571 pid; #577 identity + pane_dead.
 				return fakePaneIdentityReply(args), nil
 			}
@@ -474,6 +477,7 @@ func TestPreparedStagedLaunchConcurrentAttemptsForSameClaimYieldExactlyOneWinner
 }
 
 func TestPreparedStagedTargetPostflightRejectsStrategyMismatchBothDirections(t *testing.T) {
+	stubExactPaneInspection(t)
 	for _, tc := range []struct {
 		requestTarget string
 		recordTarget  string
@@ -501,6 +505,7 @@ func TestPreparedStagedTargetPostflightRejectsStrategyMismatchBothDirections(t *
 }
 
 func TestPreparedStagedTargetPostflightRejectsVerifiedStrategyMismatchBothDirections(t *testing.T) {
+	stubExactPaneInspection(t)
 	for _, tc := range []struct {
 		requestTarget  string
 		verifiedTarget string
@@ -547,6 +552,7 @@ func TestPreparedStagedTargetPostflightRejectsVerifiedStrategyMismatchBothDirect
 }
 
 func TestPreparedStagedRollbackRetainsEvidenceUntilExactProcessesExit(t *testing.T) {
+	stubExactPaneInspection(t)
 	for _, tc := range []struct {
 		name        string
 		delayedExit bool
