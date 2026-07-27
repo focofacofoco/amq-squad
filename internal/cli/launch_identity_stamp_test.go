@@ -211,10 +211,24 @@ func TestEveryMismatchWrapperGuardsTheIncompleteSentinel(t *testing.T) {
 	var unguarded []string
 	sites := 0
 
-	// guardsSentinel reports whether an if-statement tests errors.Is(..., sentinel).
+	// guardsSentinel reports whether an if-statement tests errors.Is(..., sentinel) with
+	// POSITIVE polarity.
+	//
+	// #575 round 6: matching the call anywhere in the condition accepted its own negation.
+	//
+	//	if !errors.Is(err, errIncompleteLaunchRecord) { return err }
+	//	return fmt.Errorf("... verified live identity mismatch: %w", err)
+	//
+	// That terminates, so the block counted as guarded -- while routing away everything
+	// EXCEPT the sentinel and dropping the sentinel itself straight into the wrap. The
+	// bypass was the exact inverse of the property. So the walk stops at `!`: a negated
+	// sentinel test is not a guard, it is the opposite of one.
 	guardsSentinel := func(n ast.Node) bool {
 		found := false
 		ast.Inspect(n, func(x ast.Node) bool {
+			if unary, isUnary := x.(*ast.UnaryExpr); isUnary && unary.Op == token.NOT {
+				return false
+			}
 			call, ok := x.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -319,12 +333,19 @@ func TestEveryMismatchWrapperGuardsTheIncompleteSentinel(t *testing.T) {
 // else always has a path that falls through.
 //
 // RECORDED RESIDUAL (accepted, not a gap this test will chase). This recognises the
-// terminating forms that appear in this package -- return, break/continue/goto, panic, and
-// a fully-terminating if/else. It does NOT model labelled control flow, os.Exit, log.Fatal,
-// or a helper whose body always panics. Any of those would be judged non-terminating, so the
-// error direction is a FALSE POSITIVE: the test complains about code that is in fact
-// guarded. That direction is safe -- it fails loud and a human reads it -- whereas modelling
-// every exit shape would mean reimplementing reachability analysis inside a guard test.
+// terminating forms that appear in this package -- return, break, continue, panic, and a
+// fully-terminating if/else. It does NOT model goto-target reachability, os.Exit, log.Fatal,
+// or a helper whose body always panics. Every one of those is judged NON-terminating, so the
+// error direction is a FALSE POSITIVE: the test complains about code that is in fact guarded.
+// That direction is safe -- it fails loud and a human reads it -- whereas modelling every
+// exit shape would mean reimplementing reachability analysis inside a guard test.
+//
+// This claim was FALSE when first written (#575 round 6): goto was accepted as terminating,
+// making unmodelled labelled flow a silent false NEGATIVE, the opposite of what the sentence
+// above promised. Judging goto non-terminating is what makes the promise true. Recording the
+// correction here rather than quietly rewording it, because the declaration is the only
+// thing a future reader has to tell them where the check's edges are, and a declaration
+// nobody re-derives is trusted exactly as far as it is accurate.
 func blockTerminates(block *ast.BlockStmt) bool {
 	if block == nil || len(block.List) == 0 {
 		return false
@@ -333,8 +354,21 @@ func blockTerminates(block *ast.BlockStmt) bool {
 	case *ast.ReturnStmt:
 		return true
 	case *ast.BranchStmt:
-		// break, continue, goto, fallthrough: control leaves this block.
-		return true
+		// #575 round 6: treating EVERY branch as terminating accepted
+		//
+		//	if errors.Is(err, errIncompleteLaunchRecord) { goto mismatch }
+		//
+		// as a guard, when the label it jumps to may be the mismatch wrap itself. That was
+		// a SILENT FALSE NEGATIVE, and it directly contradicted this function's own declared
+		// residual, which claimed unmodelled labelled flow could only produce fail-loud
+		// false positives. A wrong honesty statement is worse than the hole it described.
+		//
+		// break and continue provably leave this block. goto does not: where it lands is
+		// exactly the unmodelled part. fallthrough transfers to the next case rather than
+		// leaving. Both are now judged NON-terminating, which makes the declared residual
+		// true instead of merely stated -- the conservative direction, and the one that
+		// fails loud.
+		return last.Tok == token.BREAK || last.Tok == token.CONTINUE
 	case *ast.ExprStmt:
 		call, ok := last.X.(*ast.CallExpr)
 		if !ok {
@@ -380,6 +414,8 @@ func blockTerminates(block *ast.BlockStmt) bool {
 //     `return Expectation{}, err`, where err is non-nil by elimination
 //   - proof carried across a helper, a switch arm, or a for/range condition rather than an
 //     `if x != nil`
+//   - exit shapes blockTerminates does not model: goto targets, os.Exit, log.Fatal, an
+//     always-panicking helper. All judged non-terminating, so they fail loud.
 //
 // Not caught, so a bypass survives -- FALSE NEGATIVES, both requiring deliberate effort:
 //   - an identifier proven non-nil by the guard and then REASSIGNED to nil before the
