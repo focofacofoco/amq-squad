@@ -394,6 +394,23 @@ func TestGoalSupervisionManagedTmuxTargetRequiresCanonicalManagedTarget(t *testi
 			}
 		})
 	}
+
+	t.Run("managed projection is an independent restore veto", func(t *testing.T) {
+		input := eligibleGoalSupervisionInput()
+		input.Binding.Pane.Target = "new-window"
+		input.Binding.Pane.Managed = false
+		input.Binding.Runtime.Live = false
+		input.Binding.Runtime.PIDLive = false
+		input.Binding.Runtime.PaneLive = false
+		input.Binding.Runtime.PIDAlive = false
+		input.Binding.Runtime.BinaryMatch = false
+		assessment := assessGoalSupervision(input)
+		if assessment.State != GoalSupervisionLeadDown ||
+			assessment.Actions.Restore.Available {
+			t.Fatalf("unmanaged lead-down restore was not refused: state=%q action=%+v",
+				assessment.State, assessment.Actions.Restore)
+		}
+	})
 }
 
 func TestGoalSupervisionExactPaneIdentityRequiresAllStableIDsAndTitle(t *testing.T) {
@@ -624,6 +641,29 @@ func TestGoalSupervisionLifecycleObservationFailsClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if got := goalSupervisionLifecycleObservation(snapshot, now); got.Known || got.Fresh {
 				t.Fatalf("%s lifecycle = %+v, want unknown", name, got)
+			}
+		})
+	}
+}
+
+func TestGoalSupervisionResumableLifecycleRequiresGoalBlockedPhase(t *testing.T) {
+	eligible := assessGoalSupervision(eligibleGoalSupervisionInput())
+	if !goalSupervisionReasonPassed(eligible.Reasons, "resumable_lifecycle") {
+		t.Fatalf("goal_blocked lifecycle was not resumable: %+v", eligible.Reasons)
+	}
+
+	for _, phase := range []string{"parked_waiting_amq", "goal_terminal", "testing"} {
+		t.Run(phase, func(t *testing.T) {
+			input := eligibleGoalSupervisionInput()
+			// Exercise the assessment boundary directly. The nonterminal
+			// "testing" row distinguishes the goal_blocked whitelist from the
+			// former parked/terminal blacklist.
+			input.Lifecycle = GoalSupervisionLifecycleEvidence{
+				Known: true, Fresh: true, Source: activity.SourceHeartbeat, Phase: phase,
+			}
+			assessment := assessGoalSupervision(input)
+			if goalSupervisionReasonPassed(assessment.Reasons, "resumable_lifecycle") {
+				t.Fatalf("phase %q passed resumable_lifecycle: %+v", phase, assessment.Reasons)
 			}
 		})
 	}
