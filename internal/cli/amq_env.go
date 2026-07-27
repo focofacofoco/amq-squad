@@ -68,12 +68,21 @@ func resolveAMQEnvForTeamLaunchProfile(cwd, profile, session, handle string) (am
 		return amqEnv{}, err
 	}
 	root := squadnamespace.AMQRoot(cwd, team.DefaultProfile, session)
+	// The fallback root is deterministic, but the failed sessionful lookup did
+	// not yield the AMQ version needed by parent-side launch admission. Probe
+	// the exact root without a session selector: `amq env` remains read-only,
+	// while every live launch path can fail closed before creating the root.
+	versionEnv, versionErr := resolveAMQEnvInDir(cwd, root, "", handle)
+	if versionErr != nil {
+		return amqEnv{}, fmt.Errorf("resolve amq version for fresh project root: %w", versionErr)
+	}
 	return amqEnv{
 		Root:        root,
 		BaseRoot:    filepath.Dir(root),
 		SessionName: strings.TrimSpace(session),
 		Me:          strings.TrimSpace(handle),
 		RootSource:  "fresh_project_default",
+		AMQVersion:  versionEnv.AMQVersion,
 	}, nil
 }
 

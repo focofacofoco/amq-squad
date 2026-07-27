@@ -676,7 +676,15 @@ func (r reapResult) any() bool {
 }
 
 func (r reapResult) failed() bool {
-	return r.WakeSignalFailed > 0 || r.WakeRetirement == "amq_exact_refused" || r.WakeRetirement == "amq_exact_lock_remaining"
+	switch r.WakeRetirement {
+	case "amq_exact_refused",
+		"amq_exact_lock_remaining",
+		"amq_owner_recovery_refused",
+		"amq_owner_recovery_lock_remaining":
+		return true
+	default:
+		return r.WakeSignalFailed > 0
+	}
 }
 
 func (r reapResult) summary() string {

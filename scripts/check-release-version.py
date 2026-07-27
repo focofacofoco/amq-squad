@@ -11,8 +11,15 @@ import sys
 
 
 VERSION_RE = re.compile(r"^v?([0-9]+\.[0-9]+\.[0-9]+)$")
+# Keep the opening-block and field shapes aligned with the Go skill
+# frontmatter readers in internal/cli: strict byte-zero fence, LF/CRLF, no
+# BOM or leading whitespace, and no fallback to searching the document body.
+SKILL_FRONTMATTER_BLOCK_RE = re.compile(
+    r"\A---\r?\n(.*?)\r?\n---\r?(?:\n|\Z)",
+    re.DOTALL,
+)
 SKILL_FRONTMATTER_VERSION_RE = re.compile(
-    r'^version:\s*"?([0-9]+\.[0-9]+\.[0-9]+)"?',
+    r'^version:[ \t]*"?([0-9]+\.[0-9]+\.[0-9]+)"?',
     re.MULTILINE,
 )
 AMQ_MIN_VERSION = "0.49.0"
@@ -46,6 +53,16 @@ def normalize_policy_text(value: str) -> str:
     value = re.sub(r"<[^>]+>", "", value)
     value = value.replace("**", "").replace("__", "").replace("`", "")
     return " ".join(value.split())
+
+
+def skill_frontmatter_version(value: str) -> str | None:
+    block = SKILL_FRONTMATTER_BLOCK_RE.match(value)
+    if block is None:
+        return None
+    marker = SKILL_FRONTMATTER_VERSION_RE.search(block.group(1))
+    if marker is None:
+        return None
+    return marker.group(1)
 
 
 def require_release_notes(root: str, tag: str, failures: list[str]) -> None:
@@ -99,12 +116,12 @@ def main() -> int:
         ):
             skill_rel = f"plugins/{mirror}/skills/{skill_id}/SKILL.md"
             skill_body = read(os.path.join(root, skill_rel))
-            marker = SKILL_FRONTMATTER_VERSION_RE.search(skill_body)
-            if not marker:
+            skill_version = skill_frontmatter_version(skill_body)
+            if skill_version is None:
                 failures.append(f"{skill_rel}: missing frontmatter version")
-            elif marker.group(1) != version:
+            elif skill_version != version:
                 failures.append(
-                    f"{skill_rel}: frontmatter version {marker.group(1)!r} "
+                    f"{skill_rel}: frontmatter version {skill_version!r} "
                     f"!= {version!r}"
                 )
 

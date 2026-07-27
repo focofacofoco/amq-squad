@@ -260,6 +260,55 @@ func TestReapOwnerRecoveryRejectsMismatchedOwnerWithoutFallback(t *testing.T) {
 	}
 }
 
+func TestReapCorruptOwnerBoundWakeWithNoPersistedWakePIDStillFails(t *testing.T) {
+	previousRecover := runExactWakeRecoverOwner
+	previousRetire := runExactWakeRetire
+	t.Cleanup(func() {
+		runExactWakeRecoverOwner = previousRecover
+		runExactWakeRetire = previousRetire
+	})
+	agentDir := t.TempDir()
+	root := filepath.Dir(agentDir)
+	if err := os.WriteFile(wakeLockPath(agentDir), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runExactWakeRecoverOwner = func(amqCommandRequest) ([]byte, error) {
+		return []byte(fmt.Sprintf(
+			`{"status":"refused","agent":"qa","root":%q,"reason":"wake lock is corrupt","next_action":"use wake repair"}`,
+			root,
+		)), errors.New("exit status 1")
+	}
+	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
+		t.Fatal("corrupt owner-bound recovery must not fall back to ownerless retire")
+		return nil, nil
+	}
+
+	result := reapStaleArtifacts(
+		agentDir,
+		"qa",
+		root,
+		false,
+		launch.Record{AgentPID: 5151, WakePID: 0, WakeInjectVia: "/usr/bin/tmux"},
+		&recordingTerminator{},
+		downFakeProbe(nil, nil),
+	)
+	if result.WakeSignalFailed != 0 || result.WakeRetirement != "amq_owner_recovery_refused" ||
+		!result.failed() || result.any() || !strings.Contains(result.RetirementDetail, "status refused") {
+		t.Fatalf("pid-zero corrupt owner recovery result=%+v", result)
+	}
+}
+
+func TestReapResultOwnerRecoveryStatusesFailWithoutPID(t *testing.T) {
+	for _, status := range []string{"amq_owner_recovery_refused", "amq_owner_recovery_lock_remaining"} {
+		t.Run(status, func(t *testing.T) {
+			result := reapResult{WakeRetirement: status}
+			if !result.failed() {
+				t.Fatalf("status %q with pid zero must fail", status)
+			}
+		})
+	}
+}
+
 // downFakeProbe implements duplicateLaunchProbe with explicit per-PID liveness and
 // binary-match decisions so tests never shell out to ps or send real signals.
 func downFakeProbe(alive map[int]bool, match map[int]bool) duplicateLaunchProbe {

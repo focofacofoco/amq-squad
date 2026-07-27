@@ -3,8 +3,11 @@
 AMQ 0.49.x is the supported series for amq-squad. The minimum supported release
 is 0.49.0 and compatibility is tested through 0.49.1. Both real-AMQ CI matrices
 run pinned `v0.49.0`, pinned `v0.49.1`, and `latest`; `latest` remains a
-forward-compatibility canary. Older AMQ versions fail both doctor diagnostics
-and launch admission before launch-record or process side effects.
+forward-compatibility canary. Older AMQ versions fail doctor diagnostics and
+the child `agent up` gate before launch-record or process side effects. Parent
+team launch, `resume --exec`, and `up --reset` also validate every selected
+member's resolved AMQ version before creating roots, briefs, watchers, or
+panes, and before deleting an existing session.
 
 Historical capability boundaries remain named in code for archaeology:
 
@@ -90,6 +93,15 @@ retry after transient foreground-process-group handoff, max-hold delivery
 demotes to out-of-band output, quiet detection requires consecutive samples,
 and periodic capability checks report only verified preconditions. None
 requires an amq-squad production version branch.
+
+The `latest` lanes in CI run `30248307062` resolved AMQ `v0.49.2` and passed
+both the queue-compatibility and wake-compatibility suites, including exact
+inject-via retirement and structured owner-bound cleanup. Upstream `v0.49.2`
+changes `coop exec -y` startup reclamation and unverified/live raw-orphan
+handling, not the structured `recover-owner` contract consumed here; the
+`wake_owner_recover_unix.go` blob is identical to `v0.49.1`
+(`fe6444fafa8a4e7ac3bec2962483923a7d7075e0`). This is forward-canary evidence,
+not an expansion of the compatibility-tested-through boundary.
 
 ## Optional Stop-hook hardening
 

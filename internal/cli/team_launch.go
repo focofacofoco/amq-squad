@@ -261,6 +261,11 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 		}
 	}
 	if !opts.DryRun {
+		if err := validateResolvedTeamAMQVersions(t, opts.Profile, workstream, resolveAMQEnvForTeamLaunchProfile); err != nil {
+			return err
+		}
+	}
+	if !opts.DryRun {
 		initialIdentity, err := captureNamespaceEndpointIdentity(squadnamespace.Resolve(cwd, opts.Profile, workstream), "")
 		if err != nil {
 			return err
@@ -290,6 +295,9 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 			if err != nil {
 				return fmt.Errorf("team launch refused under admission: %w", err)
 			}
+		}
+		if err := validateResolvedTeamAMQVersions(currentTeam, opts.Profile, currentWorkstream, resolveAMQEnvForTeamLaunchProfile); err != nil {
+			return err
 		}
 		currentIdentity, err := captureNamespaceEndpointIdentity(squadnamespace.Resolve(cwd, opts.Profile, currentWorkstream), "")
 		if err != nil {
@@ -650,6 +658,28 @@ func buildTeamPreflights(t team.Team, opts teamLaunchOptions) ([]agentLaunchPref
 		})
 	}
 	return out, nil
+}
+
+type teamAMQEnvResolver func(cwd, profile, session, handle string) (amqEnv, error)
+
+// validateResolvedTeamAMQVersions applies the same fail-closed floor as
+// `agent up` to every member that belongs to the selected workstream. Parent
+// launch, resume, and reset paths call it before their first persistent side
+// effect so an incompatible child can never reject only after the parent has
+// changed roots, briefs, watchers, panes, or session state.
+func validateResolvedTeamAMQVersions(t team.Team, profile, workstream string, resolve teamAMQEnvResolver) error {
+	active, _ := filterMembersBySession(t.Members, workstream)
+	for _, m := range orderedTeamMembers(active) {
+		cwd := m.EffectiveCWD(t.Project)
+		env, err := resolve(cwd, profile, workstream, m.Handle)
+		if err != nil {
+			return fmt.Errorf("resolve amq env for %s: %w", m.Handle, err)
+		}
+		if err := validateLaunchAMQVersion(env.AMQVersion); err != nil {
+			return fmt.Errorf("%s: %w", m.Handle, err)
+		}
+	}
+	return nil
 }
 
 func registeredTeamLaunchTerminals() []string {

@@ -263,6 +263,9 @@ Examples:
 	if err != nil {
 		return err
 	}
+	if err := validateResolvedTeamAMQVersions(t, profile, workstream, resolveAMQEnvForTeamLaunchProfile); err != nil {
+		return err
+	}
 	admission, err := acquireNamespaceWriterAdmission(cwd, profile, workstream)
 	if err != nil {
 		return err
@@ -294,6 +297,9 @@ Examples:
 		return err
 	}
 	resolvedContext, profile, t, workstream = currentContext, currentContext.Profile, currentTeam, currentWorkstream
+	if err := validateResolvedTeamAMQVersions(t, profile, workstream, resolveAMQEnvForTeamLaunchProfile); err != nil {
+		return err
+	}
 	if err := ensureNoNamespaceConflict("up", cwd, profile, workstream, flagWasSet(fs, "profile")); err != nil {
 		return err
 	}
