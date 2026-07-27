@@ -70,6 +70,11 @@ type teamLaunchOptions struct {
 	PreparedRunGuard      func(stage, role string) error
 	StagedClaim           string
 	PreserveLauncherFocus bool
+	// ResolvedAMQPreflights is a complete, floor-validated snapshot prepared
+	// by a parent command while it still owns the namespace admission and
+	// before any destructive reset. A non-nil slice prevents executeTeamLaunch
+	// from re-resolving AMQ after that parent's mutation boundary.
+	ResolvedAMQPreflights []agentLaunchPreflight
 }
 
 type teamLaunchResult struct {
@@ -116,6 +121,11 @@ type preparedTeamLaunchResultBackend interface {
 // should live in its own team_launch_<name>.go file and call
 // registerTeamLaunchBackend from init.
 var teamLaunchBackends = map[string]teamLaunchBackend{}
+
+// resolveTeamLaunchAMQEnv is the single injectable resolution seam for parent
+// team launch/reset paths. Every production call validates the returned AMQ
+// version before any persistent mutation or dry-run preview.
+var resolveTeamLaunchAMQEnv = resolveAMQEnvForTeamLaunchProfile
 
 func registerTeamLaunchBackend(backend teamLaunchBackend) {
 	name := backend.Name()
@@ -260,8 +270,8 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 			return nil
 		}
 	}
-	if !opts.DryRun {
-		if err := validateResolvedTeamAMQVersions(t, opts.Profile, workstream, resolveAMQEnvForTeamLaunchProfile); err != nil {
+	if !opts.DryRun && opts.ResolvedAMQPreflights == nil {
+		if err := validateResolvedTeamAMQVersions(t, opts.Profile, workstream, resolveTeamLaunchAMQEnv); err != nil {
 			return err
 		}
 	}
@@ -296,8 +306,10 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 				return fmt.Errorf("team launch refused under admission: %w", err)
 			}
 		}
-		if err := validateResolvedTeamAMQVersions(currentTeam, opts.Profile, currentWorkstream, resolveAMQEnvForTeamLaunchProfile); err != nil {
-			return err
+		if opts.ResolvedAMQPreflights == nil {
+			if err := validateResolvedTeamAMQVersions(currentTeam, opts.Profile, currentWorkstream, resolveTeamLaunchAMQEnv); err != nil {
+				return err
+			}
 		}
 		currentIdentity, err := captureNamespaceEndpointIdentity(squadnamespace.Resolve(cwd, opts.Profile, currentWorkstream), "")
 		if err != nil {
@@ -347,6 +359,20 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 		memberRoles[strings.ToLower(m.Role)] = true
 	}
 	if err := validateModelOverrideKeys(opts.ModelOverrides, memberRoles); err != nil {
+		return err
+	}
+
+	// Resolve and floor-validate the complete active roster before the
+	// external-lead path can stamp a pane or write launch.json. Filtering the
+	// lead happens only after this read-only snapshot exists; the filtered
+	// preflight list is then reused without another AMQ resolution.
+	preflights := append([]agentLaunchPreflight(nil), opts.ResolvedAMQPreflights...)
+	if opts.ResolvedAMQPreflights == nil {
+		preflights, err = buildTeamPreflights(t, opts)
+		if err != nil {
+			return err
+		}
+	} else if err := validateResolvedTeamPreflights(t, opts.Workstream, preflights); err != nil {
 		return err
 	}
 	externalLeadFiltered := false
@@ -408,15 +434,13 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 
 	// Preflight the whole roster before any tmux command (or dry-run output)
 	// so a partially-launched team never appears.
-	preflights, err := buildTeamPreflights(t, opts)
-	if err != nil {
-		return err
-	}
+	preflights = filterResolvedTeamPreflights(preflights, t.Members)
 	if err := preflightTeam(preflights, defaultDuplicateLaunchProbe); err != nil {
 		return err
 	}
 
 	if opts.DryRun {
+		renderTeamAMQFloorViolations(os.Stdout, teamAMQFloorViolationsForPreflights(preflights))
 		return backend.DryRun(t, opts)
 	}
 	// Validate every configured custom launcher up front so a missing or
@@ -636,9 +660,16 @@ func buildTeamPreflights(t team.Team, opts teamLaunchOptions) ([]agentLaunchPref
 	out := make([]agentLaunchPreflight, 0, len(members))
 	for _, m := range members {
 		cwd := m.EffectiveCWD(t.Project)
-		env, err := resolveAMQEnvForTeamLaunchProfile(cwd, opts.Profile, opts.Workstream, m.Handle)
+		env, err := resolveTeamLaunchAMQEnv(cwd, opts.Profile, opts.Workstream, m.Handle)
 		if err != nil {
 			return nil, fmt.Errorf("resolve amq env for %s: %w", m.Handle, err)
+		}
+		floorViolation := ""
+		if err := validateLaunchAMQVersion(env.AMQVersion); err != nil {
+			if !opts.DryRun {
+				return nil, fmt.Errorf("%s: %w", m.Handle, err)
+			}
+			floorViolation = err.Error()
 		}
 		root := absoluteAMQRoot(cwd, env.Root)
 		handle := m.Handle
@@ -647,17 +678,62 @@ func buildTeamPreflights(t team.Team, opts teamLaunchOptions) ([]agentLaunchPref
 		}
 		agentDir := filepath.Join(root, "agents", handle)
 		out = append(out, agentLaunchPreflight{
-			AgentDir:   agentDir,
-			Handle:     handle,
-			Workstream: env.SessionName,
-			Root:       root,
-			BaseRoot:   absoluteAMQRoot(cwd, env.BaseRoot),
-			Binary:     m.Binary,
-			Force:      opts.ForceDuplicate,
-			DryRun:     opts.DryRun,
+			Role:              m.Role,
+			CWD:               cwd,
+			AgentDir:          agentDir,
+			Handle:            handle,
+			Workstream:        env.SessionName,
+			Root:              root,
+			BaseRoot:          absoluteAMQRoot(cwd, env.BaseRoot),
+			Binary:            m.Binary,
+			AMQVersion:        env.AMQVersion,
+			AMQFloorViolation: floorViolation,
+			Force:             opts.ForceDuplicate,
+			DryRun:            opts.DryRun,
 		})
 	}
 	return out, nil
+}
+
+func validateResolvedTeamPreflights(t team.Team, workstream string, preflights []agentLaunchPreflight) error {
+	active, _ := filterMembersBySession(t.Members, workstream)
+	expected := orderedTeamMembers(active)
+	if len(preflights) != len(expected) {
+		return fmt.Errorf("team launch refused: pinned AMQ preflight roster changed")
+	}
+	byRole := make(map[string]agentLaunchPreflight, len(preflights))
+	for _, preflight := range preflights {
+		role := strings.TrimSpace(preflight.Role)
+		if role == "" || strings.TrimSpace(preflight.CWD) == "" || strings.TrimSpace(preflight.Root) == "" {
+			return fmt.Errorf("team launch refused: pinned AMQ preflight is incomplete")
+		}
+		if _, exists := byRole[role]; exists {
+			return fmt.Errorf("team launch refused: duplicate pinned AMQ preflight role %q", role)
+		}
+		byRole[role] = preflight
+	}
+	for _, member := range expected {
+		preflight, ok := byRole[strings.TrimSpace(member.Role)]
+		if !ok || !sameResolvedDir(preflight.CWD, member.EffectiveCWD(t.Project)) ||
+			preflight.Workstream != workstream || strings.TrimSpace(preflight.Binary) != strings.TrimSpace(member.Binary) {
+			return fmt.Errorf("team launch refused: pinned AMQ preflight no longer matches role %q", member.Role)
+		}
+	}
+	return nil
+}
+
+func filterResolvedTeamPreflights(preflights []agentLaunchPreflight, members []team.Member) []agentLaunchPreflight {
+	active := make(map[string]bool, len(members))
+	for _, member := range members {
+		active[strings.TrimSpace(member.Role)] = true
+	}
+	out := make([]agentLaunchPreflight, 0, len(members))
+	for _, preflight := range preflights {
+		if active[strings.TrimSpace(preflight.Role)] {
+			out = append(out, preflight)
+		}
+	}
+	return out
 }
 
 type teamAMQEnvResolver func(cwd, profile, session, handle string) (amqEnv, error)
@@ -741,12 +817,18 @@ func maybeFilterCurrentExternalLead(t team.Team, workstream, profile, trustMode 
 	}
 	cwd := lead.EffectiveCWD(t.Project)
 	handle := memberHandle(lead)
-	env, err := resolveAMQEnvForTeamLaunchProfile(cwd, profile, workstream, handle)
+	env, err := resolveTeamLaunchAMQEnv(cwd, profile, workstream, handle)
 	if err != nil {
 		if !write {
 			return t, false, nil
 		}
 		return t, false, fmt.Errorf("resolve amq env for external lead %s: %w", handle, err)
+	}
+	if err := validateLaunchAMQVersion(env.AMQVersion); err != nil {
+		if !write {
+			return t, false, nil
+		}
+		return t, false, fmt.Errorf("%s: %w", handle, err)
 	}
 	if env.Me != "" {
 		handle = env.Me
