@@ -574,7 +574,7 @@ func TestGlobalBranchRunsThroughBothRealAdaptersToIdenticalReview(t *testing.T) 
 		{Type: tea.KeyDown},
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyEnter}, {Type: tea.KeyEnter}, {Type: tea.KeyEnter}, {Type: tea.KeyEnter},
-		{Type: tea.KeyEnter}, {Type: tea.KeyEnter}, {Type: tea.KeyEnter},
+		{Type: tea.KeyEnter}, {Type: tea.KeyEnter}, {Type: tea.KeyEnter}, {Type: tea.KeyEnter},
 	} {
 		program.Send(key)
 	}
@@ -589,7 +589,7 @@ func TestGlobalBranchRunsThroughBothRealAdaptersToIdenticalReview(t *testing.T) 
 	bubble := BubbleResult{Spec: bubbleModel.spec, Cancelled: bubbleModel.cancelled}
 
 	var numberedOut bytes.Buffer
-	numbered, err := RunNumbered(strings.NewReader("2\n\n\n\n\n\n\n"), &numberedOut, NumberedOptions{Defaults: defaults})
+	numbered, err := RunNumbered(strings.NewReader("2\n\n\n\n\n\n\n\n"), &numberedOut, NumberedOptions{Defaults: defaults})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestGlobalCatalogChoicesMatchAcrossAdapters(t *testing.T) {
 	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // review
 
 	var numberedOut bytes.Buffer
-	numbered, err := RunNumbered(strings.NewReader("2\n\n\n6\n7\n\n\n"), &numberedOut, NumberedOptions{Defaults: defaults, LoadCatalog: load})
+	numbered, err := RunNumbered(strings.NewReader("2\n\n\n6\n7\n\n\n\n"), &numberedOut, NumberedOptions{Defaults: defaults, LoadCatalog: load})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,6 +823,7 @@ func TestGlobalCustomEffortIsPreservedAndWarnedInBothReviews(t *testing.T) {
 		{Type: tea.KeyEnter}, // automatic model
 		{Type: tea.KeyEnter}, // custom effort row
 		{Type: tea.KeyEnter}, // exact custom effort text
+		{Type: tea.KeyEnter}, // trust and sandbox posture
 		{Type: tea.KeyEnter}, // native args
 		{Type: tea.KeyEnter}, // window
 	} {
@@ -836,7 +837,7 @@ func TestGlobalCustomEffortIsPreservedAndWarnedInBothReviews(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	numbered, err := RunNumbered(strings.NewReader("2\n\n\n\n\n\n\n\n"), &out, NumberedOptions{Defaults: defaults})
+	numbered, err := RunNumbered(strings.NewReader("2\n\n\n\n\n\n\n\n\n"), &out, NumberedOptions{Defaults: defaults})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,6 +22,7 @@ const (
 	stageGlobalModelCustom
 	stageGlobalEffort
 	stageGlobalEffortCustom
+	stageGlobalPosture
 	stageGlobalNativeArgs
 	stageGlobalWindow
 	stageProfile
@@ -339,6 +340,8 @@ func (m BubbleModel) title() string {
 		return "Effort for the global orchestrator"
 	case stageGlobalEffortCustom:
 		return "Custom effort for the global orchestrator"
+	case stageGlobalPosture:
+		return "Trust and sandbox posture"
 	case stageGlobalNativeArgs:
 		return "Extra native arguments"
 	case stageGlobalWindow:
@@ -451,8 +454,10 @@ func (m BubbleModel) note() string {
 		return "Unknown tiers are passed through exactly and may still be rejected by the underlying binary."
 	case stageGlobalNativeArgs:
 		return "These arguments pass to the selected agent; effort is controlled separately."
+	case stageGlobalPosture:
+		return "A global orchestrator drives tmux. Under a restricted sandbox that control is denied at the socket, so the agent launches and then cannot spawn or focus panes. Choose the posture deliberately here instead of hand-typing sandbox flags into native args."
 	case stageGlobalWindow:
-		return "This names the tmux window used by the global orchestrator."
+		return "This names the tmux window used by the global orchestrator. Avoid naming it after the enclosing tmux session: the status bar then renders it as `x:x`, which reads as a duplicate rather than a window name."
 	case stageProfile:
 		return "An existing profile keeps its roster, lead, and operator contract. A new profile lets you choose them."
 	case stageExistingSession:
@@ -587,8 +592,10 @@ func (m BubbleModel) summary() string {
 			"Effort    " + defaultString(m.spec.GlobalEffort, "automatic"),
 		}
 		if strings.EqualFold(m.spec.GlobalAgent, "codex") {
+			parts = append(parts, "Posture   "+globalPostureReviewLine(m.spec.GlobalAgent, m.spec.GlobalPosture))
 			parts = append(parts, "Native    "+displayValue(m.spec.GlobalCodexArgs))
 		} else {
+			parts = append(parts, "Posture   "+globalPostureReviewLine(m.spec.GlobalAgent, m.spec.GlobalPosture))
 			parts = append(parts, "Native    "+displayValue(m.spec.GlobalClaudeArgs))
 		}
 		parts = append(parts,
@@ -770,6 +777,13 @@ func (m BubbleModel) choices() []choice {
 		return modelChoicesCatalog(m.spec.GlobalAgent, m.ctx.Catalog)
 	case stageGlobalEffort:
 		return effortChoicesCatalog(m.spec.GlobalAgent, m.ctx.Catalog)
+	case stageGlobalPosture:
+		postures := GlobalPostureChoices(m.spec.GlobalAgent)
+		out := make([]choice, 0, len(postures))
+		for _, posture := range postures {
+			out = append(out, choice{value: posture.Value, label: posture.Label + " · " + posture.Consequence})
+		}
+		return out
 	case stageProfile:
 		choices := make([]choice, 0, len(m.ctx.Profiles)+1)
 		for _, profile := range m.ctx.Profiles {
@@ -1035,7 +1049,7 @@ func (m BubbleModel) commitText() (tea.Model, tea.Cmd) {
 		m.transition(stageGlobalEffort)
 	case stageGlobalEffortCustom:
 		m.spec.GlobalEffort = strings.TrimSpace(value)
-		m.transition(stageGlobalNativeArgs)
+		m.transition(stageGlobalPosture)
 	case stageGlobalNativeArgs:
 		if strings.EqualFold(m.spec.GlobalAgent, "codex") {
 			m.spec.GlobalCodexArgs = value
@@ -1250,11 +1264,14 @@ func (m BubbleModel) commitChoice() (tea.Model, tea.Cmd) {
 			m.transition(stageGlobalEffortCustom)
 		case effortAutomatic:
 			m.spec.GlobalEffort = ""
-			m.transition(stageGlobalNativeArgs)
+			m.transition(stageGlobalPosture)
 		default:
 			m.spec.GlobalEffort = selected
-			m.transition(stageGlobalNativeArgs)
+			m.transition(stageGlobalPosture)
 		}
+	case stageGlobalPosture:
+		m.spec.GlobalPosture = selected
+		m.transition(stageGlobalNativeArgs)
 	case stageProfile:
 		if selected == "__create__" {
 			if strings.TrimSpace(m.spec.Profile) != "" && findProfile(m.ctx.Profiles, m.spec.Profile) < 0 {
@@ -1641,7 +1658,7 @@ func (m BubbleModel) phaseIndex() int {
 			return 0
 		case stageGlobalAgent, stageGlobalModel, stageGlobalModelCustom:
 			return 1
-		case stageGlobalEffort, stageGlobalEffortCustom, stageGlobalNativeArgs, stageGlobalWindow:
+		case stageGlobalEffort, stageGlobalEffortCustom, stageGlobalPosture, stageGlobalNativeArgs, stageGlobalWindow:
 			return 2
 		default:
 			return 3
@@ -1671,6 +1688,27 @@ func (m BubbleModel) phaseLabels() []string {
 		return []string{"Scope", "Agent", "Run controls", "Review"}
 	}
 	return []string{"Scope", "Profile & run", "Team", "Run controls", "Brief", "Review"}
+}
+
+// globalPostureReviewLine states the posture AND its tmux consequence, because the
+// consequence is what the operator is actually approving at the review screen.
+func globalPostureReviewLine(agent, posture string) string {
+	for _, c := range GlobalPostureChoices(agent) {
+		if strings.EqualFold(c.Value, posture) {
+			if c.DrivesTmux {
+				return c.Label + " · can drive tmux"
+			}
+			return c.Label + " · CANNOT drive tmux: " + c.Consequence
+		}
+	}
+	if strings.TrimSpace(posture) == "" {
+		return displayValue(posture)
+	}
+	// Non-breaking but NOT invisible. An unrecognised stored posture applies no sandbox
+	// flags, which for codex means default sandboxing and therefore no tmux control --
+	// the #455 item-2 failure recreated through the back door, and harder to suspect
+	// because the operator DID use the posture step. Say so at the gate.
+	return "unknown posture " + strings.TrimSpace(posture) + " (no sandbox flags applied)"
 }
 
 func operatorContractSummary(mode string) string {
