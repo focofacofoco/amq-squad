@@ -153,10 +153,28 @@ Announce the EXACT command on your lead thread before running it.
 Before starting any test run, check you do not already have one in flight; a leftover from
 a backgrounded chain is invisible unless you look.
 
+Send the identical command text to every slot participant, not only the lead. An
+announcement one agent can verify and another cannot is not vetoable.
+
+Slot acquire and slot release go to both the lead thread and every peer thread, every
+time. Do not rely on the lead to relay a handshake; the peer is the collision
+counterparty.
+
 The announcement is the load-bearing part, not a formality. It converts "this is
 probably safe" from a private judgement into a public claim another agent can veto
 before it costs anyone a contended failure. If you are not willing to write the command
 down, that is the signal it belongs in Tier 1.
+
+A Tier 2 run that starts inside an active Tier 1 window must be announced to the Tier 1
+holder before it starts. A burst of related runs is announced as a burst, with an estimated
+count and duration, for example "running about five wizard-package cycles over the next
+three minutes for a removal proof". One announcement per logical proof is enough; zero
+announcements for four of five runs is not.
+
+Tier 2 protects CORRECTNESS independence. It never established TIMING independence: Tier 2
+runs share CPU, disk, and the Go build cache, and a deadline-sensitive test is exactly what
+loses a race under load. Inside a Tier 1 window the holder gets to know what shares their
+machine.
 
 Choosing the tier is the runner's judgement and the runner's responsibility. When
 unsure, Tier 1. The cost of over-serializing a cheap test is seconds; the cost of
