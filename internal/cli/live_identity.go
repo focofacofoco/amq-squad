@@ -130,11 +130,18 @@ func verifyRuntimeActionWithRecord(action, project, profile, session, handle str
 		return liveidentity.Result{}, false, nil
 	}
 	if strings.TrimSpace(rec.PreparedRunGeneration) == "" || strings.TrimSpace(rec.PreparedRunDigest) == "" || strings.TrimSpace(rec.PreparedRunLaunchAttempt) == "" {
-		result, baseErr := failedLiveIdentityResult(fmt.Errorf("prepared identity tuple is incomplete"))
-		return result, true, fmt.Errorf("%s refused: verified live identity mismatch: %w", action, baseErr)
+		result, baseErr := failedLiveIdentityResult(fmt.Errorf("%w: prepared identity tuple is incomplete", errIncompleteLaunchRecord))
+		return result, true, fmt.Errorf("%s refused: launch identity could not be verified: %w", action, baseErr)
 	}
 	result, err := resolveRuntimeLiveIdentityNow(liveIdentityScope{Project: project, Profile: profile, Session: session, Handle: handle})
 	if err != nil {
+		// An INCOMPLETE record is not a mismatch. Routing it through the mismatch wrapper
+		// rendered "refused: verified live identity mismatch: ...INCOMPLETE, not
+		// mismatched", contradicting itself in the operator-visible string and destroying
+		// the cannot-verify vs verifiably-wrong distinction #571 depends on.
+		if errors.Is(err, errIncompleteLaunchRecord) {
+			return result, true, fmt.Errorf("%s refused: launch identity could not be verified: %w", action, err)
+		}
 		return result, true, fmt.Errorf("%s refused: verified live identity mismatch: %w", action, err)
 	}
 	if result.Verified == nil {
@@ -331,10 +338,16 @@ func resolvePreparedLiveActor(scope liveIdentityScope, managed managedLiveLaunch
 // re-launch or repair, not investigating a conflict that does not exist.
 //
 // Shared by both refusal sites so the wording cannot drift between them.
+// errIncompleteLaunchRecord marks the cannot-verify class so callers can route it away from
+// the mismatch wrapper. #575 review: wrapping it as a mismatch produced
+// "...mismatch: ...INCOMPLETE, not mismatched" at the surface the operator reads, which
+// defeated the classification at exactly the place it matters.
+var errIncompleteLaunchRecord = errors.New("incomplete launch record")
+
 func incompleteLaunchRecordError() error {
-	return fmt.Errorf("launch record is INCOMPLETE, not mismatched: it carries no exact launch id, " +
-		"so live identity cannot be verified either way. The launch did not stamp its identity; " +
-		"re-launch the member, or repair the record. This is not an identity conflict")
+	return fmt.Errorf("%w: it carries no exact launch id, "+
+		"so live identity cannot be verified either way. The launch did not stamp its identity; "+
+		"re-launch the member, or repair the record. This is not an identity conflict", errIncompleteLaunchRecord)
 }
 
 func observeManagedLiveActor(scope liveIdentityScope, managed managedLiveLaunch, probe duplicateLaunchProbe, childrenIndex func() (func(int) []int, error)) (observedLiveActor, error) {
@@ -359,7 +372,7 @@ func observeManagedLiveActor(scope liveIdentityScope, managed managedLiveLaunch,
 	switch terminal.Backend {
 	case "tmux":
 		if rec.Tmux == nil || strings.TrimSpace(rec.Tmux.PaneID) == "" {
-			return observedLiveActor{}, fmt.Errorf("managed launch record has no exact tmux pane")
+			return observedLiveActor{}, fmt.Errorf("%w: managed launch record has no exact tmux pane", errIncompleteLaunchRecord)
 		}
 		pane, ok := statusPaneInspector(rec.Tmux.PaneID)
 		if !ok || !sameResolvedDir(pane.CWD, rec.CWD) || paneTitledForDifferentAgent(pane.Title, scope.Session, rec.Role) {
@@ -401,7 +414,7 @@ func observeManagedLiveActor(scope liveIdentityScope, managed managedLiveLaunch,
 
 func verifyAgentPaneLineage(panePID, agentPID int, childrenIndex func() (func(int) []int, error)) error {
 	if panePID <= 0 || agentPID <= 0 || childrenIndex == nil {
-		return fmt.Errorf("pane/agent process lineage is incomplete")
+		return fmt.Errorf("%w: pane/agent process lineage is incomplete", errIncompleteLaunchRecord)
 	}
 	children, err := childrenIndex()
 	if err != nil || children == nil {
@@ -526,7 +539,7 @@ func liveIdentityTerminal(rec launch.Record) liveidentity.Terminal {
 func validateLiveIdentityTerminalProjection(rec launch.Record) error {
 	terminal := rec.Terminal
 	if terminal == nil {
-		return fmt.Errorf("managed launch record has no exact terminal identity")
+		return fmt.Errorf("%w: managed launch record has no exact terminal identity", errIncompleteLaunchRecord)
 	}
 	switch strings.TrimSpace(terminal.Backend) {
 	case "tmux":
