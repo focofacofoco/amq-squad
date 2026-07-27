@@ -617,7 +617,7 @@ convention as a generated line in their `## Orchestration` norm.
 ### Recover
 
 ```sh
-amq-squad resume --session issue-96      # re-orient a stalled/stopped session
+amq-squad resume --session issue-96      # PLAN ONLY; add --exec to reopen panes
 amq-squad agent resume fullstack         # revive one child from its saved record
 ```
 

@@ -92,13 +92,23 @@ ever sees it — a body with backticks arrives mangled or empty.
 ## Session lifecycle
 
 ```sh
-amq-squad console --session S        # attach to the squad's window
-amq-squad stop --session S           # stop agents, keep the session
-amq-squad resume --session S         # bring a stopped session back
-amq-squad archive --session S        # retire a finished session
-amq-squad rm --session S             # remove it
-amq-squad fork --session S           # branch a new session from this one
+amq-squad console --session S                 # Mission Control TUI, filtered to S
+amq-squad stop --role R --session S           # or --all; a selector is REQUIRED
+amq-squad resume --session S                  # PLAN ONLY: prints the action table
+amq-squad resume --session S --exec           # actually reopens the panes
+amq-squad archive --session S                 # retire a finished session
+amq-squad rm --session S                      # remove it
+amq-squad fork --from SOURCE --as TARGET      # no --session flag on this one
 ```
+
+Three of those have surprising defaults, verified by running them:
+
+| command | the surprise |
+|---|---|
+| `stop` | exactly one selector is MANDATORY, `--role R` or `--all`. `stop --session S` alone stops nothing and exits on a usage error |
+| `resume` | plan-only by default. It prints a per-member action table and copy-pasteable commands; without `--exec` nothing reopens |
+| `console` | a full-screen read-only Mission Control TUI rendered to `/dev/tty`, NOT an attach to the squad's pane. Use `--once` for a single non-interactive snapshot |
+| `fork` | takes `--from SOURCE --as TARGET` and has no `--session` flag at all |
 
 `up` refuses an existing session by design: it is NEW work. Use `resume` to continue
 one, or `up --reset` to deliberately start over. That refusal exists because silently
