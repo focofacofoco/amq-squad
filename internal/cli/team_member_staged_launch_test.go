@@ -115,6 +115,10 @@ func TestPreparedStagedParentTransactionHundredIterationITerm2ControlModeHarness
 				case len(args) > 0 && args[0] == "display-message" && strings.Contains(call, "#{window_id}"):
 					return currentWindow + "\n", nil
 				default:
+					if strings.Contains(call, "#{pane_pid}") {
+						// #571: launcher verifies the pane ROOT pid after delivery.
+						return "4242\n", nil
+					}
 					return "", fmt.Errorf("unexpected tmux output command: %s", call)
 				}
 			}
@@ -132,7 +136,9 @@ func TestPreparedStagedParentTransactionHundredIterationITerm2ControlModeHarness
 					delete(livePanes, target)
 					delete(createdOwned, target)
 				}
-				if len(args) > 0 && args[0] == "send-keys" && containsString(args, "C-m") {
+				// #571: agent command delivery is respawn-pane now; send-keys into %1 is
+				// still the harness typing a continuation line, which is unrelated.
+				if len(args) > 0 && (args[0] == "respawn-pane" || (args[0] == "send-keys" && containsString(args, "C-m"))) {
 					target := ""
 					for i := range args {
 						if args[i] == "-t" && i+1 < len(args) {
@@ -376,13 +382,18 @@ func TestPreparedStagedLaunchConcurrentAttemptsForSameClaimYieldExactlyOneWinner
 		case len(args) > 0 && args[0] == "display-message" && strings.Contains(call, "#{window_id}"):
 			return currentWindow + "\n", nil
 		default:
+			if strings.Contains(call, "#{pane_pid}") {
+				// #571: launcher verifies the pane ROOT pid after delivery.
+				return "4242\n", nil
+			}
 			return "", fmt.Errorf("unexpected tmux output command: %s", call)
 		}
 	}
 	tmuxRunCommand = func(name string, args ...string) error {
 		mu.Lock()
 		defer mu.Unlock()
-		if len(args) > 0 && args[0] == "send-keys" && containsString(args, "C-m") {
+		// #571: delivery verb changed to respawn-pane.
+		if len(args) > 0 && (args[0] == "respawn-pane" || (args[0] == "send-keys" && containsString(args, "C-m"))) {
 			target := ""
 			for i := range args {
 				if args[i] == "-t" && i+1 < len(args) {

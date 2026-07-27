@@ -66,6 +66,9 @@ func (f *fakeTmuxLaunch) install(t *testing.T) {
 			id := fmt.Sprintf("%%%d", 100+f.nextID)
 			f.created = append(f.created, id)
 			return id + "\n", nil
+		case strings.Contains(call, "#{pane_pid}"):
+			// #571: the launcher now reads the pane ROOT pid to verify the agent started.
+			return "4242\n", nil
 		case strings.Contains(call, "#{session_name}:#{window_index}"):
 			return "harness:0\n", nil
 		case strings.Contains(call, "#{session_name}"):
@@ -80,7 +83,10 @@ func (f *fakeTmuxLaunch) install(t *testing.T) {
 		switch args[0] {
 		case "kill-pane", "kill-window":
 			f.killed = append(f.killed, args[len(args)-1])
-		case "send-keys":
+		case "respawn-pane":
+			// #571: delivery is respawn-pane now, not send-keys, because typing into a
+			// pane loses anything over MAX_CANON. Counting the old verb would have made
+			// this assertion vacuous rather than failing.
 			f.dispatch++
 		}
 		return nil

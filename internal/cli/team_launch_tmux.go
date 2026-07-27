@@ -225,7 +225,7 @@ func tmuxDryRunLines(plan tmuxLaunchPlan) []string {
 		lines = append(lines, tmuxSelectLayoutDryRunLine(windowTarget, plan.Layout))
 	}
 	for i, pane := range plan.Panes {
-		lines = append(lines, tmuxSendKeysDryRunLine(targets[i], pane.Command))
+		lines = append(lines, tmuxPaneCommandDryRunLine(targets[i], pane.Command))
 		if i < len(plan.Panes)-1 && plan.StartDelay > 0 {
 			lines = append(lines, sleepDryRunLine(plan.StartDelay))
 		}
@@ -263,7 +263,7 @@ func tmuxWindowsDryRunLines(plan tmuxLaunchPlan) []string {
 		)
 	}
 	for i, pane := range plan.Panes {
-		lines = append(lines, tmuxSendKeysDryRunLine(targets[i], pane.Command))
+		lines = append(lines, tmuxPaneCommandDryRunLine(targets[i], pane.Command))
 		if i < len(plan.Panes)-1 && plan.StartDelay > 0 {
 			lines = append(lines, sleepDryRunLine(plan.StartDelay))
 		}
@@ -335,8 +335,44 @@ func defaultStampCapturedLaunchPane(paneID, workstream, role string) error {
 	return tmuxRunCommand("tmux", "select-pane", "-t", paneID, "-T", paneTitleToken(workstream, role))
 }
 
-func tmuxSendKeysDryRunLine(target, command string) string {
-	return "tmux send-keys -t " + shellTarget(target) + " " + shellQuote(command) + " C-m"
+func tmuxPaneCommandDryRunLine(target, command string) string {
+	return "tmux respawn-pane -k -t " + shellTarget(target) + " " + shellQuote(command)
+}
+
+// deliverPaneCommand replaces the pane's process with the agent command instead of TYPING
+// the command into the pane.
+//
+// #571: send-keys delivers through the pane's tty input, which on macOS/BSD drops any line
+// over MAX_CANON (1024 bytes). Long worker commands were silently lost and send-keys still
+// returned exit 0, so a partial launch counted as success. load-buffer + paste-buffer shares
+// that path and dies at the same boundary; only making the command the pane ROOT PROCESS
+// avoids the tty entirely, measured working at 1024, 4000 and 16000 bytes.
+//
+// respawn-pane is used rather than creating panes with the command so the existing two-phase
+// shape survives: every pane is created and titled first, the command barrier runs, and only
+// then is any command committed.
+//
+// It also STRENGTHENS verification. The pane's root process is now the agent itself, so
+// #{pane_pid} is a launcher-observable agent PID at launch time. Previously the launcher had
+// no PID at all until the agent self-registered (launch.go records os.Getpid()), so a
+// commanded pane could only be assumed live.
+func deliverPaneCommand(target, command string) error {
+	return tmuxRunCommand("tmux", "respawn-pane", "-k", "-t", target, command)
+}
+
+// verifyPaneProcessLaunched reads the pane root PID after delivery and reports it. An empty
+// or zero PID means the pane has no process: the command did not start, and the caller must
+// NOT count the worker as launched.
+func verifyPaneProcessLaunched(target string) (string, error) {
+	out, err := tmuxOutputCommand("tmux", "display-message", "-p", "-t", target, "#{pane_pid}")
+	if err != nil {
+		return "", fmt.Errorf("read pane process id for %s: %w", target, err)
+	}
+	pid := strings.TrimSpace(out)
+	if pid == "" || pid == "0" {
+		return "", fmt.Errorf("pane %s has no running process after command delivery: the command did not start", target)
+	}
+	return pid, nil
 }
 
 func runTmuxLaunchPlan(plan tmuxLaunchPlan) error {
@@ -483,8 +519,11 @@ func runTmuxLaunchPlanInternal(plan tmuxLaunchPlan, collectResult bool) (teamLau
 		}
 	}
 	for i, pane := range plan.Panes {
-		if err := tmuxRunCommand("tmux", "send-keys", "-t", targets[i], withTmuxTargetEnv(plan.Target, pane.Command), "C-m"); err != nil {
-			return failCreated(err)
+		if err := deliverPaneCommand(targets[i], withTmuxTargetEnv(plan.Target, pane.Command)); err != nil {
+			return failCreated(fmt.Errorf("deliver command for %s: %w", pane.Role, err))
+		}
+		if _, err := verifyPaneProcessLaunched(targets[i]); err != nil {
+			return failCreated(fmt.Errorf("worker %s not launched: %w", pane.Role, err))
 		}
 		if err := guardTmuxPreparedRun(plan, "command dispatch postcondition", pane.Role); err != nil {
 			return failCreated(err)
@@ -609,8 +648,11 @@ func runTmuxWindowsPlanInternal(plan tmuxLaunchPlan, collectResult bool) (teamLa
 		}
 	}
 	for i, pane := range plan.Panes {
-		if err := tmuxRunCommand("tmux", "send-keys", "-t", targets[i], withTmuxTargetEnv("new-window", pane.Command), "C-m"); err != nil {
-			return failCreated(err)
+		if err := deliverPaneCommand(targets[i], withTmuxTargetEnv("new-window", pane.Command)); err != nil {
+			return failCreated(fmt.Errorf("deliver command for %s: %w", pane.Role, err))
+		}
+		if _, err := verifyPaneProcessLaunched(targets[i]); err != nil {
+			return failCreated(fmt.Errorf("worker %s not launched: %w", pane.Role, err))
 		}
 		if err := guardTmuxPreparedRun(plan, "command dispatch postcondition", pane.Role); err != nil {
 			return failCreated(err)

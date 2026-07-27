@@ -236,6 +236,9 @@ func TestRunTmuxWindowsPlanResultFailureSendsNoAgentCommands(t *testing.T) {
 	tmuxOutputCommand = func(name string, args ...string) (string, error) {
 		call := strings.Join(args, " ")
 		switch {
+		case strings.Contains(call, "#{pane_pid}"):
+			// #571: the launcher now reads the pane ROOT pid to verify the agent started.
+			return "4242\n", nil
 		case strings.Contains(call, "#{session_name}"):
 			return "operator-session\n", nil
 		case len(args) > 0 && args[0] == "new-window":

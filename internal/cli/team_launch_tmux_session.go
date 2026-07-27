@@ -141,7 +141,7 @@ func tmuxSessionDryRunLines(plan tmuxSessionLaunchPlan) []string {
 // "<session>:<role>" tmux target (the window-per-agent equivalent of the
 // pane-id targeting the default backend uses) and types the agent command.
 func tmuxSessionSendKeysDryRunLine(workstream, role, command string) string {
-	return tmuxSendKeysDryRunLine(workstream+":"+role, command)
+	return tmuxPaneCommandDryRunLine(workstream+":"+role, command)
 }
 
 func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
@@ -156,7 +156,7 @@ func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 		// contract is one named, attached iTerm2 window per agent (tmuxSessionResumeArgv
 		// attaches the session for focus), so status maps it to adoption_mode=managed_window
 		// (operator-visible), NOT a detached session. Do not remap to managed_session.
-		if err := runCommand("tmux", "send-keys", "-t", plan.Workstream+":"+pane.Role, withTmuxTargetEnv("new-window", pane.Command), "C-m"); err != nil {
+		if err := deliverPaneCommand(plan.Workstream+":"+pane.Role, withTmuxTargetEnv("new-window", pane.Command)); err != nil {
 			return err
 		}
 		if err := runCommand(tmuxSessionBinary, tmuxSessionRenameArgv(plan.Workstream, pane.Role)...); err != nil {
