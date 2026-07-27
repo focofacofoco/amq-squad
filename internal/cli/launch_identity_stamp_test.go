@@ -49,34 +49,67 @@ func TestNoProductionCodeBuildsExpectationLiterals(t *testing.T) {
 		inspected++
 		// Exempting EVERY empty literal was too broad (#575 round 3): production code could
 		// write rec.BootstrapExpectation = &bootstrapack.Expectation{} and recreate the
-		// exact empty-LaunchID defect while passing. The exemption is now POSITIONAL - only
-		// a zero-value literal returned alongside a non-nil error, which is the
-		// `return Expectation{}, err` shape whose value the caller discards.
+		// exact empty-LaunchID defect while passing.
+		//
+		// The exemption requires a non-nil value in the ERROR POSITION, i.e. the LAST
+		// result. Accepting any non-nil identifier ANYWHERE let
+		// `return Expectation{}, nil, cached` through on the strength of `cached` while the
+		// error result was nil (#575 round 4). Accepting any identifier merely NAMED
+		// something other than nil then let `return Expectation{}, err` through in a
+		// NAMED-RESULT function where err was still nil (#575 round 5). A variable's name
+		// says nothing about its value, so the error position must be PROVEN non-nil rather
+		// than merely occupied: see errorResultProvesNonNil. Proof comes from a dominating
+		// `err != nil` guard, which is why this walk tracks branch context instead of using
+		// a flat ast.Inspect.
 		exempt := map[ast.Node]bool{}
-		ast.Inspect(file, func(n ast.Node) bool {
-			ret, ok := n.(*ast.ReturnStmt)
-			if !ok || len(ret.Results) < 2 {
-				return true
+		var scanNode func(ast.Node, map[string]bool)
+		var scanIf func(*ast.IfStmt, map[string]bool)
+		scanIf = func(node *ast.IfStmt, proven map[string]bool) {
+			if node.Init != nil {
+				scanNode(node.Init, proven)
 			}
-			for _, res := range ret.Results {
-				lit, isLit := res.(*ast.CompositeLit)
-				if !isLit || len(lit.Elts) != 0 {
-					continue
+			body := proven
+			if ident := nonNilGuardedIdent(node.Cond); ident != "" {
+				body = make(map[string]bool, len(proven)+1)
+				for k, v := range proven {
+					body[k] = v
 				}
-				// The exemption requires a non-nil value in the ERROR POSITION, i.e. the
-				// LAST result. Accepting any non-nil identifier anywhere let
-				// `return Expectation{}, nil, cached` through on the strength of `cached`
-				// while the error result was nil (#575 round 4).
-				last := ret.Results[len(ret.Results)-1]
-				if id, isID := last.(*ast.Ident); isID && id.Name != "nil" {
-					exempt[lit] = true
-				}
-				if _, isCall := last.(*ast.CallExpr); isCall {
-					exempt[lit] = true
-				}
+				body[ident] = true
 			}
-			return true
-		})
+			scanNode(node.Body, body)
+			// The else arm does NOT inherit the proof: inside `else`, the guarded
+			// identifier is precisely the one known to BE nil.
+			switch els := node.Else.(type) {
+			case *ast.IfStmt:
+				scanIf(els, proven)
+			case *ast.BlockStmt:
+				scanNode(els, proven)
+			}
+		}
+		scanNode = func(n ast.Node, proven map[string]bool) {
+			ast.Inspect(n, func(x ast.Node) bool {
+				if x == nil {
+					return false
+				}
+				if ifs, isIf := x.(*ast.IfStmt); isIf {
+					scanIf(ifs, proven)
+					return false
+				}
+				ret, isRet := x.(*ast.ReturnStmt)
+				if !isRet {
+					return true
+				}
+				if len(ret.Results) >= 2 && errorResultProvesNonNil(ret, proven) {
+					for _, res := range ret.Results {
+						if lit, isLit := res.(*ast.CompositeLit); isLit && len(lit.Elts) == 0 {
+							exempt[lit] = true
+						}
+					}
+				}
+				return false
+			})
+		}
+		scanNode(file, map[string]bool{})
 		ast.Inspect(file, func(n ast.Node) bool {
 			lit, ok := n.(*ast.CompositeLit)
 			if !ok {
@@ -220,7 +253,18 @@ func TestEveryMismatchWrapperGuardsTheIncompleteSentinel(t *testing.T) {
 			guarded := false
 			for _, stmt := range block.List {
 				if ifs, isIf := stmt.(*ast.IfStmt); isIf && guardsSentinel(ifs.Cond) {
-					guarded = true
+					// The guard must EXIT, not merely test. #575 round 5: a branch that
+					// checks the sentinel and falls through
+					//
+					//	if errors.Is(err, errIncompleteLaunchRecord) { logSomething() }
+					//	return fmt.Errorf("launch id mismatch: ...")
+					//
+					// reaches the mismatch wrap anyway, so an incomplete record is still
+					// reported as a verifiable disagreement. Testing the sentinel is not the
+					// property being enforced; DECLINING TO REACH the wrap is.
+					if blockTerminates(ifs.Body) {
+						guarded = true
+					}
 					continue
 				}
 				// Does this statement ITSELF wrap with the mismatch label? Stop at nested
@@ -265,4 +309,116 @@ func TestEveryMismatchWrapperGuardsTheIncompleteSentinel(t *testing.T) {
 			"in the same block: %v. An incomplete record is cannot-verify, not verifiably-wrong",
 			label, sentinel, unguarded)
 	}
+}
+
+// blockTerminates reports whether control cannot fall out of the bottom of block.
+//
+// Only the LAST statement is examined, because that is what decides fall-through: an early
+// return nested inside an inner branch does not stop the block from completing. A block
+// ending in another if/else counts only when BOTH arms terminate, since a bare `if` with no
+// else always has a path that falls through.
+//
+// RECORDED RESIDUAL (accepted, not a gap this test will chase). This recognises the
+// terminating forms that appear in this package -- return, break/continue/goto, panic, and
+// a fully-terminating if/else. It does NOT model labelled control flow, os.Exit, log.Fatal,
+// or a helper whose body always panics. Any of those would be judged non-terminating, so the
+// error direction is a FALSE POSITIVE: the test complains about code that is in fact
+// guarded. That direction is safe -- it fails loud and a human reads it -- whereas modelling
+// every exit shape would mean reimplementing reachability analysis inside a guard test.
+func blockTerminates(block *ast.BlockStmt) bool {
+	if block == nil || len(block.List) == 0 {
+		return false
+	}
+	switch last := block.List[len(block.List)-1].(type) {
+	case *ast.ReturnStmt:
+		return true
+	case *ast.BranchStmt:
+		// break, continue, goto, fallthrough: control leaves this block.
+		return true
+	case *ast.ExprStmt:
+		call, ok := last.X.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		return ok && id.Name == "panic"
+	case *ast.IfStmt:
+		elseBlock, ok := last.Else.(*ast.BlockStmt)
+		if !ok {
+			// No else, or an else-if chain this check does not unroll. Either way it
+			// is not proof that every path leaves.
+			return false
+		}
+		return blockTerminates(last.Body) && blockTerminates(elseBlock)
+	default:
+		return false
+	}
+}
+
+// errorResultProvesNonNil reports whether the last result of ret is provably a non-nil error
+// at that point, given the identifiers a dominating `x != nil` guard has already proven
+// non-nil.
+//
+// #575 round 5: accepting any identifier that is not the literal `nil` exempted
+// `return Expectation{}, err` inside a NAMED-RESULT function, where err can still be nil at
+// the return -- the zero-value Expectation is then the caller's value and the empty-LaunchID
+// defect is back. The name of a variable says nothing about its value.
+//
+// Two shapes count as proof:
+//   - an explicit construction in the error position (fmt.Errorf(...), someErr()), which
+//     cannot be nil by inspection of the call site
+//   - an identifier a dominating `<ident> != nil` guard has proven, i.e. the ordinary
+//     `if err != nil { return Expectation{}, err }` shape
+//
+// RECORDED RESIDUALS (declared per the #575 convergence bound and the #567 enumeration-test
+// precedent: state what the check proves and what it cannot, rather than iterating on
+// meta-test rigor while the production fix waits).
+//
+// Not proven, so reported as offenders even when correct -- FALSE POSITIVES, which fail loud
+// and get read by a human:
+//   - the inverted early-return shape, `if err == nil { return v, nil }` followed by
+//     `return Expectation{}, err`, where err is non-nil by elimination
+//   - proof carried across a helper, a switch arm, or a for/range condition rather than an
+//     `if x != nil`
+//
+// Not caught, so a bypass survives -- FALSE NEGATIVES, both requiring deliberate effort:
+//   - an identifier proven non-nil by the guard and then REASSIGNED to nil before the
+//     return inside the same branch
+//   - a CallExpr in the error position that returns a nil error, e.g. `wrapMaybe(nil)`;
+//     "an explicit construction cannot be nil" is true of fmt.Errorf and false in general
+//
+// The bound is deliberate. Closing these means reimplementing nil-flow analysis inside a
+// guard test, and the property that actually matters -- production classification -- has been
+// verified clean directly for two review rounds. This test is defense-in-depth.
+func errorResultProvesNonNil(ret *ast.ReturnStmt, provenNonNil map[string]bool) bool {
+	if len(ret.Results) == 0 {
+		return false
+	}
+	switch last := ret.Results[len(ret.Results)-1].(type) {
+	case *ast.CallExpr:
+		return true
+	case *ast.Ident:
+		return last.Name != "nil" && provenNonNil[last.Name]
+	default:
+		return false
+	}
+}
+
+// nonNilGuardedIdent returns the identifier a condition of the form `x != nil` proves
+// non-nil inside the guarded branch, or "" when cond is not that shape.
+func nonNilGuardedIdent(cond ast.Expr) string {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.NEQ {
+		return ""
+	}
+	left, okLeft := bin.X.(*ast.Ident)
+	right, okRight := bin.Y.(*ast.Ident)
+	if okLeft && okRight && right.Name == "nil" {
+		return left.Name
+	}
+	// Written the other way round: `nil != err`.
+	if okLeft && okRight && left.Name == "nil" {
+		return right.Name
+	}
+	return ""
 }
