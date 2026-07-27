@@ -238,10 +238,11 @@ func TestBothSurfacesConsumeThePredicateVerdict(t *testing.T) {
 			// anywhere in the file, so a dead `_ = adm.required()` sitting beside an independent
 			// verdict computer passed. Consumption is not control.
 			//
-			// The verdict must appear in the CONDITION of an if that controls a refusal, so the
-			// branch is actually governed by the predicate. This is the seventh shape-versus-proof
-			// item in this milestone and the review reopened for safety anyway, so it is fixed
-			// rather than declared.
+			// The verdict must appear in the CONDITION of an if, so the predicate governs a
+			// conditional rather than being evaluated and discarded. Refusal semantics are reviewed
+			// at the site, not proven here -- see this test's header for the declared bound. This is
+			// the seventh shape-versus-proof item in this milestone and the review reopened for
+			// safety anyway, so the polarity part was fixed rather than declared.
 			consumed := false
 			ast.Inspect(parsed, func(n ast.Node) bool {
 				ifs, ok := n.(*ast.IfStmt)
