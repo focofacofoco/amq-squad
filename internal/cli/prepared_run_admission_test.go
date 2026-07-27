@@ -504,3 +504,71 @@ func TestStagedRecoveryIsExactlyTheExpectedCommand(t *testing.T) {
 		t.Errorf("staged recovery must match EXACTLY -- Contains would accept an extra unquoted copy\n got: %s\nwant: %s", adm.Recovery, want)
 	}
 }
+
+// #579 round 4, ruled pin. The admission site passes rec = nil, so Bindable is false there
+// regardless of the digest and the digest argument is INERT at that site. That is correct --
+// admission decides about an IN-PROCESS token, not a persisted one -- but it means the claim
+// "the digest is threaded at both call sites" is weaker than it sounds, and mutating the
+// admission digest leaves every test green.
+//
+// A comment saying so is how declarations die: four of today's findings were a comment
+// outliving its code. This pins the inertness STRUCTURALLY, which gives it a falsifying input:
+// the moment anyone passes a persisted record at admission, this fails and forces a ruling --
+// which is exactly the moment the digest would stop being inert and the threading would start
+// to matter.
+func TestAdmissionPassesNoRecordSoTheDigestIsProvablyInert(t *testing.T) {
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filepath.Join(".", "launch.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse launch.go: %v", err)
+	}
+
+	calls := 0
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || id.Name != "preparedRunActorAdmission" {
+			return true
+		}
+		calls++
+		if len(call.Args) == 0 {
+			t.Errorf("%s: call has no arguments", fset.Position(call.Pos()))
+			return true
+		}
+		last := call.Args[len(call.Args)-1]
+		lit, isIdent := last.(*ast.Ident)
+		if !isIdent || lit.Name != "nil" {
+			t.Errorf("%s: admission must pass the NIL LITERAL for the launch record.\n"+
+				"It passes %s instead, which means a persisted record now reaches admission -- so the "+
+				"digest argument is no longer inert there and the threading needs its own falsifier. "+
+				"Get a ruling rather than deleting this check.",
+				fset.Position(last.Pos()), typeName(last))
+		}
+		return true
+	})
+
+	// Anti-vacuity: if the call disappears or is renamed, this test must fail rather than pin
+	// nothing. Exactly one admission call site is expected.
+	if calls != 1 {
+		t.Fatalf("expected exactly 1 preparedRunActorAdmission call in launch.go, found %d; the pin is "+
+			"either blind or the call site moved", calls)
+	}
+}
+
+// typeName renders an expression's kind for the failure message above, so the reader learns
+// WHAT was passed instead of just that something was.
+func typeName(e ast.Expr) string {
+	switch v := e.(type) {
+	case *ast.Ident:
+		return "identifier " + v.Name
+	case *ast.CallExpr:
+		return "a call expression"
+	case *ast.UnaryExpr:
+		return "a unary expression (likely &record)"
+	default:
+		return "a non-nil expression"
+	}
+}
