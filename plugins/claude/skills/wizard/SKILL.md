@@ -1,6 +1,6 @@
 ---
 name: "wizard"
-description: "Goal-first amq-squad preparation and launch wizard. Use it to turn a request or source into reviewed coordination artifacts, prove exact roster and bootstrap readiness, and present the separate default-No launch gate."
+description: "Goal-first amq-squad preparation and launch wizard. Use when turning a request into reviewed coordination artifacts, proving roster and bootstrap readiness, or presenting the separate default-No launch gate. Triggers include \"set up a squad for X\", \"show me the plan\", \"prepare it\", \"is it ready\", \"launch it\", \"why did readiness block\". NOT for the live lead loop after launch (use amq-squad:orchestrator) and NOT for one-off status, task, or evidence commands (use amq-squad:cli)."
 version: "2.24.0"  # x-release-please-version
 allowed-tools: "Bash, Read, Write, Edit, MultiEdit, Glob, Grep, WebFetch"
 argument-hint: "[request | stage goal|brief|rules|roles|profile|readiness|launch]"
@@ -51,7 +51,32 @@ v2.25.0** still apply when an operator is on an older build, so the recovery is 
 | `--go` fails with a tool-policy source-set change listing the same files twice | Capability sources were recorded relative and compared absolute (#539) | **Fixed in v2.25.0**. On older builds, run the member at `full` tool profile to get past it |
 | `up` reports success but panes sit at a shell prompt | Agent bootstrap failure was not surfaced to the launcher (#540) | **Fixed in v2.25.0**: the launch now fails and names the member and its pane error. On older builds, read each pane before trusting the success line |
 | Readiness passes every row and then `--go` fails | Readiness was not checking what spawn checks (#539) | **Fixed in v2.25.0**: both call one predicate. On older builds, treat readiness as necessary but not sufficient |
+| `team shared-cwd-exception set` fails with `flag provided but not defined: -session` | The remedy text shows no flags, and unlike the rest of the flow this command takes `--profile` but NOT `--session` | Drop `--session`: `team shared-cwd-exception set "<reason>" --project P --profile R` |
+| `run start` refused: profile is `pinned to workstream X, not S` | `new profile` without `--session` derives the workstream from the project directory name | Pass `--session S` when creating the profile, or use the pinned name |
 | An unscoped command mutates the wrong roster | Named profiles need `--profile`; unscoped resolution may pick another live record | Always pass `--project` and, for named profiles, `--profile` |
+
+## Before the first `--prepare`: two things that must be set at creation
+
+Both are transactional traps. Preparation rolls back a profile it created, so a fix that
+modifies an existing profile has nothing to act on — measured at 4 CLI invocations with
+these set, versus a dead end without them.
+
+**1. A roster with 2+ mutation-capable members needs its isolation decided up front.**
+Readiness blocks otherwise. Choose one at creation:
+
+```sh
+# each member in its own worktree -- preferred when members really do write code
+amq-squad new profile NAME --roles cto,qa --orchestrated --lead cto \
+  --project P --session S --cwd "cto=/path/a,qa=/path/b"
+# or record an explicit exception when they will not mutate in parallel
+amq-squad new profile NAME --roles cto,qa --orchestrated --lead cto \
+  --project P --session S --shared-cwd-exception "<reason>"
+```
+
+**2. Pin `--session` at creation.** Without it the profile is pinned to a workstream
+derived from the project directory name, and a later `run start --session S` is refused
+with "pinned to workstream X, not S; no team members would run for the requested
+session".
 
 ## Immutable stage contract
 
