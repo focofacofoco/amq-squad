@@ -56,7 +56,7 @@ action; never restate what the output already says.
 | "drain my inbox" | `amq-squad amq drain --include-body` |
 | "ask the human" | `amq-squad gate raise --gate TOPIC --kind KIND --action ACTION --target TARGET --session S --me H` |
 | "is this safe to merge" | `amq-squad verify merge --project DIR --evidence FILE` |
-| "plan the release" | Needs a full explicit input set (14 flags): see `references/troubleshooting.md` |
+| "plan the release" | 12 required flags plus 2 defaulted: see `references/troubleshooting.md` |
 | "what gate kinds exist" | `amq-squad gate raise --list-kinds` |
 | "which profile am I in" | `amq-squad context explain` |
 | "prepare a squad" | Wrong skill, use `amq-squad:wizard` |

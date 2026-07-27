@@ -47,23 +47,23 @@ namespace and evidence-lifecycle traps found since.
 | `next` exited 1 and looked broken | 1 means idle | Only above 1 is an error |
 | A turn burned per tick | `monitor` ran in the foreground | Run it as a background task so the harness re-invokes on exit |
 
-## `verify release-plan` needs a full explicit input set
+## `verify release-plan` needs a nearly-full explicit input set
 
-Every input is explicit by design: the command freezes repository, branch, candidate,
-tag/signing, evidence and title/notes identity, so it refuses to infer any of them. There
-is no `--list` discovery mode, and short forms ERROR rather than defaulting.
+Almost every input is explicit by design: the command freezes repository, branch,
+candidate, tag/signing, evidence and title/notes identity, so it refuses to infer most of
+them. There is no `--list` discovery mode, and short forms ERROR rather than defaulting.
 
-Fourteen flags are required. This invocation was executed and returned exit 0 with
-`ready=true`:
+**Twelve flags are required. Two more are DEFAULTED, which the discovery loop cannot
+show you.** Both invocations below were executed and returned exit 0 with `ready=true`:
 
 ```sh
 amq-squad verify release-plan \
   --project . \
   --repository OWNER/REPO \
   --remote-url https://github.com/OWNER/REPO.git \
-  --remote origin --branch main \
-  --tag vX.Y.Z --version vX.Y.Z \
+  --branch main \
   --head <40-hex-sha> \
+  --version vX.Y.Z \
   --annotation <tag-annotation> \
   --worktree-state clean \
   --preflight-state passed --preflight-sha256 <64-hex> \
@@ -71,15 +71,26 @@ amq-squad verify release-plan \
   --notes-policy generated
 ```
 
-The command is READ-ONLY: it performs no git, gh, network or filesystem mutation, and
-emits the exact gate bodies and non-force refspecs a later push would use.
+| defaulted flag | default | override when |
+|---|---|---|
+| `--remote` | `origin` | your push target is not `origin`, for example an upstream or fork remote |
+| `--tag` | derived from `--version` (`vX.Y.Z` becomes `refs/tags/vX.Y.Z`) | the tag name differs from the version string |
 
-Discovering the set is mechanical, because each error names exactly one missing input:
-run it, read the error, add that flag, repeat. `--repository` must be canonical
+**Why the defaults matter more than the required flags.** Discovery works by running the
+command and reading which single input it names as missing, so it can only teach you about
+inputs it ENFORCES. A releaser pushing to a remote that is not `origin` gets no
+missing-remote error at all: the plan comes back `ready=true` while silently targeting
+`origin`, and the wrong push command or a failed preflight is the first sign. Pass
+`--remote` explicitly whenever you are not certain.
+
+Discovering the required twelve is mechanical, because each error names exactly one missing
+input: run it, read the error, add that flag, repeat. `--repository` must be canonical
 `OWNER/REPO` with no `.git`; `--head` must be one lowercase 40- or 64-hex SHA;
 `--notes-policy` must be `file` or `generated`.
+
+The command is READ-ONLY: it performs no git, gh, network or filesystem mutation, and
+emits the exact gate bodies and non-force refspecs a later push would use.
 
 A caution learned the hard way here: `amq-squad verify merge` and
 `amq-squad verify release-plan` do NOT accept `--session`, unlike almost every other
 command in this skill. Passing it fails with `flag provided but not defined`.
-
