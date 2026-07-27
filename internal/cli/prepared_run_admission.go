@@ -58,14 +58,37 @@ func (a preparedRunAdmission) required() bool { return a.Governed }
 // rec may be nil, meaning "no persisted record was found": that is not bindable.
 func preparedRunActorAdmission(manifest preparedRunManifest, prepared bool, role, handle string, rec *launch.Record) preparedRunAdmission {
 	adm := preparedRunAdmission{Generation: strings.TrimSpace(manifest.Generation)}
+
+	// #579 finding 1: Bindable required all four GENERATION fields and ignored
+	// PreparedRunLaunchAttempt. token.complete() does not check it either. A record with a
+	// complete generation but no reserved attempt previewed will-launch and then managed resume
+	// refused it at prepared_run_state.go:312 -- the exact defect this predicate exists to kill,
+	// one field over. Bindable now means "the managed restore path can actually bind this",
+	// which requires the attempt.
+	bindable := false
+	if rec != nil {
+		token := preparedRunTokenFromRecord(*rec)
+		bindable = token.complete() && strings.TrimSpace(token.LaunchAttempt) != ""
+	}
+
 	if !prepared {
+		// #579 finding 2: returning here unconditionally ignored a record that CARRIES a
+		// prepared token while the session reads unprepared. The preview then emitted a plain
+		// launch that execution rejects, because the record's token is validated against a
+		// manifest that is absent or different. A token-bearing record in a session with no
+		// accepted generation is CONTRADICTORY evidence, and contradictory evidence is
+		// ineligible, never best-effort.
+		if rec != nil && !preparedRunTokenFromRecord(*rec).empty() {
+			adm.Governed = true
+			adm.Reason = fmt.Sprintf("actor %s/%s carries a prepared-run token but this session has no accepted prepared generation; the token cannot be validated and execution will refuse it", role, handle)
+			adm.Recovery = "amq-squad run start --project " + shellQuote(strings.TrimSpace(manifest.Project)) + " --profile <profile> --session <session>"
+			return adm
+		}
 		return adm
 	}
 	adm.Governed = true
 	adm.Staged = containsRole(manifest.StagedRoster, role)
-	if rec != nil {
-		adm.Bindable = preparedRunTokenFromRecord(*rec).complete()
-	}
+	adm.Bindable = bindable
 
 	if adm.Staged {
 		adm.Reason = fmt.Sprintf("staged actor %s/%s requires an exact single-use spawn reservation for prepared generation %s",
@@ -74,24 +97,34 @@ func preparedRunActorAdmission(manifest preparedRunManifest, prepared bool, role
 		adm.Reason = fmt.Sprintf("prepared actor %s/%s requires the exact reserved generation token", role, handle)
 	}
 
+	// #579 findings 3 and 4: every emitted form is now checked against the REAL command
+	// surface. The previous staged form omitted the mandatory <binary> positional and failed
+	// "agent up requires a binary", and the bindable form named a top-level `restore` verb that
+	// is NOT registered -- I had already run the registry grep that showed no registration and
+	// used the verb anyway. An emitted command must be executable, not plausible.
 	switch {
 	case adm.Bindable:
-		// The record carries the token, so the managed restore path binds it with no
-		// operator-supplied secret. This is the only case `resume --exec` can bind
-		// automatically.
-		adm.Recovery = "amq-squad restore --role " + shellQuote(role)
+		// The record carries a complete claim-bound token, so the managed path binds it with
+		// no operator-supplied secret. `agent resume <role>` is the registered verb
+		// (agent.go: "agent resume <role>"); there is no top-level `restore`.
+		adm.Recovery = "amq-squad agent resume " + shellQuote(role)
 	case adm.Staged:
-		// There is no hand-typable prepared-token flag; the staged pair is the ONLY
-		// operator-typable binding. The claim ID is deliberately left as a placeholder
-		// because it must come from the authoritative current claim, not from a guess.
-		adm.Recovery = "amq-squad agent up --role " + shellQuote(role) +
-			" --staged-spawn --staged-claim <exact active claim ID from `amq-squad status --json`>"
+		// The staged pair is the ONLY operator-typable binding: there is no prepared-token
+		// flag. <binary> is a required POSITIONAL, so it is present here rather than implied.
+		// The claim ID stays a placeholder because it must come from the authoritative current
+		// claim, and inventing one would be worse than asking for it.
+		binary := "<binary>"
+		if rec != nil && strings.TrimSpace(rec.Binary) != "" {
+			binary = strings.TrimSpace(rec.Binary)
+		}
+		adm.Recovery = "amq-squad agent up " + binary + " --role " + shellQuote(role) +
+			" --staged-spawn --staged-claim <exact active claim ID from: amq-squad status --json>"
 	default:
-		// Prepared but unbindable and not staged: no operator-typable command exists, so
-		// naming one would be worse than admitting that. Point at the command that
-		// reserves instead of inventing a flag.
-		adm.Recovery = "amq-squad run start --profile <profile> --session " + shellQuote(strings.TrimSpace(manifest.Session)) +
-			" (re-reserves the generation; no operator-typable token flag exists for this case)"
+		// Prepared, not staged, and not bindable: no operator-typable token flag exists, so
+		// point at the command that re-reserves rather than inventing one.
+		adm.Recovery = "amq-squad run start --project " + shellQuote(strings.TrimSpace(manifest.Project)) +
+			" --profile " + shellQuote(strings.TrimSpace(manifest.Profile)) +
+			" --session " + shellQuote(strings.TrimSpace(manifest.Session))
 	}
 	return adm
 }

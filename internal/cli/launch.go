@@ -572,7 +572,12 @@ Examples:
 		defaultArgs = append([]string(nil), childArgs...)
 		applyPreparedRunTokenToRecord(&rec, requestedPreparedToken)
 	}
-	if !*dryRun && requestedPreparedToken.empty() && preparedLaunchContext != nil {
+	// #579 finding 5: this site computed its OWN verdict and used the predicate only for
+	// WORDING, so a change to the predicate moved the preview and left admission behind -- the
+	// two-deciders defect half-fixed. The predicate now owns the VERDICT here too: this site
+	// contributes only what is local to it (dry-run, and whether a token was supplied
+	// in-process), and required() decides whether the actor is governed at all.
+	if !*dryRun && requestedPreparedToken.empty() {
 		// #573: the refusal REASON is owned by preparedRunActorAdmission, not composed here,
 		// so `team resume` cannot describe this same state in different words. Sharing only a
 		// boolean would have let the two surfaces agree on the verdict and still disagree in
@@ -581,8 +586,15 @@ Examples:
 		// rec is passed as nil deliberately: this site decides about an IN-PROCESS token, not a
 		// persisted one. Passing the record would set Bindable and change nothing about the
 		// verdict, while implying admission consults record state, which it does not.
-		adm := preparedRunActorAdmission(preparedLaunchContext.Manifest, true, rec.Role, rec.Handle, nil)
-		return fmt.Errorf("agent up refused before launch-record or process side effects: %s", adm.Reason)
+		var manifest preparedRunManifest
+		prepared := preparedLaunchContext != nil
+		if prepared {
+			manifest = preparedLaunchContext.Manifest
+		}
+		adm := preparedRunActorAdmission(manifest, prepared, rec.Role, rec.Handle, nil)
+		if adm.required() {
+			return fmt.Errorf("agent up refused before launch-record or process side effects: %s", adm.Reason)
+		}
 	}
 	if requestedPreparedToken.empty() {
 		applyPreparedRunTokenToRecord(&rec, preparedRunTokenForContext(preparedLaunchContext))

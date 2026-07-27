@@ -28,14 +28,15 @@ func TestPreparedRunActorAdmissionClassifiesEveryState(t *testing.T) {
 		Session:      "v2-25-0",
 		StagedRoster: []string{"qa"},
 	}
-	// A record whose token is COMPLETE. Bindable turns on this and nothing else, because
-	// execRestoreRecord takes the token from the record and falls back to an empty token --
-	// which admission refuses -- when the record has none.
+	// A record the managed path can ACTUALLY bind: complete generation AND the reserved launch
+	// attempt. #579 finding 1 -- the attempt was missing from this fixture and from the
+	// predicate, so a record like this previewed bindable and managed resume then refused it.
 	bound := &launch.Record{
 		PreparedRunGeneration:    "g-7",
 		PreparedRunDigest:        "d-7",
 		PreparedRunGoalNamespace: "squad/v2-25-0",
 		PreparedRunGoalDigest:    "gd-7",
+		PreparedRunLaunchAttempt: "a-1",
 	}
 	unbound := &launch.Record{}
 
@@ -68,12 +69,32 @@ func TestPreparedRunActorAdmissionClassifiesEveryState(t *testing.T) {
 		{
 			// The row that makes the predicate record-aware. --exec CAN bind this through the
 			// managed restore path, so blocking it would refuse something that works.
-			name: "staged actor whose record carries a complete token", prepared: true, role: "qa", rec: bound,
-			wantRequired: true, wantStaged: true, wantBindable: true, wantRecovery: "restore",
+			name: "staged actor whose record carries a complete claim-bound token", prepared: true, role: "qa", rec: bound,
+			wantRequired: true, wantStaged: true, wantBindable: true, wantRecovery: "agent resume",
 		},
 		{
 			name: "prepared actor whose record carries a complete token", prepared: true, role: "cto", rec: bound,
-			wantRequired: true, wantStaged: false, wantBindable: true, wantRecovery: "restore",
+			wantRequired: true, wantStaged: false, wantBindable: true, wantRecovery: "agent resume",
+		},
+		// #579 finding 6: the rows below were all missing, and every one of them is a state the
+		// predicate can actually see. The table was six happy-ish rows.
+		{
+			// finding 1: complete generation, NO reserved attempt. Previewed will-launch and
+			// managed resume then refused it.
+			name: "complete generation but no reserved attempt is NOT bindable", prepared: true, role: "qa",
+			rec:          &launch.Record{PreparedRunGeneration: "g-7", PreparedRunDigest: "d-7", PreparedRunGoalNamespace: "squad/v2-25-0", PreparedRunGoalDigest: "gd-7"},
+			wantRequired: true, wantStaged: true, wantBindable: false, wantRecovery: "--staged-spawn",
+		},
+		{
+			name: "partial token is not bindable", prepared: true, role: "qa",
+			rec:          &launch.Record{PreparedRunGeneration: "g-7", PreparedRunLaunchAttempt: "a-1"},
+			wantRequired: true, wantStaged: true, wantBindable: false, wantRecovery: "--staged-spawn",
+		},
+		{
+			// finding 2: contradictory evidence -- a token-bearing record in a session with no
+			// accepted generation. Must be governed, never a plain launch.
+			name: "token-bearing record in an UNPREPARED session is governed", prepared: false, role: "qa", rec: bound,
+			wantRequired: true, wantStaged: false, wantBindable: false, wantRecovery: "run start",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,6 +131,89 @@ func TestPreparedRunActorAdmissionClassifiesEveryState(t *testing.T) {
 			// The recovery command must be runnable, not a description of one.
 			if !strings.HasPrefix(adm.Recovery, "amq-squad ") {
 				t.Errorf("Recovery must be an exact command starting with amq-squad; got %q", adm.Recovery)
+			}
+		})
+	}
+}
+
+// #579 finding 5: the previous version of this test asserted only that a CALL EXPRESSION
+// exists, so it passed while admission called the predicate purely for its Reason string and
+// computed its own verdict. A call is not consumption. That is the same shape-not-proof
+// mistake this milestone has now produced five times, and it is why the half-consolidation
+// shipped with a green test.
+//
+// This asserts the VERDICT FLOWS: at each site the predicate's result must reach a condition
+// (required()) or be returned, not merely be evaluated for a field.
+func TestBothSurfacesConsumeThePredicateVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		file   string
+		symbol string
+	}{
+		{"launch.go", "preparedRunActorAdmission"},
+		{"team_resume.go", "preparedRunAdmissionForMember"},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			fset := token.NewFileSet()
+			parsed, err := parser.ParseFile(fset, filepath.Join(".", tc.file), nil, 0)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			// Find the identifier the call result is assigned to, then require that identifier
+			// to appear in a call to required() somewhere in the same file.
+			var assigned []string
+			ast.Inspect(parsed, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, rhs := range as.Rhs {
+					call, isCall := rhs.(*ast.CallExpr)
+					if !isCall {
+						continue
+					}
+					id, isID := call.Fun.(*ast.Ident)
+					if !isID || id.Name != tc.symbol {
+						continue
+					}
+					if len(as.Lhs) > 0 {
+						if target, ok := as.Lhs[0].(*ast.Ident); ok {
+							assigned = append(assigned, target.Name)
+						}
+					}
+				}
+				return true
+			})
+			if len(assigned) == 0 {
+				t.Fatalf("%s never assigns the result of %s; #573 requires the shared predicate to "+
+					"decide, and a result that is not bound cannot be consumed", tc.file, tc.symbol)
+			}
+
+			consumed := false
+			ast.Inspect(parsed, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel == nil || sel.Sel.Name != "required" {
+					return true
+				}
+				recv, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				for _, name := range assigned {
+					if recv.Name == name {
+						consumed = true
+					}
+				}
+				return true
+			})
+			if !consumed {
+				t.Errorf("%s calls %s but never consumes required() from its result -- so it is using "+
+					"the predicate for WORDING while computing its own verdict. A predicate change would "+
+					"move one surface and not the other, which is the disagreement #573 exists to end.",
+					tc.file, tc.symbol)
 			}
 		})
 	}
