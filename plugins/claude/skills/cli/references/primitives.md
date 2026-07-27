@@ -101,7 +101,8 @@ amq-squad rm --session S                      # remove it
 amq-squad fork --from SOURCE --as TARGET      # no --session flag on this one
 ```
 
-Three of those have surprising defaults, verified by running them:
+Several of those have surprising defaults. Every row below was verified by running the
+command, not by reading its flags:
 
 | command | the surprise |
 |---|---|
