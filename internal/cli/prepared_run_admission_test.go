@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/omriariav/amq-squad/v2/internal/launch"
+	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
 // #573: `team resume` previewed prepared and staged actors as will-launch and emitted a
@@ -177,8 +178,18 @@ func TestPreparedRunActorAdmissionClassifiesEveryState(t *testing.T) {
 // mistake this milestone has now produced five times, and it is why the half-consolidation
 // shipped with a green test.
 //
-// This asserts the VERDICT FLOWS: at each site the predicate's result must reach a condition
-// (required()) or be returned, not merely be evaluated for a field.
+// WHAT THIS PROVES, stated exactly (#579 round 4 R4-3): required() sits in the CONDITION of an
+// if at each site, so the predicate governs a branch rather than being evaluated for a field.
+//
+// WHAT IT DOES NOT PROVE, declared rather than chased: that the guarded body actually refuses.
+// A body of `return nil` satisfies this check. Proving "the body provably refuses" in the AST is
+// a ladder with no top rung -- I climbed four rungs on this one test across rounds 2, 3 and 4,
+// each time closing the mutation I had just been shown and leaving the adjacent one. Ruled to
+// stop here: refusal semantics are reviewed AT THE SITE, and the verdict table plus the removal
+// proofs cover the behaviour directly.
+//
+// The honest description of what a check proves is worth more than an implied stronger claim,
+// because the implied version is what a future reader relies on.
 func TestBothSurfacesConsumeThePredicateVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		file   string
@@ -391,5 +402,105 @@ func TestStagedRecoveryQuotesTheInterpolatedBinary(t *testing.T) {
 	// both were present.
 	if strings.Contains(adm.Recovery, "codex;rm -rf x") && !strings.Contains(adm.Recovery, shellQuote(rec.Binary)) {
 		t.Errorf("recovery carries the raw unquoted binary: %s", adm.Recovery)
+	}
+}
+
+// #579 round 4 R4-1: a LOADER-LEVEL falsifier. The round-3 stale-generation row calls the
+// predicate directly with a literal digest, so it proves the predicate and says nothing about
+// the CALL-SITE THREADING -- a loader passing a wrong or record-derived digest stayed green.
+// My falsifier proved the function; the claim was about the system.
+//
+// This drives preparedRunAdmissionForMember against REAL on-disk state where the record's token
+// matches a SUPERSEDED generation. It fails if either call site threads the wrong digest,
+// which is the property the claim actually asserts.
+func TestLoaderRefusesBindableForASupersededGeneration(t *testing.T) {
+	dir, manifest, token := preparedRunStateFixture(t)
+	attempt, err := reservePreparedRunLaunch(dir, team.DefaultProfile, "prepared", token)
+	if err != nil {
+		t.Fatalf("reserve launch: %v", err)
+	}
+	token.LaunchAttempt = attempt
+
+	// Anti-vacuity: the record's token must be bindable-shaped BEFORE the generation moves, or
+	// this test would pass for the wrong reason -- an unbindable token is refused anyway.
+	preRec := &launch.Record{
+		PreparedRunGeneration:    token.Generation,
+		PreparedRunDigest:        token.ManifestDigest,
+		PreparedRunGoalNamespace: token.GoalNamespace,
+		PreparedRunGoalDigest:    token.GoalDigest,
+		PreparedRunLaunchAttempt: token.LaunchAttempt,
+	}
+	before, err := preparedRunAdmissionForMember(dir, team.DefaultProfile, "prepared", manifest.Lead, manifest.Lead, preRec)
+	if err != nil {
+		t.Fatalf("loader on the current generation: %v", err)
+	}
+	if !before.Bindable {
+		t.Fatalf("fixture is not bindable on the CURRENT generation, so the supersede case below "+
+			"would pass for the wrong reason: %+v", before)
+	}
+
+	// Now publish a NEW generation. The record still carries the OLD one.
+	republishPreparedRunManifestForTest(t, manifest)
+
+	after, err := preparedRunAdmissionForMember(dir, team.DefaultProfile, "prepared", manifest.Lead, manifest.Lead, preRec)
+	if err != nil {
+		t.Fatalf("loader on the superseded generation: %v", err)
+	}
+	if after.Bindable {
+		t.Error("a record whose token names a SUPERSEDED generation must not be Bindable: preview would " +
+			"offer `agent resume` and exec-side validation would refuse it -- the allow-in-preview/" +
+			"refuse-on-exec defect this predicate exists to kill")
+	}
+	if !after.required() {
+		t.Error("a superseded-generation actor is still governed and must be blocked, not planned fresh")
+	}
+}
+
+// #579 round 4 R4-2: the ” assertion never received a BLANK field. Every table row reuses the
+// populated manifest, so reverting any helper to shellQuote("") stayed green -- an anti-vacuity
+// check that was itself vacuous, which is the sharpest version of this milestone's recurring
+// mistake.
+//
+// The zero manifest is the falsifying input: it is exactly the state the contradictory-evidence
+// branch sees, because that branch fires when NO accepted manifest exists.
+func TestUnpreparedRecoveryRendersPlaceholdersNotEmptyQuotes(t *testing.T) {
+	// Zero manifest: no Project, Profile or Session at all.
+	adm := preparedRunActorAdmission(preparedRunManifest{}, "", false, "qa", "qa-handle",
+		&launch.Record{PreparedRunLaunchAttempt: "a-orphan"})
+
+	if !adm.required() {
+		t.Fatal("a token-bearing record in an unprepared session must be governed")
+	}
+	if strings.Contains(adm.Recovery, "''") {
+		t.Errorf("recovery contains an EMPTY-QUOTED argument, which looks filled and fails at "+
+			"runtime -- the executable-not-plausible rule this PR asserts:\n%s", adm.Recovery)
+	}
+	for _, want := range []string{"<project>", "<profile>", "<session>"} {
+		if !strings.Contains(adm.Recovery, want) {
+			t.Errorf("a blank field must render as the visible placeholder %s:\n%s", want, adm.Recovery)
+		}
+	}
+}
+
+// #579 round 4 R4-4: Contains(shellQuote(binary)) is satisfied even when an ADDITIONAL unquoted
+// copy sits beside the quoted one, and the second Contains I wrote to catch that had the same
+// hole. Contains cannot prove absence.
+//
+// Exact equality is the only assertion that cannot be fooled: it pins the WHOLE emitted command,
+// so any extra, missing or reordered token fails.
+func TestStagedRecoveryIsExactlyTheExpectedCommand(t *testing.T) {
+	manifest := preparedRunManifest{
+		Generation: "g-7", Project: "/repo", Profile: "squad", Session: "v2-25-0",
+		GoalNamespace: "squad/v2-25-0", GoalDigest: "gd-7",
+		StagedRoster: []string{"qa"},
+	}
+	rec := &launch.Record{Binary: "/opt/my tools/codex"}
+
+	adm := preparedRunActorAdmission(manifest, "d-7", true, "qa", "qa-handle", rec)
+
+	want := "amq-squad agent up " + shellQuote(rec.Binary) + " --role " + shellQuote("qa") +
+		" --staged-spawn --staged-claim <exact active claim ID from: amq-squad status --json>"
+	if adm.Recovery != want {
+		t.Errorf("staged recovery must match EXACTLY -- Contains would accept an extra unquoted copy\n got: %s\nwant: %s", adm.Recovery, want)
 	}
 }
