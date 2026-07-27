@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +34,7 @@ const (
 	defaultNotificationAMQWatchRetries = 5
 	defaultNotificationAMQWatchBackoff = 100 * time.Millisecond
 	maxNotificationAMQWatchBackoff     = 2 * time.Second
+	notificationWatcherShutdownTimeout = 1500 * time.Millisecond
 )
 
 var (
@@ -63,7 +65,11 @@ type notificationWatcherRecord struct {
 	WatchRoot       string    `json:"watch_root,omitempty"`
 	WatchMailbox    string    `json:"watch_mailbox,omitempty"`
 	WatchTimeout    string    `json:"watch_timeout,omitempty"`
+	WatchRunning    bool      `json:"watch_running,omitempty"`
 	WatchRestarts   int       `json:"watch_restarts,omitempty"`
+	WatchFailures   int       `json:"watch_failure_streak,omitempty"`
+	CollectPending  bool      `json:"collect_pending,omitempty"`
+	CollectRetries  int       `json:"collect_retries,omitempty"`
 	WatchMaxRetries int       `json:"watch_max_retries,omitempty"`
 	LastWatchAt     time.Time `json:"last_watch_at,omitempty"`
 	LastCollectAt   time.Time `json:"last_collect_at,omitempty"`
@@ -89,7 +95,11 @@ type notificationWatcherStatus struct {
 	WatchBackend    string    `json:"watch_backend,omitempty"`
 	WatchRoot       string    `json:"watch_root,omitempty"`
 	WatchMailbox    string    `json:"watch_mailbox,omitempty"`
+	WatchRunning    bool      `json:"watch_running,omitempty"`
 	WatchRestarts   int       `json:"watch_restarts,omitempty"`
+	WatchFailures   int       `json:"watch_failure_streak,omitempty"`
+	CollectPending  bool      `json:"collect_pending,omitempty"`
+	CollectRetries  int       `json:"collect_retries,omitempty"`
 	WatchMaxRetries int       `json:"watch_max_retries,omitempty"`
 	LastWatchAt     time.Time `json:"last_watch_at,omitempty"`
 	LastCollectAt   time.Time `json:"last_collect_at,omitempty"`
@@ -262,7 +272,11 @@ func inspectNotificationWatcher(t team.Team, profile, session string, now time.T
 	result.WatchBackend = rec.WatchBackend
 	result.WatchRoot = rec.WatchRoot
 	result.WatchMailbox = rec.WatchMailbox
+	result.WatchRunning = rec.WatchRunning
 	result.WatchRestarts = rec.WatchRestarts
+	result.WatchFailures = rec.WatchFailures
+	result.CollectPending = rec.CollectPending
+	result.CollectRetries = rec.CollectRetries
 	result.WatchMaxRetries = rec.WatchMaxRetries
 	result.LastWatchAt = rec.LastWatchAt
 	result.LastCollectAt = rec.LastCollectAt
@@ -280,6 +294,14 @@ func inspectNotificationWatcher(t team.Team, profile, session string, now time.T
 	}
 	host, _ := os.Hostname()
 	if strings.TrimSpace(rec.Host) != "" && strings.TrimSpace(rec.Host) != strings.TrimSpace(host) {
+		if rec.WatchBackend != "" && !rec.WatchRunning {
+			result.Health = "degraded"
+			result.Reason = fmt.Sprintf("notification watcher on host %s reports backend %s is not running", rec.Host, rec.WatchBackend)
+			if detail := strings.TrimSpace(rec.LastError); detail != "" {
+				result.Reason += ": " + detail
+			}
+			return result
+		}
 		switch rec.Health {
 		case "healthy":
 			result.Health = "external-active"
@@ -306,6 +328,14 @@ func inspectNotificationWatcher(t team.Team, profile, session string, now time.T
 	if !notificationWatcherProcessMatches(rec) {
 		result.Health = "unhealthy"
 		result.Reason = "notification watcher PID is absent or does not match its owner token"
+		return result
+	}
+	if rec.WatchBackend != "" && !rec.WatchRunning {
+		result.Health = "degraded"
+		result.Reason = fmt.Sprintf("notification watcher backend %s is not running", rec.WatchBackend)
+		if detail := strings.TrimSpace(rec.LastError); detail != "" {
+			result.Reason += ": " + detail
+		}
 		return result
 	}
 	if rec.Health != "healthy" {
@@ -419,7 +449,7 @@ func reconcileNotificationWatcherStarted(t team.Team, profile, session, baseRoot
 func notificationWatcherReady(status notificationWatcherStatus) bool {
 	switch status.Health {
 	case "healthy", "external-active":
-		return true
+		return !status.LastScanAt.IsZero()
 	case "degraded":
 		return !status.LastScanAt.IsZero()
 	default:
@@ -439,6 +469,7 @@ func expireDeadLocalNotificationWatcher(projectDir, profile, session string, obs
 		}
 		current.LeaseExpiresAt = now.UTC()
 		current.Health = "unhealthy"
+		current.WatchRunning = false
 		current.LastError = "local notification watcher process exited before lease expiry"
 		current.UpdatedAt = now.UTC()
 		return writeNotificationWatcherRecord(path, current)
@@ -580,6 +611,7 @@ func finalizeNotificationWatcherStop(projectDir, profile, session, path string, 
 		current.PID = 0
 		current.OwnerToken = ""
 		current.Expected = false
+		current.WatchRunning = false
 		current.Health = "inactive"
 		current.LastError = ""
 		current.HeartbeatAt = now
@@ -594,6 +626,7 @@ func notificationWatcherInactiveTombstoneForScope(rec notificationWatcherRecord,
 		rec.PID == 0 &&
 		strings.TrimSpace(rec.OwnerToken) == "" &&
 		!rec.Expected &&
+		!rec.WatchRunning &&
 		rec.Health == "inactive" &&
 		!rec.LeaseExpiresAt.After(now)
 }
@@ -669,7 +702,7 @@ func runNotificationWatcher(args []string) error {
 	})
 }
 
-func executeNotificationWatcher(w notificationWatcherExecution) error {
+func executeNotificationWatcher(w notificationWatcherExecution) (returnErr error) {
 	nowFn := w.Now
 	if nowFn == nil {
 		nowFn = time.Now
@@ -734,6 +767,8 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 		rec.WatchRoot = watchCtx.Root
 		rec.WatchMailbox = watchCtx.Me
 		rec.WatchTimeout = watchTimeout.String()
+		rec.WatchRunning = true
+		rec.CollectPending = true
 		rec.WatchMaxRetries = maxRetries
 	}
 	claimErr := flock.WithLock(notificationWatcherLockPath(w.ProjectDir, profile, w.Session), func() error {
@@ -804,7 +839,6 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 	rescan := time.NewTicker(w.Rescan)
 	defer rescan.Stop()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var amqDone <-chan notificationAMQWatchResult
 	if w.WatchAMQ != nil {
 		results := make(chan notificationAMQWatchResult, 1)
@@ -822,7 +856,7 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 			}
 			return w.CollectAMQ(operation, amqCtx)
 		}
-		go runManagedNotificationAMQWatch(ctx, watchCtx, watchTimeout, maxRetries, backoff, maxBackoff, watchAMQ, collectAMQ, results)
+		go runManagedNotificationAMQWatch(ctx, watchCtx, true, watchTimeout, maxRetries, backoff, maxBackoff, watchAMQ, collectAMQ, results)
 	}
 	type scanResult struct {
 		summary notifyDeliverySummary
@@ -842,6 +876,8 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 			rec.Health, rec.LastError = "degraded", amqDegraded
 		case fsDegraded != "":
 			rec.Health, rec.LastError = "degraded", fsDegraded
+		case rec.LastScanAt.IsZero():
+			rec.Health, rec.LastError = "starting", ""
 		default:
 			rec.Health, rec.LastError = "healthy", ""
 		}
@@ -862,6 +898,51 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 		}()
 		return nil
 	}
+	shutdownDone := false
+	var shutdownErr error
+	shutdown := func() error {
+		if shutdownDone {
+			return shutdownErr
+		}
+		shutdownDone = true
+		cancel()
+		waitAMQ := amqDone != nil
+		waitScan := inFlight
+		if !waitAMQ && !waitScan {
+			return nil
+		}
+		timer := time.NewTimer(notificationWatcherShutdownTimeout)
+		defer timer.Stop()
+		for waitAMQ || waitScan {
+			select {
+			case _, ok := <-amqDone:
+				if !ok {
+					amqDone = nil
+					waitAMQ = false
+				}
+			case <-scanDone:
+				inFlight = false
+				waitScan = false
+			case <-timer.C:
+				switch {
+				case waitAMQ && waitScan:
+					shutdownErr = fmt.Errorf("notification watcher AMQ watch and delivery did not stop within %s after cancellation", notificationWatcherShutdownTimeout)
+				case waitAMQ:
+					shutdownErr = fmt.Errorf("notification watcher AMQ watch did not stop within %s after cancellation", notificationWatcherShutdownTimeout)
+				default:
+					shutdownErr = fmt.Errorf("notification watcher delivery did not stop within %s after cancellation", notificationWatcherShutdownTimeout)
+				}
+				return shutdownErr
+			}
+		}
+		return nil
+	}
+	defer func() {
+		cleanupErr := shutdown()
+		if cleanupErr != nil && !errors.Is(returnErr, cleanupErr) {
+			returnErr = errors.Join(returnErr, cleanupErr)
+		}
+	}()
 	if err := startScan(); err != nil {
 		return err
 	}
@@ -877,32 +958,8 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 	for {
 		select {
 		case <-w.Stop:
-			cancel()
-			if amqDone != nil {
-				deadline := time.NewTimer(2 * time.Second)
-				for amqDone != nil {
-					select {
-					case _, ok := <-amqDone:
-						if !ok {
-							amqDone = nil
-						}
-					case <-deadline.C:
-						return fmt.Errorf("notification watcher AMQ watch did not stop after cancellation")
-					}
-				}
-				if !deadline.Stop() {
-					select {
-					case <-deadline.C:
-					default:
-					}
-				}
-			}
-			if inFlight {
-				select {
-				case <-scanDone:
-				case <-time.After(2 * time.Second):
-					return fmt.Errorf("notification watcher delivery did not stop after cancellation")
-				}
+			if err := shutdown(); err != nil {
+				return err
 			}
 			if err := releaseNotificationWatcherLease(path, &rec, w.Token, nowFn()); err != nil {
 				return err
@@ -911,9 +968,21 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 		case result, ok := <-amqDone:
 			if !ok {
 				amqDone = nil
+				if !shutdownDone && rec.WatchRunning {
+					rec.WatchRunning = false
+					amqDegraded = "managed AMQ watch stopped unexpectedly; fsnotify/rescan fallback remains active"
+					updateHealth()
+					if err := refreshNotificationWatcherLease(path, &rec, w.Token, nowFn()); err != nil {
+						return err
+					}
+				}
 				continue
 			}
-			rec.WatchRestarts = result.Failures
+			rec.WatchRunning = !result.Exhausted
+			rec.WatchRestarts = result.WatchRestarts
+			rec.WatchFailures = result.FailureStreak
+			rec.CollectPending = result.PendingCollect
+			rec.CollectRetries = result.CollectRetries
 			if result.Fatal {
 				return result.Err
 			}
@@ -927,7 +996,6 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 				amqDegraded = result.Err.Error()
 				if result.Exhausted {
 					amqDegraded += "; managed AMQ watch exhausted; fsnotify/rescan fallback remains active; use bounded amq-squad monitor for manual backstop"
-					amqDone = nil
 				}
 			} else {
 				amqDegraded = ""
@@ -996,6 +1064,9 @@ func executeNotificationWatcher(w notificationWatcherExecution) error {
 			}
 			currentTeam, teamErr := team.ReadProfile(w.ProjectDir, profile)
 			if teamErr == nil && !team.EffectiveOperatorNotifications(currentTeam.Operator).Enabled {
+				if err := shutdown(); err != nil {
+					return err
+				}
 				if err := releaseNotificationWatcherLease(path, &rec, w.Token, nowFn()); err != nil {
 					return err
 				}
@@ -1109,6 +1180,7 @@ func releaseNotificationWatcherLease(path string, rec *notificationWatcherRecord
 		current.PID = 0
 		current.OwnerToken = ""
 		current.Expected = false
+		current.WatchRunning = false
 		current.Health = "inactive"
 		current.LastError = ""
 		current.HeartbeatAt = now

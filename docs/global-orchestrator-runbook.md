@@ -57,11 +57,14 @@ scans arbitrary repositories and never executes an action; every mutation is
 confirmation-gated.
 
 For registered project runs, watcher state includes the managed AMQ backend,
-its exact operator mailbox binding, bounded restart count, and last
-watch/collect timestamps. `amq watch` is only a non-consuming wake signal; the
-scoped watcher then performs one root-correct safe collect and drives the
-existing attention notifier. Exhausted watch retries degrade visibly while the
-fsnotify/periodic-rescan path remains active. Use bounded
+its exact operator mailbox binding, running state, lifetime watch restart
+count, current failure streak, pending-collect state, collect retry count, and
+last watch/collect timestamps. `amq watch` is only a non-consuming wake signal;
+its JSON event is validated before the scoped watcher performs one root-correct
+safe collect and drives the existing attention notifier. Failed collects
+replay independently of later signals, including one safe replay pass at
+watcher startup. Exhausted watch retries render the backend not running and
+degraded while the fsnotify/periodic-rescan path remains active. Use bounded
 `amq-squad monitor --once` as the explicit manual fallback.
 
 Then drive each run by explicit namespace (`goal draft`/`goal start`,

@@ -184,7 +184,7 @@ func executeCollectDrainContext(operation context.Context, out io.Writer, ctx am
 		return false, err
 	}
 	journal := newCollectJournal(ctx)
-	unlock, err := lockCollectJournal(journal.Root)
+	unlock, err := lockCollectJournalContext(operation, journal.Root)
 	if err != nil {
 		return false, err
 	}

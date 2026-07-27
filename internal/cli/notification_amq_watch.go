@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -25,10 +27,23 @@ type notificationAMQWatchResult struct {
 	Signaled         bool
 	CollectAttempted bool
 	Collected        bool
-	Failures         int
+	PendingCollect   bool
+	FailureStreak    int
+	WatchRestarts    int
+	CollectRetries   int
+	RetryStarted     bool
 	Exhausted        bool
 	Fatal            bool
 	Err              error
+}
+
+type notificationAMQWatchOutput struct {
+	Event    string                        `json:"event"`
+	Messages []notificationAMQWatchMessage `json:"messages,omitempty"`
+}
+
+type notificationAMQWatchMessage struct {
+	ID string `json:"id"`
 }
 
 func notificationAMQWatchSettings(w notificationWatcherExecution) (time.Duration, int, time.Duration, time.Duration) {
@@ -116,7 +131,8 @@ func runNotificationAMQWatch(ctx context.Context, amqCtx amqContext, timeout tim
 	cmd := exec.CommandContext(ctx, "amq", args...)
 	cmd.Dir = amqCtx.ProjectDir
 	cmd.Env = amqexec.NoUpdateCheckEnv(amqCommandEnv(amqCtx))
-	cmd.Stdout = io.Discard
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = io.Discard
 	err := cmd.Run()
 	if ctx.Err() != nil {
@@ -128,7 +144,36 @@ func runNotificationAMQWatch(ctx context.Context, amqCtx amqContext, timeout tim
 		}
 		return false, fmt.Errorf("managed AMQ watch: %w", err)
 	}
-	return true, nil
+	signaled, err := parseNotificationAMQWatchOutput(stdout.Bytes())
+	if err != nil {
+		return false, fmt.Errorf("managed AMQ watch output: %w", err)
+	}
+	return signaled, nil
+}
+
+func parseNotificationAMQWatchOutput(data []byte) (bool, error) {
+	var result notificationAMQWatchOutput
+	if err := json.Unmarshal(data, &result); err != nil {
+		return false, fmt.Errorf("parse JSON: %w", err)
+	}
+	switch result.Event {
+	case "existing", "new_message":
+		if len(result.Messages) == 0 {
+			return false, fmt.Errorf("event %q contained no messages", result.Event)
+		}
+		for i, message := range result.Messages {
+			if strings.TrimSpace(message.ID) == "" {
+				return false, fmt.Errorf("event %q message %d is missing id", result.Event, i)
+			}
+		}
+		return true, nil
+	case "timeout":
+		return false, fmt.Errorf("unexpected successful timeout event")
+	case "":
+		return false, fmt.Errorf("missing event")
+	default:
+		return false, fmt.Errorf("unsupported event %q", result.Event)
+	}
 }
 
 func collectNotificationAMQ(ctx context.Context, amqCtx amqContext) (bool, error) {
@@ -145,6 +190,7 @@ func collectNotificationAMQ(ctx context.Context, amqCtx amqContext) (bool, error
 func runManagedNotificationAMQWatch(
 	ctx context.Context,
 	amqCtx amqContext,
+	collectFirst bool,
 	timeout time.Duration,
 	maxRetries int,
 	initialBackoff time.Duration,
@@ -154,7 +200,10 @@ func runManagedNotificationAMQWatch(
 	results chan<- notificationAMQWatchResult,
 ) {
 	defer close(results)
-	failures := 0
+	failureStreak := 0
+	watchRestarts := 0
+	collectRetries := 0
+	pendingCollect := collectFirst
 	backoff := initialBackoff
 	emit := func(result notificationAMQWatchResult) bool {
 		select {
@@ -165,33 +214,53 @@ func runManagedNotificationAMQWatch(
 		}
 	}
 	for {
-		signaled, err := watch(ctx, amqCtx, timeout)
+		result := notificationAMQWatchResult{
+			At:             time.Now().UTC(),
+			PendingCollect: pendingCollect,
+			WatchRestarts:  watchRestarts,
+			CollectRetries: collectRetries,
+		}
+		var err error
+		if pendingCollect {
+			result.CollectAttempted = true
+			result.Collected, err = collect(ctx, amqCtx)
+		} else {
+			result.Signaled, err = watch(ctx, amqCtx, timeout)
+			if err == nil && result.Signaled {
+				pendingCollect = true
+				result.PendingCollect = true
+				result.CollectAttempted = true
+				result.Collected, err = collect(ctx, amqCtx)
+			}
+		}
 		if ctx.Err() != nil {
 			return
 		}
-		result := notificationAMQWatchResult{At: time.Now().UTC(), Signaled: signaled}
-		if err == nil && signaled {
-			result.CollectAttempted = true
-			result.Collected, err = collect(ctx, amqCtx)
-			if ctx.Err() != nil {
-				return
-			}
-		}
 		if err == nil {
-			recovered := failures > 0
-			failures = 0
+			if result.CollectAttempted {
+				pendingCollect = false
+			}
+			recovered := failureStreak > 0
+			failureStreak = 0
 			backoff = initialBackoff
-			if signaled || recovered {
+			result.PendingCollect = pendingCollect
+			result.FailureStreak = 0
+			result.WatchRestarts = watchRestarts
+			result.CollectRetries = collectRetries
+			if result.Signaled || result.CollectAttempted || recovered {
 				if !emit(result) {
 					return
 				}
 			}
 			continue
 		}
-		failures++
-		result.Failures = failures
+		failureStreak++
+		result.FailureStreak = failureStreak
+		result.PendingCollect = pendingCollect
 		result.Fatal = errors.Is(err, errNotificationAMQOwnershipLost)
-		result.Exhausted = result.Fatal || failures >= maxRetries
+		result.Exhausted = result.Fatal || failureStreak >= maxRetries
+		result.WatchRestarts = watchRestarts
+		result.CollectRetries = collectRetries
 		result.Err = err
 		if !emit(result) || result.Exhausted {
 			return
@@ -206,6 +275,22 @@ func runManagedNotificationAMQWatch(
 				default:
 				}
 			}
+			return
+		}
+		if result.CollectAttempted {
+			collectRetries++
+		} else {
+			watchRestarts++
+		}
+		if !emit(notificationAMQWatchResult{
+			At:             time.Now().UTC(),
+			PendingCollect: pendingCollect,
+			FailureStreak:  failureStreak,
+			WatchRestarts:  watchRestarts,
+			CollectRetries: collectRetries,
+			RetryStarted:   true,
+			Err:            err,
+		}) {
 			return
 		}
 		if backoff < maxBackoff {

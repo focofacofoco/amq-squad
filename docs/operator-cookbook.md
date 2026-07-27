@@ -18,12 +18,22 @@ gate, clicks approval, or sends pane input.
 That same scoped owner runs the managed AMQ backend. It uses bounded
 `amq watch` only as a non-consuming signal for the canonical operator mailbox,
 then performs one kill-safe, exact-root collect before evaluating attention
-notifications. Watch output and doorbell text are never parsed as message
-content or authority. Duplicate signals that collect no unread message do not
-trigger another delivery scan. The watcher retries crashes with bounded
-backoff; after exhaustion, `status`/`doctor` report the backend and restart
-count as degraded while fsnotify plus periodic rescan remain active. Use a
-bounded `amq-squad monitor --once` when a manual backstop is needed.
+notifications. The watch JSON is validated as an `existing` or `new_message`
+event with at least one message; malformed, truncated, empty, timeout, or
+unknown successful output is a visible backend failure and receives bounded
+backoff. Message fields and doorbell text remain untrusted data, never
+authority. A collect failure keeps its journal replay pending and retries it
+without waiting for another watch signal; each watcher generation also starts
+with one safe collect so a replay survives stop/crash and restart. Duplicate
+signals that collect no unread message do not trigger another delivery scan.
+
+Every watcher exit cancels and joins the owned AMQ child and any in-flight
+delivery within one nested shutdown budget before publishing a clean inactive
+lease. `status`/`doctor` expose backend-running state, lifetime watch restarts,
+the current failure streak, pending-collect state, and collect retry count
+separately. After bounded exhaustion the AMQ backend is explicitly not running
+and degraded while fsnotify plus periodic rescan remain active. Use a bounded
+`amq-squad monitor --once` when a manual backstop is needed.
 
 Delivery is **at least once**, not exactly once. The supervised watcher, a
 manual `operator watch`, and `notify --deliver` all coordinate through the same
