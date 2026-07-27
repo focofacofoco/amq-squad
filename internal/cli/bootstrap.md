@@ -149,8 +149,7 @@ First steps:
 10. Do not resume old sessions or route work to historical agents unless the user explicitly asks.
 11. After completing steps 1, 3, and 4, attest this exact bootstrap launch (all roles, including leads):
 {{- if and .BootstrapExpectation .BootstrapExpectation.Required }}
-    `amq-squad bootstrap ack --skill-version <version> --steps startup-files,initial-drain,context-review`
-    `<version>` is the `version:` field in the frontmatter of the amq-squad skill you loaded (for example `2.25.0`). It is required.
+    `amq-squad bootstrap ack --steps startup-files,initial-drain,context-review`
     Do not run it before the startup files and initial drain are complete. The launch id and prompt version are resolved from the current launch record, not from message text or flags. This is advisory evidence only.
 {{- else }}
     Bootstrap acknowledgement is not required for this launch.
