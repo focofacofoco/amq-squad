@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 	"strings"
 	"testing"
 )
@@ -16,62 +17,77 @@ import (
 func TestVerifyPaneProcessLaunchedRefusesEveryUnprovenPane(t *testing.T) {
 	const requested = "%7"
 
+	found := func(pane string, pid int) func(string) tmuxpane.PaneInspection {
+		return func(string) tmuxpane.PaneInspection {
+			return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionFound, Pane: tmuxpane.TmuxPane{Pane: pane, PID: pid}}
+		}
+	}
 	for _, tc := range []struct {
 		name string
-		// reply is what tmux answers for "#{pane_id}\t#{pane_pid}\t#{pane_dead}"
-		reply   string
-		err     error
-		wantErr string
+		// inspection is what the SHARED resolver reports; dead is the separate #{pane_dead} read.
+		inspection func(string) tmuxpane.PaneInspection
+		dead       string
+		wantErr    string
 	}{
 		{
-			name:    "empty pid means the command never started",
-			reply:   requested + "\t\t0",
+			name:       "empty pid means the command never started",
+			inspection: found(requested, 0), dead: "0\n",
 			wantErr: "no running process",
 		},
 		{
-			name:    "zero pid is not a process",
-			reply:   requested + "\t0\t0",
-			wantErr: "no running process",
+			// The launcher-shell case, now caught INSIDE the shared resolver: it verifies the
+			// returned row is the requested pane and reports Gone rather than answering about a
+			// different one. Round 3 re-derived this check badly; round 4 delegates it.
+			name: "resolver reports the pane gone",
+			inspection: func(string) tmuxpane.PaneInspection {
+				return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionGone, Detail: "no such pane"}
+			},
+			dead:    "0\n",
+			wantErr: "no longer exists",
 		},
 		{
-			// The launcher-shell case. tmux resolves an unresolvable target to the ACTIVE
-			// pane, so a fast-exiting worker yields a real, live pid belonging to the
-			// launching shell. The old check accepted it and reported the worker launched.
-			name:    "missing-target fallback answers about a different pane",
-			reply:   "%1\t99999\t0",
-			wantErr: "DIFFERENT pane",
-		},
-		{
-			// remain-on-exit retains the pane and its last pid, so a pid alone cannot
-			// distinguish running from just-exited.
-			name:    "dead pane still reports its last pid",
-			reply:   requested + "\t4242\t1",
+			// remain-on-exit keeps a dead pane reporting its last pid, so a pid alone cannot
+			// distinguish running from just-exited. This is why pane_dead stays a separate read.
+			name:       "dead pane still reports its last pid",
+			inspection: found(requested, 4242), dead: "1\n",
 			wantErr: "is dead",
 		},
 		{
-			name:    "incomplete reply must not be parsed as a pid",
-			reply:   requested + "\t4242",
-			wantErr: "incomplete identity",
+			// UNPROVEN is not absent. A transient iTerm2 -CC pause must fail CLOSED here, and
+			// must NOT be reported as Gone -- the distinction is the resolver's whole point.
+			name: "unavailable is unproven, not gone",
+			inspection: func(string) tmuxpane.PaneInspection {
+				return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionUnavailable, Detail: "control mode paused"}
+			},
+			dead:    "0\n",
+			wantErr: "unproven evidence",
 		},
 		{
-			name:    "tmux query failure is never success",
-			err:     fmt.Errorf("no such pane"),
-			wantErr: "read pane process id",
+			name: "malformed is unproven",
+			inspection: func(string) tmuxpane.PaneInspection {
+				return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionMalformed, Detail: "empty row"}
+			},
+			dead:    "0\n",
+			wantErr: "unproven evidence",
+		},
+		{
+			name:       "blank liveness field cannot confirm the command is running",
+			inspection: found(requested, 4242), dead: "\n",
+			wantErr: "no liveness field",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			old := tmuxOutputCommand
-			t.Cleanup(func() { tmuxOutputCommand = old })
-			tmuxOutputCommand = func(string, ...string) (string, error) {
-				if tc.err != nil {
-					return "", tc.err
-				}
-				return tc.reply, nil
-			}
+			// F3 routes identity through the shared resolver, so the fake goes on THAT seam.
+			// tmuxpane owns its exec seam privately, which is exactly why inspectPaneExact exists.
+			oldInspect, oldOut := inspectPaneExact, tmuxOutputCommand
+			t.Cleanup(func() { inspectPaneExact, tmuxOutputCommand = oldInspect, oldOut })
+			inspectPaneExact = func(id string) tmuxpane.PaneInspection { return tc.inspection(id) }
+			// pane_dead is still read directly, because paneListFormat does not carry it.
+			tmuxOutputCommand = func(string, ...string) (string, error) { return tc.dead, nil }
 
 			pid, err := verifyPaneProcessLaunched(requested)
 			if err == nil {
-				t.Fatalf("reply %q was ACCEPTED and returned pid %q; an unproven pane must refuse", tc.reply, pid)
+				t.Fatalf("case %q was ACCEPTED and returned pid %q; an unproven pane must refuse", tc.name, pid)
 			}
 			if !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("refusal must name the reason %q so the operator knows what failed; got: %v", tc.wantErr, err)
@@ -87,9 +103,12 @@ func TestVerifyPaneProcessLaunchedRefusesEveryUnprovenPane(t *testing.T) {
 // pane that IS the requested one, alive, with a real pid, is accepted. Without this the
 // refusal table could all pass while the function rejected everything.
 func TestVerifyPaneProcessLaunchedAcceptsTheRequestedLivePane(t *testing.T) {
-	old := tmuxOutputCommand
-	t.Cleanup(func() { tmuxOutputCommand = old })
-	tmuxOutputCommand = func(string, ...string) (string, error) { return "%7\t4242\t0", nil }
+	oldInspect, oldOut := inspectPaneExact, tmuxOutputCommand
+	t.Cleanup(func() { inspectPaneExact, tmuxOutputCommand = oldInspect, oldOut })
+	inspectPaneExact = func(string) tmuxpane.PaneInspection {
+		return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionFound, Pane: tmuxpane.TmuxPane{Pane: "%7", PID: 4242}}
+	}
+	tmuxOutputCommand = func(string, ...string) (string, error) { return "0\n", nil }
 
 	pid, err := verifyPaneProcessLaunched("%7")
 	if err != nil {
@@ -104,12 +123,12 @@ func TestVerifyPaneProcessLaunchedAcceptsTheRequestedLivePane(t *testing.T) {
 // -t target resolves to the ACTIVE pane, which is the launcher -- so a missing identity would
 // otherwise verify the launcher's own shell and call the worker launched.
 func TestVerifyPaneProcessLaunchedRefusesAnEmptyIdentity(t *testing.T) {
-	old := tmuxOutputCommand
-	t.Cleanup(func() { tmuxOutputCommand = old })
+	oldInspect := inspectPaneExact
+	t.Cleanup(func() { inspectPaneExact = oldInspect })
 	queried := false
-	tmuxOutputCommand = func(string, ...string) (string, error) {
+	inspectPaneExact = func(string) tmuxpane.PaneInspection {
 		queried = true
-		return "%1\t4242\t0", nil
+		return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionFound, Pane: tmuxpane.TmuxPane{Pane: "%1", PID: 4242}}
 	}
 
 	if _, err := verifyPaneProcessLaunched("  "); err == nil {
@@ -120,132 +139,146 @@ func TestVerifyPaneProcessLaunchedRefusesAnEmptyIdentity(t *testing.T) {
 	}
 }
 
-// #577 round 2 finding 3: the session backend must never deliver to a pane it did not
-// create. Round 1 refused an occupied NAME, then re-resolved the same name after creation --
-// reopening the hole, because a same-named window can appear between precheck and lookup.
+// #577 round 4: the four cases the review named, table-driven, because the round-3 test could
+// not see two of them -- it modelled every --create as adding a pane, so the fixture encoded the
+// same assumption as the code it guarded.
 //
-// The property is now stronger than a refusal: delivery targets the pane identified by SET
-// DIFFERENCE, so a pre-existing operator pane with the same window name is simply never the
-// target. This asserts the operator's pane is untouched, which a refusal-only test could not.
-func TestTmuxSessionDeliversOnlyToThePaneItCreated(t *testing.T) {
-	oldOut := tmuxOutputCommand
-	oldRun := tmuxRunCommand
-	oldLook := tmuxSessionLookPath
-	t.Cleanup(func() {
-		tmuxOutputCommand = oldOut
-		tmuxRunCommand = oldRun
-		tmuxSessionLookPath = oldLook
-	})
-	tmuxSessionLookPath = func(string) (string, error) { return "/usr/bin/tmux-session", nil }
-
-	// %23 is an operator's live pane in a window that happens to carry the role name.
-	// Creation adds %24. Only %24 may be delivered to.
-	created := false
-	tmuxOutputCommand = func(name string, args ...string) (string, error) {
-		call := strings.Join(args, " ")
-		if strings.Contains(call, "list-panes") {
-			if created {
-				return "%23\n%24\n", nil
+// The launcher must deliver ONLY to a pane it can attribute to its own --create: novel pane AND
+// novel window AND that window named for the role this create targeted. Novelty alone proves
+// count, not causality.
+func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// sessions is the list-sessions reply; err is its error.
+		sessions    string
+		sessionsErr error
+		// before/after are list-panes replies: "<pane> <window> <name>" per line.
+		before      string
+		after       string
+		wantDeliver string // "" = must refuse
+		wantErr     string
+	}{
+		{
+			// F1: a fresh workstream must LAUNCH. The round-3 code refused here, making the
+			// backend's first launch structurally impossible.
+			name: "fresh workstream launches", sessions: "other-session\n",
+			after: "%5 @9 cto\n", wantDeliver: "%5",
+		},
+		{
+			// F1: a transient probe failure on a POPULATED session must refuse, not be read as
+			// fresh. Read-as-fresh is what let an operator's pane look novel and get destroyed.
+			name: "transient probe failure refuses", sessionsErr: errTmuxProbeFailed,
+			wantErr: "cannot be enumerated",
+		},
+		{
+			// F1: no server at all IS provable vacancy -- no server, no panes.
+			name: "no server running is proven vacancy", sessionsErr: errNoTmuxServer,
+			after: "%5 @9 cto\n", wantDeliver: "%5",
+		},
+		{
+			// F2 case A: --create selected an existing role window and created NOTHING. The
+			// round-3 fixture could not express this at all.
+			name: "created nothing refuses", sessions: "issue-96\n",
+			before: "%23 @4 cto\n", after: "%23 @4 cto\n",
+			wantErr: "no new pane in a new window",
+		},
+		{
+			// F2 case B, the interleaving that defeated novelty: --create created nothing AND an
+			// operator's pane arrived in a NEW window. Novel pane, novel window, wrong name.
+			// Round 3 would have accepted this and killed the operator's pane.
+			name: "operator pane in a new window refuses", sessions: "issue-96\n",
+			before: "%23 @4 cto\n", after: "%23 @4 cto\n%77 @8 operator-scratch\n",
+			wantErr: "no new pane in a new window",
+		},
+		{
+			// The companion: a genuine create IS attributable, so the refusals above are not the
+			// function rejecting everything.
+			name: "genuine create is attributed", sessions: "issue-96\n",
+			before: "%23 @4 qa\n", after: "%23 @4 qa\n%24 @5 cto\n", wantDeliver: "%24",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldOut, oldRun, oldLook, oldSessionRun := tmuxOutputCommand, tmuxRunCommand, tmuxSessionLookPath, tmuxSessionRunCommand
+			t.Cleanup(func() {
+				tmuxOutputCommand, tmuxRunCommand, tmuxSessionLookPath, tmuxSessionRunCommand = oldOut, oldRun, oldLook, oldSessionRun
+			})
+			tmuxSessionLookPath = func(string) (string, error) { return "/usr/bin/tmux-session", nil }
+			oldInspect := inspectPaneExact
+			t.Cleanup(func() { inspectPaneExact = oldInspect })
+			inspectPaneExact = func(id string) tmuxpane.PaneInspection {
+				return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionFound, Pane: tmuxpane.TmuxPane{Pane: id, PID: 4242}}
 			}
-			return "%23\n", nil
-		}
-		if strings.Contains(call, "#{pane_pid}") {
-			return fakePaneIdentityReply(args), nil
-		}
-		return "", fmt.Errorf("unexpected output command: %s %s", name, call)
-	}
-	var respawnTargets []string
-	tmuxRunCommand = func(name string, args ...string) error {
-		for i, a := range args {
-			if a == "respawn-pane" {
-				for j := i; j < len(args)-1; j++ {
-					if args[j] == "-t" {
-						respawnTargets = append(respawnTargets, args[j+1])
+
+			created := false
+			tmuxSessionRunCommand = func(name string, args ...string) error {
+				if strings.Contains(strings.Join(args, " "), "--create") {
+					created = true
+				}
+				return nil
+			}
+			tmuxOutputCommand = func(name string, args ...string) (string, error) {
+				call := strings.Join(args, " ")
+				switch {
+				case strings.Contains(call, "list-sessions"):
+					// After --create the session EXISTS, even on a fresh workstream -- that is what
+					// the wrapper does. Returning the pre-create listing both times made the
+					// post-create lookup see a vacant server and refuse a healthy launch: the
+					// fixture, not the fix, was wrong.
+					if created {
+						return "issue-96\n", nil
+					}
+					return tc.sessions, tc.sessionsErr
+				case strings.Contains(call, "list-panes"):
+					if created {
+						return tc.after, nil
+					}
+					return tc.before, nil
+				case strings.Contains(call, "#{pane_dead}"):
+					// F3 split the read: identity comes from the shared resolver, and this seam now
+					// answers ONLY #{pane_dead}. Returning the old three-field reply here made a live
+					// pane read as dead -- the fixture lagging the production split, again.
+					return "0\n", nil
+				}
+				return "", fmt.Errorf("unexpected output command: %s %s", name, call)
+			}
+			var delivered []string
+			tmuxRunCommand = func(name string, args ...string) error {
+				for i, a := range args {
+					if a == "respawn-pane" {
+						for j := i; j < len(args)-1; j++ {
+							if args[j] == "-t" {
+								delivered = append(delivered, args[j+1])
+							}
+						}
 					}
 				}
+				return nil
 			}
-		}
-		return nil
-	}
-	oldSessionRun := tmuxSessionRunCommand
-	t.Cleanup(func() { tmuxSessionRunCommand = oldSessionRun })
-	tmuxSessionRunCommand = func(name string, args ...string) error {
-		if strings.Contains(strings.Join(args, " "), "--create") {
-			created = true
-		}
-		return nil
-	}
 
-	if err := runTmuxSessionLaunchPlan(tmuxSessionLaunchPlan{
-		Workstream: "issue-96",
-		Panes:      []teamLaunchPane{{Role: "cto", CWD: "/repo", Command: "agent up"}},
-	}); err != nil {
-		t.Fatalf("a creatable window must launch: %v", err)
-	}
+			err := runTmuxSessionLaunchPlan(tmuxSessionLaunchPlan{
+				Workstream: "issue-96",
+				Panes:      []teamLaunchPane{{Role: "cto", CWD: "/repo", Command: "agent up"}},
+			})
 
-	if len(respawnTargets) != 1 {
-		t.Fatalf("expected exactly one delivery, got %v", respawnTargets)
-	}
-	if respawnTargets[0] == "%23" {
-		t.Fatal("delivered to the PRE-EXISTING pane %23: respawn-pane -k would KILL the operator's live shell")
-	}
-	if respawnTargets[0] != "%24" {
-		t.Errorf("delivery target = %q, want the created pane %%24", respawnTargets[0])
-	}
-	for _, target := range respawnTargets {
-		if !strings.HasPrefix(target, "%") {
-			t.Errorf("delivery target %q is not an exact pane id; a name can resolve to someone else's pane", target)
-		}
-	}
-}
-
-// An unreadable pre-creation snapshot must REFUSE, not proceed. Round 1's precheck returned
-// vacant on a query error while its own doc comment promised fail-safe; that contradiction is
-// the reason this test exists rather than being folded into the one above.
-func TestTmuxSessionRefusesWhenItCannotEnumeratePanes(t *testing.T) {
-	oldOut := tmuxOutputCommand
-	oldRun := tmuxRunCommand
-	oldLook := tmuxSessionLookPath
-	t.Cleanup(func() {
-		tmuxOutputCommand = oldOut
-		tmuxRunCommand = oldRun
-		tmuxSessionLookPath = oldLook
-	})
-	tmuxSessionLookPath = func(string) (string, error) { return "/usr/bin/tmux-session", nil }
-	tmuxOutputCommand = func(string, ...string) (string, error) {
-		return "", fmt.Errorf("tmux: no server running")
-	}
-	oldSessionRun := tmuxSessionRunCommand
-	t.Cleanup(func() { tmuxSessionRunCommand = oldSessionRun })
-	createCalled := false
-	tmuxSessionRunCommand = func(name string, args ...string) error {
-		createCalled = true
-		return nil
-	}
-	defer func() {
-		if createCalled {
-			t.Error("must refuse BEFORE creating: a window created and then abandoned is operator litter")
-		}
-	}()
-	delivered := false
-	tmuxRunCommand = func(name string, args ...string) error {
-		for _, a := range args {
-			if a == "respawn-pane" {
-				delivered = true
+			if tc.wantDeliver == "" {
+				if err == nil {
+					t.Fatalf("must refuse; delivered to %v", delivered)
+				}
+				if len(delivered) != 0 {
+					t.Fatalf("refused but STILL delivered to %v: respawn-pane -k would destroy a pane this launcher does not own", delivered)
+				}
+				if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("refusal must say why (%q): %v", tc.wantErr, err)
+				}
+				return
 			}
-		}
-		return nil
-	}
-
-	err := runTmuxSessionLaunchPlan(tmuxSessionLaunchPlan{
-		Workstream: "issue-96",
-		Panes:      []teamLaunchPane{{Role: "cto", CWD: "/repo", Command: "agent up"}},
-	})
-	if err == nil {
-		t.Fatal("an unreadable pane snapshot must refuse: it cannot prove the target is not an operator's pane")
-	}
-	if delivered {
-		t.Fatal("delivered despite being unable to enumerate panes")
+			if err != nil {
+				t.Fatalf("a launch this launcher can attribute must proceed: %v", err)
+			}
+			if len(delivered) != 1 || delivered[0] != tc.wantDeliver {
+				t.Errorf("delivered to %v, want exactly [%s]", delivered, tc.wantDeliver)
+			}
+		})
 	}
 }
 
@@ -289,3 +322,11 @@ func fakePaneIdentityReply(args []string) string {
 	}
 	return target + "\t4242\t0\n"
 }
+
+// Distinct sentinels so the table can express "the tmux server is absent" (provable vacancy)
+// separately from "the probe failed for some other reason" (a refusal). #577 round 4: conflating
+// them is exactly what made a failed probe a licence to destroy an operator's pane.
+var (
+	errNoTmuxServer    = fmt.Errorf("no server running on /tmp/tmux-501/default")
+	errTmuxProbeFailed = fmt.Errorf("tmux: connection interrupted")
+)

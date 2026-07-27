@@ -168,9 +168,9 @@ func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 		// Snapshot the session's panes BEFORE creating, so the pane this launcher causes can
 		// be identified by difference rather than by name. An unreadable snapshot is a refusal:
 		// delivery replaces a pane's process, so an unverifiable target may be an operator's.
-		before, snapshotOK := tmuxSessionPaneIDs(plan.Workstream)
+		before, snapshotOK := tmuxSessionWindowIDs(plan.Workstream)
 		if !snapshotOK {
-			return fmt.Errorf("refusing to launch %s: cannot enumerate existing panes in session %s, so a freshly created pane cannot be told apart from one already in use. Delivery replaces a pane's process and would risk an operator's window",
+			return fmt.Errorf("refusing to launch %s: session %s exists but its panes cannot be enumerated, so a freshly created pane cannot be told apart from one already in use. Delivery replaces a pane's process and would risk an operator's window",
 				pane.Role, plan.Workstream)
 		}
 		if err := tmuxSessionRunCommand(tmuxSessionBinary, tmuxSessionCreateArgv(plan.Workstream, pane.Role, pane.CWD)...); err != nil {
@@ -225,58 +225,136 @@ func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 	return nil
 }
 
-// tmuxSessionPaneIDs lists every pane id in the session, or reports that it could not.
+// tmuxSessionWindowIDs maps pane id -> location for every pane in the session, and reports
+// whether that answer is TRUSTWORTHY.
 //
-// The bool is "this answer is trustworthy", NOT "panes exist". #577 round 2 finding 3: the
-// previous precheck returned VACANT on a query error while its own doc comment promised
-// fail-safe. A function whose documentation asserts the opposite of its behaviour is worse
-// than an undocumented one, because the reviewer reads the promise.
-func tmuxSessionPaneIDs(workstream string) (map[string]bool, bool) {
-	out, err := tmuxOutputCommand("tmux", "list-panes", "-s", "-t", workstream, "-F", "#{pane_id}")
+// #577 round 3 finding 1: an earlier version enumerated the session before the first --create,
+// so on a FRESH workstream list-panes exited nonzero, the answer was judged untrustworthy, and
+// the backend refused -- making its first launch structurally impossible. A fail-closed check
+// was added on a path where the failing condition IS the normal initial state.
+//
+// The rule is that absence must be PROVEN, never inferred from an error. See the body for how,
+// and note that the round-4 review rejected the first attempt at this comment's own claim: a
+// failed probe is not proof of anything.
+func tmuxSessionWindowIDs(workstream string) (map[string]tmuxSessionPaneLocation, bool) {
+	// #577 round 4: the previous version treated a FAILED has-session probe as proven vacancy.
+	// It proves nothing: has-session exits nonzero for session-absent, for server-unreachable,
+	// and for any probe malfunction, and the exit code cannot tell them apart. The failure that
+	// mattered: a session holding one operator pane, has-session fails transiently, the
+	// before-map is trusted EMPTY, --create selects the existing role window, and the operator's
+	// pane then looks novel-in-a-novel-window and gets destroyed. A failed probe became a
+	// licence to delete.
+	//
+	// Vacancy is now proven by a SUCCESSFUL observation: list-sessions succeeds and the
+	// workstream is absent from its output. The single well-defined "no server running" error is
+	// also proof -- no server means no panes -- and is matched specifically rather than by
+	// treating all errors alike. ANY other failure is a refusal, exactly as for a session that
+	// exists and cannot be enumerated.
+	sessions, err := tmuxOutputCommand("tmux", "list-sessions", "-F", "#{session_name}")
 	if err != nil {
-		// Cannot prove anything. The caller must treat this as unsafe, never as vacant.
+		if tmuxNoServerRunning(err) {
+			return map[string]tmuxSessionPaneLocation{}, true
+		}
 		return nil, false
 	}
-	ids := map[string]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if id := strings.TrimSpace(line); id != "" {
-			ids[id] = true
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(sessions), "\n") {
+		if strings.TrimSpace(line) == workstream {
+			found = true
 		}
 	}
-	return ids, true
+	if !found {
+		// PROVEN vacancy: the server answered and this workstream is not among its sessions.
+		return map[string]tmuxSessionPaneLocation{}, true
+	}
+	out, err := tmuxOutputCommand("tmux", "list-panes", "-s", "-t", workstream, "-F", "#{pane_id} #{window_id} #{window_name}")
+	if err != nil {
+		// The session EXISTS and could not be enumerated: the genuine cannot-prove case.
+		return nil, false
+	}
+	panes := map[string]tmuxSessionPaneLocation{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) >= 2 {
+			loc := tmuxSessionPaneLocation{WindowID: fields[1]}
+			if len(fields) >= 3 {
+				loc.WindowName = strings.Join(fields[2:], " ")
+			}
+			panes[fields[0]] = loc
+		}
+	}
+	return panes, true
 }
 
-// tmuxSessionCreatedPaneID identifies the pane creation just made by SET DIFFERENCE against a
-// snapshot taken before creation.
+// tmuxSessionPaneLocation is where a pane sits: its window id and that window's name. Both are
+// needed because #577 round 4 requires a created pane to be attributable to THIS create, and
+// the wrapper's contract is one window per role NAMED BY ROLE.
+type tmuxSessionPaneLocation struct {
+	WindowID   string
+	WindowName string
+}
+
+// tmuxNoServerRunning matches the ONE tmux error that is affirmative evidence of no panes.
 //
-// #577 round 2 finding 3: re-resolving "<workstream>:<role>" by NAME after creation reopened
-// the very window the precheck was meant to close. Between precheck and lookup, a same-named
-// window can appear -- from an operator or a racing launch -- and the name then resolves to
-// THEIR pane, which respawn-pane -k proceeds to kill. A name is not an identity, and checking
-// the name twice does not make it one.
+// Matched narrowly and deliberately: broadening it would restore the exact bug above, where any
+// probe failure became proof of vacancy. Anything not matched here is a refusal.
+func tmuxNoServerRunning(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no server running") || strings.Contains(msg, "error connecting to")
+}
+
+// tmuxSessionCreatedPaneID identifies the pane this launcher's --create produced, requiring
+// both novelty AND provenance.
 //
-// The difference is name-independent: whatever appeared, the pane this launcher caused is the
-// one that was not there before. Exactly one new pane is required; zero or several means the
-// launcher cannot say which pane it owns, and it must not guess when the next step destroys
-// the target.
-func tmuxSessionCreatedPaneID(workstream, role string, before map[string]bool) (string, error) {
-	after, ok := tmuxSessionPaneIDs(workstream)
+// #577 round 3 finding 2, the sixth shape-not-proof instance: set difference proves COUNT, not
+// CAUSALITY. The interleaving that defeats it -- the role window already exists so --create
+// selects it and creates NOTHING, an operator concurrently creates one unrelated pane, the diff
+// is exactly {operator pane}, it is accepted, and respawn-pane -k destroys their live pane.
+//
+// So novelty is necessary and insufficient. The created pane must ALSO sit in a window that did
+// not exist before this create: that is what --create does, and an operator's pane in a
+// pre-existing window can no longer satisfy it. "The only new thing" is replaced by "the new
+// thing in a window I caused to exist".
+func tmuxSessionCreatedPaneID(workstream, role string, before map[string]tmuxSessionPaneLocation) (string, error) {
+	after, ok := tmuxSessionWindowIDs(workstream)
 	if !ok {
-		return "", fmt.Errorf("cannot enumerate panes in session %s after creating the %s window: refusing to deliver, because the next step replaces a pane's process and an unverified target may be an operator's", workstream, role)
+		return "", fmt.Errorf("cannot enumerate panes in session %s after creating the %s window: refusing to deliver, because delivery replaces a pane's process and an unverified target may be an operator's", workstream, role)
 	}
-	var created []string
-	for id := range after {
-		if !before[id] {
-			created = append(created, id)
+	beforeWindows := map[string]bool{}
+	for _, loc := range before {
+		beforeWindows[loc.WindowID] = true
+	}
+	var candidates []string
+	for pane, loc := range after {
+		if _, existed := before[pane]; existed {
+			continue
 		}
+		// The window must be new. Necessary, and #577 round 4 proved it insufficient: an
+		// operator's concurrent pane can arrive in a new window too.
+		if beforeWindows[loc.WindowID] {
+			continue
+		}
+		// ATTRIBUTION to THIS create: the wrapper's contract is one window per role, named by
+		// role, and the rename to the amq: token happens only AFTER delivery -- so at this
+		// instant our window is still named exactly <role>. Name alone is not identity, but
+		// name AND novelty narrows the residual to "an operator deliberately created a window
+		// named exactly this role during the launch instant", which is documentable, unlike the
+		// accidental collision that novelty alone admitted.
+		if loc.WindowName != role {
+			continue
+		}
+		candidates = append(candidates, pane)
 	}
-	sort.Strings(created)
-	switch len(created) {
+	sort.Strings(candidates)
+	switch len(candidates) {
 	case 1:
-		return created[0], nil
+		return candidates[0], nil
 	case 0:
-		return "", fmt.Errorf("creating the %s window in session %s produced no new pane: treating that as success is how an unlaunched worker counted as launched", role, workstream)
+		return "", fmt.Errorf("creating the %s window in session %s produced no new pane in a new window named %q: either the window already existed and --create selected it, or creation produced nothing. This launcher cannot attribute any pane to its own create, and delivery would replace a pane it did not create", role, workstream, role)
 	default:
-		return "", fmt.Errorf("creating the %s window in session %s produced %d new panes (%s); the launcher cannot identify which pane it owns, and delivery would replace one of them", role, workstream, len(created), strings.Join(created, " "))
+		return "", fmt.Errorf("creating the %s window in session %s produced %d panes in new windows (%s); exactly one is required to attribute the pane to this create", role, workstream, len(candidates), strings.Join(candidates, " "))
 	}
 }

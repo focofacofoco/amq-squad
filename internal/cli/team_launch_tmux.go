@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -382,17 +384,38 @@ func verifyPaneProcessLaunched(paneID string) (string, error) {
 	if paneID == "" {
 		return "", fmt.Errorf("cannot verify launch: no pane identity was captured")
 	}
-	out, err := tmuxOutputCommand("tmux", "display-message", "-p", "-t", paneID, "#{pane_id}\t#{pane_pid}\t#{pane_dead}")
-	if err != nil {
-		return "", fmt.Errorf("read pane process id for %s: %w", paneID, err)
+	// #577 round 3 finding 3: this function is the pane-identity check, and it was the one
+	// place NOT using the mandated single definition. Worse, the round-3 commit message claimed
+	// it already did -- see the disclosure; the code had no tmuxpane import at all.
+	//
+	// Identity now comes from tmuxpane.InspectPaneExactByID, which owns the semantics this
+	// function was re-deriving badly: it rejects non-%digits ids, verifies the returned row is
+	// the requested pane, retries through transient iTerm2 -CC pauses, and classifies
+	// Gone/Unavailable/Malformed apart. My hand-rolled version had NO retry, so one transient
+	// control-mode error rolled back a healthy launch.
+	inspection := inspectPaneExact(paneID)
+	switch inspection.State {
+	case tmuxpane.PaneInspectionFound:
+		// fall through to the liveness checks below
+	case tmuxpane.PaneInspectionGone:
+		return "", fmt.Errorf("pane %s no longer exists after command delivery: the worker is NOT launched", paneID)
+	default:
+		// Unavailable and Malformed are UNPROVEN, not absent. For this question -- did the
+		// command I just delivered start? -- cannot-verify must fail closed. Deliberately not
+		// reported as Gone: the distinction is the resolver's whole point.
+		return "", fmt.Errorf("cannot verify pane %s after command delivery (%s: %s): refusing to count the worker as launched on unproven evidence", paneID, inspection.State, inspection.Detail)
 	}
-	fields := strings.Split(strings.TrimSpace(out), "\t")
-	if len(fields) != 3 {
-		return "", fmt.Errorf("pane %s returned an incomplete identity %q: cannot confirm the command started", paneID, strings.TrimSpace(out))
+	pid := strconv.Itoa(inspection.Pane.PID)
+	// pane_dead is read separately because paneListFormat does not carry #{pane_dead}; checked
+	// rather than assumed. remain-on-exit keeps a dead pane reporting its last pid, so a pid
+	// alone cannot distinguish running from just-exited.
+	deadOut, deadErr := tmuxOutputCommand("tmux", "display-message", "-p", "-t", paneID, "#{pane_dead}")
+	if deadErr != nil {
+		return "", fmt.Errorf("read pane liveness for %s: %w", paneID, deadErr)
 	}
-	gotPane, pid, dead := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1]), strings.TrimSpace(fields[2])
-	if gotPane != paneID {
-		return "", fmt.Errorf("tmux resolved target %s to a DIFFERENT pane %s: the requested pane is gone and this pid belongs to another process (likely the launcher), so the worker is NOT launched", paneID, gotPane)
+	dead := strings.TrimSpace(deadOut)
+	if dead == "" {
+		return "", fmt.Errorf("pane %s returned no liveness field: cannot confirm the command is still running", paneID)
 	}
 	if dead != "0" {
 		return "", fmt.Errorf("pane %s is dead (pane_dead=%s) after command delivery: the command exited immediately", paneID, dead)
@@ -889,6 +912,14 @@ func tmuxEnsureSessionAbsent(session string) error {
 var tmuxSessionExists = func(session string) bool {
 	return exec.Command("tmux", "has-session", "-t", session).Run() == nil
 }
+
+// inspectPaneExact is the seam for the shared pane-identity resolver.
+//
+// Production calls tmuxpane.InspectPaneExactByID, so there is ONE definition of an exact
+// verified pane. The var exists because tmuxpane owns its own exec seam privately, so without
+// this indirection every cli-level launch test would have to shell real tmux -- and an
+// untestable path is how both safety findings in this area shipped.
+var inspectPaneExact = tmuxpane.InspectPaneExactByID
 
 var tmuxRunCommand = runCommand
 var tmuxOutputCommand = outputCommand
