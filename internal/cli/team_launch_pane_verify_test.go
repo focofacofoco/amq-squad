@@ -30,6 +30,9 @@ func TestVerifyPaneProcessLaunchedRefusesEveryUnprovenPane(t *testing.T) {
 		dead string
 		// echoPane overrides the echoed id, for the vanished-pane substitution case.
 		echoPane string
+		// rawReply bypasses composition entirely, to model a reply shape production would get
+		// from a REGRESSED format rather than one this fixture would ever build.
+		rawReply string
 		wantErr  string
 	}{
 		{
@@ -78,6 +81,20 @@ func TestVerifyPaneProcessLaunchedRefusesEveryUnprovenPane(t *testing.T) {
 			inspection: found(requested, 4242), dead: "",
 			wantErr: "no liveness field",
 		},
+		{
+			// #577 round 6 blocker 2: I DECLARED this falsifier in the round-6 authoring
+			// message and never wrote the row. The rawReply field was declared and READ with
+			// zero initializers, so the plumbing looked like evidence while proving nothing --
+			// the same shape as claiming a test that did not exist, except the scaffolding made
+			// it harder to notice.
+			//
+			// A bare "0" is what production receives if the format regresses to a single
+			// field: one value, no identity echo. The row above covers a PRESENT-but-empty
+			// second field, which is a different reply and a different guard.
+			name: "reply with no echo at all is incomplete", rawReply: "0\n",
+			inspection: found(requested, 4242),
+			wantErr:    "incomplete liveness reply",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// F3 routes identity through the shared resolver, so the fake goes on THAT seam.
@@ -88,8 +105,14 @@ func TestVerifyPaneProcessLaunchedRefusesEveryUnprovenPane(t *testing.T) {
 			// pane_dead is still read directly, because paneListFormat does not carry it.
 			// The echo is composed HERE so each row states only the liveness value it is about.
 			// A row carrying the wire format would have to be edited again the next time the query
-			// shape changes -- which is exactly what just happened across seven files.
+			// shape changes. Scope, grep-counted rather than recalled: 14 call sites across 5 files
+			// use this helper. An earlier claim said "seven files" because it counted the STRING
+			// pane_dead -- two of those files use it as a visibility-problem VALUE, not as a liveness
+			// fake. Counting the string is not counting the thing.
 			tmuxOutputCommand = func(_ string, args ...string) (string, error) {
+				if tc.rawReply != "" {
+					return tc.rawReply, nil
+				}
 				if tc.echoPane != "" {
 					return tc.echoPane + "\t" + tc.dead, nil
 				}
@@ -163,9 +186,10 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 		// sessions is the list-sessions reply; err is its error.
 		sessions    string
 		sessionsErr error
-		// before/after are list-panes replies: "<pane> <window> <name>" per line.
-		before      string
-		after       string
+		// before/after are SEMANTIC pane rows; the fake renders them into whatever format
+		// production requests. nil after = the modeled world is unchanged by --create.
+		before      []paneRow
+		after       []paneRow
 		wantDeliver string // "" = must refuse
 		wantErr     string
 		// wantNoCreate asserts the refusal happened BEFORE --create. Refusing after creating
@@ -181,7 +205,7 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 			// successful-EMPTY list-panes instead, so reverting only the vacancy fix stayed green:
 			// the row passed for a reason unrelated to what it claimed to test.
 			name: "fresh workstream launches", sessions: "other-session\n",
-			after: "%5 @9 cto\n", wantDeliver: "%5",
+			after: []paneRow{{"issue-96", "%5", "@9", "cto"}}, wantDeliver: "%5",
 		},
 		{
 			// F1: a transient probe failure on a POPULATED session must refuse, not be read as
@@ -192,38 +216,61 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 			// asserts --create was never invoked -- refusing AFTER creating would leave an
 			// abandoned window behind.
 			name: "transient probe failure on a populated session refuses", sessionsErr: errTmuxProbeFailed,
-			before: "%23 @4 cto\n", wantErr: "cannot be enumerated", wantNoCreate: true,
+			before: []paneRow{{"issue-96", "%23", "@4", "cto"}}, wantErr: "cannot be enumerated", wantNoCreate: true,
 		},
 		{
 			// F1's real falsifier, per the review: a PERMISSION-phrased error is documented in
 			// internal/tmuxpane/tmux.go as meaning the socket is BLOCKED, not that the server is
 			// absent. Treating it as vacancy is what could destroy an operator's pane.
 			name: "permission-denied error is NOT vacancy", sessionsErr: errTmuxPermissionDenied,
-			before: "%23 @4 cto\n", wantErr: "cannot be enumerated", wantNoCreate: true,
+			before: []paneRow{{"issue-96", "%23", "@4", "cto"}}, wantErr: "cannot be enumerated", wantNoCreate: true,
 		},
 		{
 			// F2: the session EXISTS (list-sessions names it) and a SUCCESSFUL list-panes comes
 			// back empty. A tmux session cannot have zero panes, so this is broken evidence and
 			// must refuse BEFORE --create rather than proceed on a confident empty map.
 			name: "existing session with an empty successful read refuses", sessions: "issue-96\n",
-			before: "", wantErr: "cannot be enumerated", wantNoCreate: true,
+			before: nil, wantErr: "cannot be enumerated", wantNoCreate: true,
+		},
+		// #577 round 6 F3: the malformed-row coverage was SINGLE-CAUSE -- one row with an invalid
+		// pane id, so reverting the short-row refusal OR deleting the window-id validation kept it
+		// failing for the unrelated pane-id reason. Each mutation now has its own falsifier, with
+		// exactly ONE defect per fixture.
+		{
+			name: "invalid PANE id refuses", sessions: "issue-96\n",
+			before: []paneRow{{"issue-96", "not-a-pane-id", "@4", "cto"}}, wantErr: "cannot be enumerated", wantNoCreate: true,
 		},
 		{
-			// F2: a malformed row must refuse, not be skipped. A row we cannot parse may describe
-			// an operator's pane.
-			name: "malformed pane row refuses", sessions: "issue-96\n",
-			before: "not-a-pane-id @4 cto\n", wantErr: "cannot be enumerated", wantNoCreate: true,
+			name: "invalid WINDOW id refuses", sessions: "issue-96\n",
+			before: []paneRow{{"issue-96", "%23", "not-a-window-id", "cto"}}, wantErr: "cannot be enumerated", wantNoCreate: true,
+		},
+		{
+			// A SHORT row: fewer fields than the format requested. Its pane and window ids are
+			// both valid, so only the short-row refusal can catch it.
+			name: "short row refuses", sessions: "issue-96\n",
+			before: []paneRow{{Session: "issue-96", Pane: "%23"}}, wantErr: "cannot be enumerated", wantNoCreate: true,
+		},
+		{
+			// #577 round 6 F1's falsifier: rows from ANOTHER session. Every id is shape-valid, so
+			// only the session-name comparison can reject them -- which is the point, because
+			// tmux's prefix/glob resolution is what could deliver them.
+			name: "rows from a DIFFERENT session refuse", sessions: "issue-96\n",
+			before: []paneRow{{"issue-96-old", "%23", "@4", "cto"}}, wantErr: "cannot be enumerated", wantNoCreate: true,
 		},
 		{
 			// F1: no server at all IS provable vacancy -- no server, no panes.
 			name: "no server running is proven vacancy", sessionsErr: errNoTmuxServer,
-			after: "%5 @9 cto\n", wantDeliver: "%5",
+			after: []paneRow{{"issue-96", "%5", "@9", "cto"}}, wantDeliver: "%5",
 		},
 		{
 			// F2 case A: --create selected an existing role window and created NOTHING. The
 			// round-3 fixture could not express this at all.
+			// #577 round 6 blocker 3: this row carried an explicit after in the OLD wire format,
+			// which the new parser reads as a wrong-session row -- so the no-new-pane error was
+			// unreachable and the row passed for an unrelated reason. Omitting after also exercises
+			// the F4 retention fix directly: the modeled world keeps the operator pane.
 			name: "created nothing refuses", sessions: "issue-96\n",
-			before: "%23 @4 cto\n", after: "%23 @4 cto\n",
+			before:  []paneRow{{"issue-96", "%23", "@4", "cto"}},
 			wantErr: "no new pane in a new window",
 		},
 		{
@@ -231,14 +278,14 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 			// operator's pane arrived in a NEW window. Novel pane, novel window, wrong name.
 			// Round 3 would have accepted this and killed the operator's pane.
 			name: "operator pane in a new window refuses", sessions: "issue-96\n",
-			before: "%23 @4 cto\n", after: "%23 @4 cto\n%77 @8 operator-scratch\n",
+			before: []paneRow{{"issue-96", "%23", "@4", "cto"}}, after: []paneRow{{"issue-96", "%23", "@4", "cto"}, {"issue-96", "%77", "@8", "operator-scratch"}},
 			wantErr: "no new pane in a new window",
 		},
 		{
 			// The companion: a genuine create IS attributable, so the refusals above are not the
 			// function rejecting everything.
 			name: "genuine create is attributed", sessions: "issue-96\n",
-			before: "%23 @4 qa\n", after: "%23 @4 qa\n%24 @5 cto\n", wantDeliver: "%24",
+			before: []paneRow{{"issue-96", "%23", "@4", "qa"}}, after: []paneRow{{"issue-96", "%23", "@4", "qa"}, {"issue-96", "%24", "@5", "cto"}}, wantDeliver: "%24",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -273,14 +320,35 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 					}
 					return tc.sessions, tc.sessionsErr
 				case strings.Contains(call, "list-panes"):
-					if created {
-						return tc.after, nil
+					// #577 round 6 blocker 1: this fake returned canned wire text regardless of the
+					// requested -t and -F, so removing the exact "=" target changed nothing and
+					// removing #{session_name} still received an invented session field. The fixture
+					// was supplying both belts the code had stopped asking for.
+					//
+					// The target is PINNED: anything other than the exact-match form is an error, so
+					// dropping "=" fails every positive row. The rows are SEMANTIC and the wire text
+					// is rendered from the requested format, so dropping #{session_name} drops the
+					// column and the parser's field count refuses.
+					// The claim is about the -t VALUE, so check that, not mere token presence:
+					// containsArg would pass if "=issue-96" appeared anywhere, including in a format
+					// string. Exactly one -t, and its value must be the exact-match form.
+					targets := targetArgs(args)
+					if len(targets) != 1 || targets[0] != "=issue-96" {
+						return "", fmt.Errorf("list-panes must pass exactly one -t whose value is =issue-96; got %v in %s", targets, call)
 					}
-					return tc.before, nil
+					rows := tc.before
+					// #577 round 6 F4: when after is unset the modeled world must not EMPTY itself
+					// post-create. A populated before with no after made the operator pane vanish if
+					// production wrongly proceeded, so the fixture flattered the code: the pane it
+					// should have protected was no longer there to protect.
+					if created && tc.after != nil {
+						rows = tc.after
+					}
+					return renderPaneRows(rows, paneListFormatArg(args)), nil
 				case strings.Contains(call, "#{pane_dead}"):
 					// Delegated to the shared helper so the liveness wire format lives in ONE place.
 					// #577 round 5 restored the id echo here; a local literal would have needed
-					// editing in every fixture, which is how seven files drifted at once.
+					// editing at all 14 call sites across 5 files, which is how they drifted at once.
 					return fakePaneIdentityReply(args), nil
 				}
 				return "", fmt.Errorf("unexpected output command: %s %s", name, call)
@@ -352,39 +420,50 @@ func TestDeliveredCommandCarriesTheLauncherPATH(t *testing.T) {
 	}
 }
 
-// fakePaneIdentityReply answers a #{pane_id}\t#{pane_pid}\t#{pane_dead} query the way a
-// healthy tmux would: ECHOING BACK the pane that was asked about.
+// fakePaneIdentityReply answers a tmux -p format query by DERIVING the reply from the format
+// string production actually sent.
 //
-// Shared by every fake deliberately. A fake that returns a fixed pane id would pass the
-// identity check only by luck, and worse, a fake that returns the WRONG id would make the
-// launcher's fallback detection look broken when it is working. Echoing the -t argument is
-// the only reply that models "the requested pane exists and is alive" without encoding a
-// specific pane into the harness.
+// #577 round 6 F2: the previous version manufactured "<pane_id>\t<dead>" regardless of what was
+// requested, so reverting production to a bare "#{pane_dead}" -- one field, no identity echo --
+// stayed GREEN. The fixture supplied the identity the code had stopped asking for, which made
+// the echo test I added in round 5 unable to detect the very regression it exists for.
+//
+// Deriving from the request means a production format change CHANGES THE REPLY SHAPE, so the
+// incomplete-reply and echo-compare guards see it.
 func fakePaneIdentityReply(args []string) string {
-	// #577 round 4 split the read: identity comes from the shared resolver via
-	// inspectPaneExact, and THIS seam is asked only for #{pane_dead}. Returning the old
-	// three-field reply for a pane_dead query made a live pane read as dead, which is how
-	// nine tests failed in CI after the focused set passed.
-	joined := strings.Join(args, " ")
-	if strings.Contains(joined, "#{pane_dead}") {
-		// #577 round 5 F3 restored the identity ECHO to the liveness read, so this seam must
-		// answer "<pane_id>\t<pane_dead>". Returning a bare "0" would fail the new
-		// incomplete-reply check -- the helper has to track the query shape it stands in for.
-		target := ""
-		for i, a := range args {
-			if a == "-t" && i+1 < len(args) {
-				target = args[i+1]
-			}
-		}
-		return target + "\t0\n"
-	}
 	target := ""
+	format := ""
 	for i, a := range args {
 		if a == "-t" && i+1 < len(args) {
 			target = args[i+1]
 		}
+		if strings.Contains(a, "#{") {
+			format = a
+		}
 	}
-	return target + "\t4242\t0\n"
+	if format == "" {
+		return ""
+	}
+	// Emit exactly the fields requested, in the order requested, on the separator requested.
+	// Unknown fields render EMPTY, as real tmux does -- modelling anything else would be the
+	// fixture-lag disease inverted. That is not a silent skip BECAUSE production refuses on a
+	// blank or incomplete reply, guarded by the "blank liveness field" and "reply with no echo
+	// at all" rows. Deleting either side breaks this named contract.
+	values := map[string]string{
+		"#{pane_id}":   target,
+		"#{pane_pid}":  "4242",
+		"#{pane_dead}": "0",
+	}
+	parts := strings.Split(format, "\t")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if v, ok := values[strings.TrimSpace(part)]; ok {
+			out = append(out, v)
+			continue
+		}
+		out = append(out, "")
+	}
+	return strings.Join(out, "\t") + "\n"
 }
 
 // stubExactPaneInspection installs a permissive shared-resolver fake: whatever pane is asked
@@ -440,4 +519,81 @@ func TestVerifyRefusesWhenLivenessAnswersAboutADifferentPane(t *testing.T) {
 	if pid != "" {
 		t.Errorf("a refused verification must return no pid; got %q", pid)
 	}
+}
+
+// paneRow is a SEMANTIC list-panes row. Tests state what exists; the fake renders whatever
+// wire format production asked for.
+//
+// #577 round 6 blocker 1: canned wire text let a fixture supply columns the code no longer
+// requested, so removing #{session_name} from production changed nothing observable. A semantic
+// row cannot do that -- if the format omits a field, the rendered row omits it too.
+type paneRow struct {
+	Session string
+	Pane    string
+	Window  string
+	Name    string
+}
+
+// renderPaneRows emits exactly the fields the requested format names, in order, space-separated
+// as tmux does for this format.
+func renderPaneRows(rows []paneRow, format string) string {
+	if format == "" {
+		return ""
+	}
+	var out strings.Builder
+	for _, row := range rows {
+		values := map[string]string{
+			"#{session_name}": row.Session,
+			"#{pane_id}":      row.Pane,
+			"#{window_id}":    row.Window,
+			"#{window_name}":  row.Name,
+		}
+		parts := strings.Fields(format)
+		rendered := make([]string, 0, len(parts))
+		for _, part := range parts {
+			// Unknown variables render EMPTY, which is what real tmux does. Production's
+			// field-count and shape checks are the guards; see the blank/incomplete rows.
+			rendered = append(rendered, values[part])
+		}
+		out.WriteString(strings.Join(rendered, " "))
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
+// paneListFormatArg returns the -F format argument, so the fake answers the question actually
+// asked rather than the one it remembers.
+func paneListFormatArg(args []string) string {
+	for i, a := range args {
+		if a == "-F" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// targetArgs returns every value that immediately follows a -t flag.
+//
+// #577 round 6 re-review B: the previous check asked whether "=issue-96" appeared ANYWHERE in
+// the argv, which would also pass if it appeared inside a format string, and said nothing about
+// how many -t flags there were. The comment claimed the -t value was pinned; the code pinned a
+// substring. Adjacency is the property, so adjacency is what is inspected.
+func targetArgs(args []string) []string {
+	var targets []string
+	for i, a := range args {
+		if a != "-t" {
+			continue
+		}
+		if i+1 >= len(args) {
+			// A DANGLING -t is still a -t. Appending only when a value follows meant
+			// "-t =issue-96 ... -t" produced ONE target and passed, contradicting the claim
+			// that exactly one -t is required -- and real tmux would reject the malformed
+			// invocation outright. The sentinel makes a valueless flag COUNT, so any second -t
+			// fails whether or not it carries a value.
+			targets = append(targets, "<dangling -t with no value>")
+			continue
+		}
+		targets = append(targets, args[i+1])
+	}
+	return targets
 }

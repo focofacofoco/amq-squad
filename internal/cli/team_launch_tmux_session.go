@@ -267,7 +267,24 @@ func tmuxSessionWindowIDs(workstream string) (map[string]tmuxSessionPaneLocation
 		// PROVEN vacancy: the server answered and this workstream is not among its sessions.
 		return map[string]tmuxSessionPaneLocation{}, true
 	}
-	out, err := tmuxOutputCommand("tmux", "list-panes", "-s", "-t", workstream, "-F", "#{pane_id} #{window_id} #{window_name}")
+	// #577 round 6 F1, and this is name-as-identity ONE LAYER UP from the pane and window
+	// fixes: tmux resolves a -t target by exact name, then PREFIX, then GLOB, unless the target
+	// starts with '='. So a bare "-t issue-96" can resolve to "issue-96-old" -- a DIFFERENT
+	// session -- if this one vanishes between the list-sessions proof and this read. Those rows'
+	// %/@ ids then pass every shape check, because the format never said which session they came
+	// from, and the attribution conjunction can go on to destroy an operator's pane.
+	//
+	// Two belts with distinct roles, per the ruling:
+	//   PRIMARY: '=' is the exact-target INSTRUCTION to tmux -- it prevents prefix/glob
+	//            resolution from selecting another session in the first place.
+	//   DEFENSE-IN-DEPTH: the echoed #{session_name}, compared per row, is EVIDENCE about what
+	//            tmux actually returned. An instruction is not evidence, which is this
+	//            milestone's whole theme; the comparison also survives a tmux behaviour change
+	//            and costs one field per row.
+	// Do not delete the comparison as dead code because '=' makes it unreachable: an
+	// unreachable branch that ever fires means the assumption behind it was wrong, and the cost
+	// of being wrong here is an operator's pane.
+	out, err := tmuxOutputCommand("tmux", "list-panes", "-s", "-t", "="+workstream, "-F", "#{session_name} #{pane_id} #{window_id} #{window_name}")
 	if err != nil {
 		// The session EXISTS and could not be enumerated: the genuine cannot-prove case.
 		return nil, false
@@ -286,19 +303,25 @@ func tmuxSessionWindowIDs(workstream string) (map[string]tmuxSessionPaneLocation
 			continue
 		}
 		fields := strings.Fields(trimmed)
-		if len(fields) < 2 {
+		if len(fields) < 3 {
 			// A row we cannot parse is not a row we can ignore: the pane it describes may be
 			// an operator's, and delivery replaces a pane's process.
 			return nil, false
 		}
-		paneID, paneErr := exactTmuxPaneID(fields[0])
-		windowID, windowErr := exactTmuxWindowID(fields[1])
+		if fields[0] != workstream {
+			// The row belongs to ANOTHER session. With '=' this should be unreachable, which is
+			// exactly why it is checked: an unreachable branch that fires means the assumption
+			// behind it was wrong, and the cost of being wrong here is an operator's pane.
+			return nil, false
+		}
+		paneID, paneErr := exactTmuxPaneID(fields[1])
+		windowID, windowErr := exactTmuxWindowID(fields[2])
 		if paneErr != nil || windowErr != nil {
 			return nil, false
 		}
 		loc := tmuxSessionPaneLocation{WindowID: windowID}
-		if len(fields) >= 3 {
-			loc.WindowName = strings.Join(fields[2:], " ")
+		if len(fields) >= 4 {
+			loc.WindowName = strings.Join(fields[3:], " ")
 		}
 		panes[paneID] = loc
 	}
