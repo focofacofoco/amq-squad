@@ -582,3 +582,14 @@ func writeGlobalNOCBootstrapPayload(root, launchID, bootstrap string) (string, e
 	}
 	return path, nil
 }
+
+// nocPromptDigest is the digest the dispatch line verifies before exec.
+//
+// Taken over the SUBSTITUTED form of the prompt -- trailing newlines removed -- because that
+// is what `$(cat ...)` yields and therefore what the agent actually receives. Digesting the
+// raw file instead would mismatch every time and the guard would reject every healthy launch,
+// which is the failure mode a guard must not have.
+func nocPromptDigest(bootstrap string) string {
+	sum := sha256.Sum256([]byte(strings.TrimRight(bootstrap, "\n")))
+	return hex.EncodeToString(sum[:])
+}

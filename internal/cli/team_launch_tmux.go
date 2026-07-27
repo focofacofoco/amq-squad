@@ -483,7 +483,30 @@ func runTmuxLaunchPlanInternal(plan tmuxLaunchPlan, collectResult bool) (teamLau
 		if err := tmuxRunCommand("tmux", "select-pane", "-t", firstTarget, "-T", paneTitleToken(plan.Workstream, plan.Panes[0].Role)); err != nil {
 			return failCreated(err)
 		}
-		targets = append(targets, firstTarget)
+		// #577 round 2 finding 2: this pushed the NAME "<session>:0.0" into targets, and the
+		// stricter verifier compares tmux's returned #{pane_id} against what it was asked
+		// about -- so a name NEVER matches and a HEALTHY fresh session was rolled back. The
+		// regression is mine: I tightened the verifier without enumerating which callers still
+		// pass names, which is how a safety fix becomes an outage.
+		//
+		// Resolved once, here, so every downstream consumer (delivery, verification, rollback)
+		// works from one exact identity rather than each re-deriving it from a name.
+		// Resolve ONLY when the target is not already exact. Some callers reach here with the
+		// created pane's id in hand; re-querying it would add a tmux round trip that can fail
+		// for reasons unrelated to the launch, turning a healthy path into a rollback -- which
+		// is the same shape as the bug being fixed.
+		firstPaneID := firstTarget
+		if _, err := exactTmuxPaneID(firstPaneID); err != nil {
+			resolved, resolveErr := tmuxOutputCommand("tmux", "display-message", "-p", "-t", firstTarget, "#{pane_id}")
+			if resolveErr != nil {
+				return failCreated(fmt.Errorf("resolve exact pane id for the first pane (%s): %w", firstTarget, resolveErr))
+			}
+			firstPaneID = strings.TrimSpace(resolved)
+			if _, err := exactTmuxPaneID(firstPaneID); err != nil {
+				return failCreated(fmt.Errorf("tmux returned %q for the first pane (%s), which is not an exact pane id; delivering to a name risks another pane", firstPaneID, firstTarget))
+			}
+		}
+		targets = append(targets, firstPaneID)
 		panesToSplit = plan.Panes[1:]
 	}
 	for _, pane := range panesToSplit {

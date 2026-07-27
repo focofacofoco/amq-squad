@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -152,19 +153,27 @@ func tmuxSessionPaneCommandDryRunLine(workstream, role, command string) string {
 	return tmuxPaneCommandDryRunLine(workstream+":"+role, command)
 }
 
+// tmuxSessionRunCommand is the seam for this backend's calls to the tmux-session wrapper CLI.
+//
+// Added in #577 round 3 because the execution path had NO test coverage: every test stopped at
+// the dry-run or at a refusal that returned before creation. Both round-1 and round-2 safety
+// findings in this file were in code no test could reach, which is not a coincidence.
+var tmuxSessionRunCommand = runCommand
+
 func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 	if len(plan.Panes) == 0 {
 		return fmt.Errorf("tmux-session plan has no panes")
 	}
 	for i, pane := range plan.Panes {
-		// Refuse BEFORE creating, so an occupied window name is reported rather than
-		// respawned. Checking after creation cannot distinguish "we just made it" from
-		// "it was already there", and the wrong answer costs the operator a live pane.
-		if occupant, occupied := tmuxSessionWindowOccupant(plan.Workstream, pane.Role); occupied {
-			return fmt.Errorf("refusing to launch %s: window %s:%s already exists (pane %s). Delivering here would KILL whatever runs in it -- an operator window named for this role, or a prior partial launch. Close or rename that window, then relaunch",
-				pane.Role, plan.Workstream, pane.Role, occupant)
+		// Snapshot the session's panes BEFORE creating, so the pane this launcher causes can
+		// be identified by difference rather than by name. An unreadable snapshot is a refusal:
+		// delivery replaces a pane's process, so an unverifiable target may be an operator's.
+		before, snapshotOK := tmuxSessionPaneIDs(plan.Workstream)
+		if !snapshotOK {
+			return fmt.Errorf("refusing to launch %s: cannot enumerate existing panes in session %s, so a freshly created pane cannot be told apart from one already in use. Delivery replaces a pane's process and would risk an operator's window",
+				pane.Role, plan.Workstream)
 		}
-		if err := runCommand(tmuxSessionBinary, tmuxSessionCreateArgv(plan.Workstream, pane.Role, pane.CWD)...); err != nil {
+		if err := tmuxSessionRunCommand(tmuxSessionBinary, tmuxSessionCreateArgv(plan.Workstream, pane.Role, pane.CWD)...); err != nil {
 			return err
 		}
 		// "new-window" is the correct visibility provenance here: this backend's
@@ -182,7 +191,7 @@ func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 		// So delivery binds to the EXACT pane identity creation produced, and a window
 		// that already exists is refused instead of respawned. Resolving the pane id
 		// after creation also means the -k applies to a pane this launcher just made.
-		paneID, err := tmuxSessionFreshPaneID(plan.Workstream, pane.Role)
+		paneID, err := tmuxSessionCreatedPaneID(plan.Workstream, pane.Role, before)
 		if err != nil {
 			return fmt.Errorf("bind %s to a verified fresh pane: %w", pane.Role, err)
 		}
@@ -201,14 +210,14 @@ func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 		if _, err := verifyPaneProcessLaunched(paneID); err != nil {
 			return fmt.Errorf("worker %s not launched: %w", pane.Role, err)
 		}
-		if err := runCommand(tmuxSessionBinary, tmuxSessionRenameArgv(plan.Workstream, pane.Role)...); err != nil {
+		if err := tmuxSessionRunCommand(tmuxSessionBinary, tmuxSessionRenameArgv(plan.Workstream, pane.Role)...); err != nil {
 			return err
 		}
 		if i < len(plan.Panes)-1 && plan.StartDelay > 0 {
 			time.Sleep(plan.StartDelay)
 		}
 	}
-	if err := runCommand(tmuxSessionBinary, tmuxSessionResumeArgv(plan.Workstream)...); err != nil {
+	if err := tmuxSessionRunCommand(tmuxSessionBinary, tmuxSessionResumeArgv(plan.Workstream)...); err != nil {
 		return err
 	}
 	quietNotice("Opened %d agent window(s) in tmux-session %s.\n", len(plan.Panes), shellQuote(plan.Workstream))
@@ -216,49 +225,58 @@ func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 	return nil
 }
 
-// tmuxSessionWindowOccupant reports the pane already occupying "<workstream>:<role>", if any.
+// tmuxSessionPaneIDs lists every pane id in the session, or reports that it could not.
 //
-// Deliberately fail-SAFE rather than fail-open: any answer that names a pane counts as
-// occupied. A query error means "cannot prove it is free", and since being wrong here kills a
-// live pane, an unprovable answer must not be read as vacant.
-func tmuxSessionWindowOccupant(workstream, role string) (string, bool) {
-	out, err := tmuxOutputCommand("tmux", "list-panes", "-t", workstream+":"+role, "-F", "#{pane_id}")
+// The bool is "this answer is trustworthy", NOT "panes exist". #577 round 2 finding 3: the
+// previous precheck returned VACANT on a query error while its own doc comment promised
+// fail-safe. A function whose documentation asserts the opposite of its behaviour is worse
+// than an undocumented one, because the reviewer reads the promise.
+func tmuxSessionPaneIDs(workstream string) (map[string]bool, bool) {
+	out, err := tmuxOutputCommand("tmux", "list-panes", "-s", "-t", workstream, "-F", "#{pane_id}")
 	if err != nil {
-		// tmux errors when the window does not exist, which is the expected free case.
-		return "", false
+		// Cannot prove anything. The caller must treat this as unsafe, never as vacant.
+		return nil, false
 	}
+	ids := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if id := strings.TrimSpace(line); id != "" {
-			return id, true
+			ids[id] = true
 		}
 	}
-	return "", false
+	return ids, true
 }
 
-// tmuxSessionFreshPaneID resolves the single pane of the window creation just made.
+// tmuxSessionCreatedPaneID identifies the pane creation just made by SET DIFFERENCE against a
+// snapshot taken before creation.
 //
-// Exactly one pane is required. Zero means creation did not produce an inspectable pane, and
-// more than one means this is not the fresh single-pane window we created -- both are refusals,
-// because delivery is about to run respawn-pane -k and must only ever target a pane this
-// launcher owns.
-func tmuxSessionFreshPaneID(workstream, role string) (string, error) {
-	target := workstream + ":" + role
-	out, err := tmuxOutputCommand("tmux", "list-panes", "-t", target, "-F", "#{pane_id}")
-	if err != nil {
-		return "", fmt.Errorf("list panes for %s: %w", target, err)
+// #577 round 2 finding 3: re-resolving "<workstream>:<role>" by NAME after creation reopened
+// the very window the precheck was meant to close. Between precheck and lookup, a same-named
+// window can appear -- from an operator or a racing launch -- and the name then resolves to
+// THEIR pane, which respawn-pane -k proceeds to kill. A name is not an identity, and checking
+// the name twice does not make it one.
+//
+// The difference is name-independent: whatever appeared, the pane this launcher caused is the
+// one that was not there before. Exactly one new pane is required; zero or several means the
+// launcher cannot say which pane it owns, and it must not guess when the next step destroys
+// the target.
+func tmuxSessionCreatedPaneID(workstream, role string, before map[string]bool) (string, error) {
+	after, ok := tmuxSessionPaneIDs(workstream)
+	if !ok {
+		return "", fmt.Errorf("cannot enumerate panes in session %s after creating the %s window: refusing to deliver, because the next step replaces a pane's process and an unverified target may be an operator's", workstream, role)
 	}
-	var ids []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if id := strings.TrimSpace(line); id != "" {
-			ids = append(ids, id)
+	var created []string
+	for id := range after {
+		if !before[id] {
+			created = append(created, id)
 		}
 	}
-	switch len(ids) {
+	sort.Strings(created)
+	switch len(created) {
 	case 1:
-		return ids[0], nil
+		return created[0], nil
 	case 0:
-		return "", fmt.Errorf("window %s has no inspectable pane after creation: treating zero panes as success is how an unlaunched worker counted as launched", target)
+		return "", fmt.Errorf("creating the %s window in session %s produced no new pane: treating that as success is how an unlaunched worker counted as launched", role, workstream)
 	default:
-		return "", fmt.Errorf("window %s has %d panes after creation (%s); a freshly created agent window must have exactly one, so this is not a pane this launcher owns", target, len(ids), strings.Join(ids, " "))
+		return "", fmt.Errorf("creating the %s window in session %s produced %d new panes (%s); the launcher cannot identify which pane it owns, and delivery would replace one of them", role, workstream, len(created), strings.Join(created, " "))
 	}
 }

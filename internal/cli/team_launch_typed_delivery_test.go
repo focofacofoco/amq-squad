@@ -17,15 +17,20 @@ import (
 // here with a reason it is exempt from the #571 fix. A new one fails until someone either
 // converts it or justifies it, which is the check that would have caught finding 1.
 func TestEveryTypedDeliverySiteIsJustified(t *testing.T) {
-	// Exemptions carry the JUSTIFICATION, not just the location, so the next reader can tell
-	// a deliberate exemption from an unreviewed one.
+	// #577 round 2 finding 5: exemptions were keyed by FILENAME, so a second, unreviewed
+	// send-keys added to orchestrate.go would ride the existing exemption silently. The key is
+	// now the exact site -- an anchor comment that must sit on the send-keys line itself -- so an
+	// exemption covers ONE call and cannot be inherited by a neighbour.
+	//
+	// Keying on an in-code anchor rather than a line number is deliberate: a line-number key
+	// goes stale on every edit above it, and a stale key is how a real site gets waved through.
+	const anchor = "#571-exempt-typed-delivery:"
 	exempt := map[string]string{
-		// The NOC dispatch keeps send-keys deliberately: exec must preserve the pane PID
-		// that beginGlobalNOCLaunch already persisted, and respawn-pane would replace it.
-		// The 1,024-byte boundary is avoided by keeping the payload off the tty (the
-		// bootstrap is written to a file and substituted in), so the typed line is a fixed
-		// short length regardless of bootstrap size. See orchestrate.go.
-		"orchestrate.go": "exec must preserve the pane PID; payload is substituted from a file, not typed",
+		// exec must preserve the pane PID that beginGlobalNOCLaunch persisted, so respawn-pane
+		// is wrong here. The tty boundary is avoided by keeping the payload in a file and
+		// bounding the composed line (checkNOCDispatchLineBound), and the payload is digest-
+		// verified before exec so a failed read cannot launch an agent without its contract.
+		"noc-bootstrap-dispatch": "exec preserves the pane PID; payload is file-substituted, digest-guarded and length-bounded",
 	}
 
 	files, err := filepath.Glob(filepath.Join(".", "*.go"))
@@ -33,7 +38,8 @@ func TestEveryTypedDeliverySiteIsJustified(t *testing.T) {
 		t.Fatalf("glob: %v", err)
 	}
 
-	found := map[string]int{}
+	total := 0
+	used := map[string]bool{}
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -42,41 +48,53 @@ func TestEveryTypedDeliverySiteIsJustified(t *testing.T) {
 		if readErr != nil {
 			t.Fatalf("read %s: %v", path, readErr)
 		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "//") {
+		for i, line := range strings.Split(string(raw), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") {
 				continue
 			}
-			if strings.Contains(line, `"send-keys"`) {
-				found[filepath.Base(path)]++
+			if !strings.Contains(line, `"send-keys"`) {
+				continue
 			}
+			total++
+			site := ""
+			if idx := strings.Index(line, anchor); idx >= 0 {
+				site = strings.TrimSpace(line[idx+len(anchor):])
+			}
+			if site == "" {
+				t.Errorf("%s:%d issues tmux send-keys with no exemption anchor.\n"+
+					"send-keys delivers through the pane tty, which drops any line over MAX_CANON=1024 "+
+					"and still reports success (#571). Either deliver the command as the pane process "+
+					"(deliverPaneCommand), or add a trailing comment %s<site-key> and register that key "+
+					"here with why typing is required and how the length boundary is bounded.",
+					filepath.Base(path), i+1, anchor)
+				continue
+			}
+			if _, ok := exempt[site]; !ok {
+				t.Errorf("%s:%d claims exemption key %q, which is not registered in this test. "+
+					"An unregistered key is an unreviewed exemption.", filepath.Base(path), i+1, site)
+				continue
+			}
+			if used[site] {
+				t.Errorf("%s:%d reuses exemption key %q, which is already claimed by another site. "+
+					"One key per call, or a second site inherits the first's justification -- the exact "+
+					"hole that filename-keyed exemptions had.", filepath.Base(path), i+1, site)
+			}
+			used[site] = true
 		}
 	}
 
-	for file, n := range found {
-		if _, ok := exempt[file]; !ok {
-			t.Errorf("%s issues tmux send-keys at %d site(s) with no recorded justification.\n"+
-				"send-keys delivers through the pane tty, which drops any line over MAX_CANON=1024 "+
-				"and still reports success (#571). Either deliver the command as the pane process "+
-				"(deliverPaneCommand) or add an exemption here stating why typing is required and how "+
-				"the length boundary is avoided.", file, n)
+	// Self-destructing exemptions: a key nothing claims is stale, and a stale key is how the
+	// next real one gets waved through.
+	for key := range exempt {
+		if !used[key] {
+			t.Errorf("exemption %q is stale -- no send-keys site claims it. Remove it, so the list "+
+				"keeps meaning what it says.", key)
 		}
 	}
 
-	// Self-destructing exemptions: an exemption for a file that no longer types is stale, and
-	// a stale exemption is how the next real one gets waved through.
-	for file := range exempt {
-		if found[file] == 0 {
-			t.Errorf("exemption for %s is stale -- it no longer issues send-keys. Remove it, so the "+
-				"list keeps meaning what it says.", file)
-		}
-	}
-
-	// Anti-vacuity: this test is only meaningful while it can still SEE typed delivery. If
-	// the scan finds nothing at all, the pattern or the layout changed and the check is blind
-	// rather than satisfied.
-	if len(found) == 0 {
-		t.Fatal("found no send-keys sites anywhere in production code; the scan is broken, not the tree clean")
+	// Anti-vacuity: this check is only meaningful while it can still SEE typed delivery.
+	if total == 0 {
+		t.Fatal("found no send-keys sites in production code; the scan is broken, not the tree clean")
 	}
 }
 
@@ -103,10 +121,17 @@ func TestNOCDispatchLineDoesNotScaleWithBootstrapSize(t *testing.T) {
 	// technique works while leaving this green if production reverted to typing the payload --
 	// so the argv is passed to the real function, bootstrap as the last element exactly as
 	// appendGeneratedBootstrapPrompt leaves it.
-	command := nocDispatchCommand([]string{"claude", "--model", "opus", "--", huge}, path)
-	if len(command) > 512 {
-		t.Errorf("dispatch line is %d bytes for a 64KiB bootstrap; it must not scale with the payload:\n%s",
-			len(command), command)
+	command := nocDispatchCommand([]string{"claude", "--model", "opus", "--", huge}, path, nocPromptDigest(huge))
+	if len(command) > nocDispatchLineBound {
+		t.Errorf("dispatch line is %d bytes for a 64KiB bootstrap, over the production bound %d; it must not scale with the payload:\n%s",
+			len(command), nocDispatchLineBound, command)
+	}
+	// The guard must be PRESENT, or the line is short and still fails open (#577 finding 1).
+	if !strings.Contains(command, "shasum") || !strings.Contains(command, nocPromptDigest(huge)) {
+		t.Errorf("dispatch line must verify the payload digest before exec:\n%s", command)
+	}
+	if !strings.Contains(command, "exit 1") {
+		t.Errorf("a failed verification must exit nonzero so the PID watch fails:\n%s", command)
 	}
 	// MAX_CANON on macOS/BSD. The margin matters: a line at 1000 bytes is one flag away from
 	// silently truncating.
