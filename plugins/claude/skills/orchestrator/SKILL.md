@@ -1,13 +1,12 @@
 ---
 name: "orchestrator"
 description: "Live amq-squad lead protocol after verified launch. Use when you are the lead agent of an orchestrated squad and need to dispatch work, watch for events without burning turns, converge reviews, recover a stalled run, or hand off evidence. Triggers include \"monitor the squad\", \"what should I do next\", \"dispatch this task\", \"the run is stuck\", \"who is blocked\". NOT for preparing or launching a squad (use amq-squad:wizard) or for one-off status and inspection commands (use amq-squad:cli)."
+version: "2.24.0"  # x-release-please-version
 allowed-tools: "Bash, Read, Write, Edit, Glob, Grep"
 argument-hint: "[compose | spawn | dispatch | monitor | review | recover]"
 user-invocable: true
 trigger: "/orchestrator"
 ---
-**Skill version: 2.24.0** - Start the first response by stating the loaded identity as `amq-squad skill v2.24.0` before status or analysis.
-
 # amq-squad:orchestrator
 
 You are the verified visible lead after `amq-squad:wizard` prepared and launched

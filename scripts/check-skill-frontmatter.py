@@ -73,10 +73,15 @@ def check(path):
     return None
 
 
-# Each mirror's amq-squad skill carries a "Skill version: X.Y.Z" marker that the
-# agent echoes on startup. It must match that mirror's plugin manifest version so
-# the echoed version is trustworthy, not drifted.
-VERSION_MARKER = re.compile(r"Skill version:\s*([0-9]+\.[0-9]+\.[0-9]+)")
+# Each mirror's skills carry the shipped version in frontmatter, stamped by the
+# generator from that mirror's plugin manifest. It must match the manifest so the
+# advertised version cannot drift from the release.
+#
+# This replaced a "Skill version: X.Y.Z" body preamble that also instructed the agent
+# to echo its identity before doing any work (#534): a mandatory sentence before every
+# useful response, hardcoded in 7 files, requiring 7 edits per release. The version is
+# metadata, so it now lives in metadata.
+VERSION_MARKER = re.compile(r"^version:\s*\"?([0-9]+\.[0-9]+\.[0-9]+)\"?", re.M)
 VERSIONED_SKILLS = (
     "wizard", "cli", "orchestrator", "amq-squad",
     "amq-squad-orchestrator", "amq-team-setup", "amq-squad-role-creator",
@@ -101,10 +106,13 @@ def check_version_markers(root, mirror):
             continue
         m = VERSION_MARKER.search(open(skill, encoding="utf-8-sig").read())
         if not m:
-            errors.append(f"{os.path.relpath(skill, root)}: missing `Skill version: X.Y.Z` marker")
+            errors.append(
+                f"{os.path.relpath(skill, root)}: missing frontmatter `version:` "
+                f"(generator stamps it from {os.path.relpath(manifest, root)})"
+            )
         elif m.group(1) != want:
             errors.append(
-                f"{os.path.relpath(skill, root)}: marker version {m.group(1)} != "
+                f"{os.path.relpath(skill, root)}: frontmatter version {m.group(1)} != "
                 f"manifest version {want} ({os.path.relpath(manifest, root)})"
             )
     return errors

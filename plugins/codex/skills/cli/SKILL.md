@@ -1,9 +1,8 @@
 ---
 name: "cli"
 description: "Direct amq-squad operations and diagnostics against an existing profile. Use when you need to inspect state, claim or complete a task, record command evidence, read or answer AMQ threads, raise or close a gate, resolve an ambiguous namespace, or plan a release action. Triggers include \"what is the status\", \"claim this task\", \"record evidence\", \"why is my profile ambiguous\", \"read that thread\", \"is this safe to merge\". NOT for preparing or launching a squad (use amq-squad:wizard) and NOT for the live lead loop (use amq-squad:orchestrator)."
+version: "2.24.0"  # x-release-please-version
 ---
-**Skill version: 2.24.0** - Start the first response by stating the loaded identity as `amq-squad skill v2.24.0` before status or analysis.
-
 # amq-squad:cli
 
 Direct binary operations after a profile exists. This skill owns diagnostics and
@@ -21,7 +20,7 @@ explicit commands, not goal composition and not the live lead loop.
 
 AMQ 0.49.x is the supported series, with 0.49.0 as the minimum supported release and
 compatibility tested through 0.49.1. Both real-AMQ matrices validate pinned v0.49.0,
-pinned v0.49.1, and `latest`; `latest` remains a forward-compatibility canary.
+pinned v0.49.1, and latest; latest remains a forward-compatibility canary.
 
 Releases older than 0.49.0 are rejected fail-closed. After upgrading, stop and resume
 agents so their parent shells refresh the complete identity tuple.
@@ -84,6 +83,12 @@ data.
 Shell-free execution bound to the task: it requires the active structured assignee,
 binds the executable bytes and the exact task digest, stores immutable
 process/outcome/summary records, then links their digests with compare-and-swap.
+
+The complete form is `amq-squad evidence run TASK --profile PROFILE --session SESSION
+--me ACTOR --subject TEXT --attempt-id ID -- COMMAND [ARG...]`. Only `git`, `make` and
+`go` are accepted as the command, and the wrapped command needs one deterministic `-C`
+target: ambient cwd is ignored, so `-- make ci` runs at the project root no matter where
+you invoke it from.
 
 Reusing an attempt id returns the original result **only** when the complete request
 identity matches; otherwise it conflicts. `evidence show`, `evidence list` and

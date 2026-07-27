@@ -1,13 +1,12 @@
 ---
 name: "wizard"
 description: "Goal-first amq-squad preparation and launch wizard. Use it to turn a request or source into reviewed coordination artifacts, prove exact roster and bootstrap readiness, and present the separate default-No launch gate."
+version: "2.24.0"  # x-release-please-version
 allowed-tools: "Bash, Read, Write, Edit, MultiEdit, Glob, Grep, WebFetch"
 argument-hint: "[request | stage goal|brief|rules|roles|profile|readiness|launch]"
 user-invocable: true
 trigger: "/wizard"
 ---
-**Skill version: 2.24.0** - Start the first response by stating the loaded identity as `amq-squad skill v2.24.0` before status or analysis.
-
 # amq-squad:wizard
 
 Use this operator-facing skill before a new squad launches. It owns goal intake,
