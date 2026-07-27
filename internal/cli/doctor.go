@@ -663,8 +663,8 @@ func doctorCheckGoalSupervision(d doctorExecution, workstream string) doctorChec
 	profile := doctorProfile(d)
 	if strings.TrimSpace(workstream) == "" || !team.ExistsProfile(d.ProjectDir, profile) {
 		return doctorCheck{
-			Name: name, Kind: "goal_supervision", Status: doctorOK,
-			Detail: "no resolved team workstream; assessment skipped",
+			Name: name, Kind: "goal_supervision", Status: doctorWarn,
+			Detail: "no resolved team workstream; goal supervision assessment is unavailable",
 		}
 	}
 	t, err := team.ReadProfile(d.ProjectDir, profile)

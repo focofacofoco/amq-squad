@@ -234,8 +234,12 @@ and surface a persistent `layout_finalization` warning in text and JSON status.
 native goal state. The object is schema-versioned, time-bounded, and
 fingerprinted across the exact project/profile/session namespace, lead and
 launch identity, recorded managed pane, prepared run, native goal attempt,
-pause generation, blocker/gate evidence, invariants, policy revision, claim
-projection, and retry budget.
+pause generation, fresh lifecycle, blocker/gate/local-input evidence,
+invariants, policy revision, claim projection, and retry budget. A managed
+pane requires the canonical launch target `current-window`, `new-window`, or
+`new-session`, plus exact pane ID, window ID, tmux session, and deterministic
+lead title. PID liveness, process-binary identity, and pane identity must all
+be positive; no one signal substitutes for the others.
 
 The state vocabulary is deliberately closed:
 
@@ -257,6 +261,15 @@ message, or inject `/goal resume`. A later delivery layer must consume the
 same fresh fingerprint and atomically establish claim-once state before any
 mutation. Fuzzy pane discovery, legacy name matching, raw tmux send-keys, and
 unknown source states are not eligible fallbacks.
+
+PR4 intentionally leaves durable claim, retry-budget, and blocker-resolution
+observations unknown in production. Therefore its production assessment cannot
+reach `native_goal_paused_eligible` by absence. PR5 must populate all three
+from durable stores, revalidate the exact typed goal and attempt against the
+generated command and accepted prepared-run goal, and use
+`fingerprint + attempt_id` as the claim key. The projected resume action stays
+unavailable until that claim-once execution path exists; every mutating action
+still carries its fingerprint, attempt ID, and confirmation wording.
 
 ## Wake outside a managed pane
 

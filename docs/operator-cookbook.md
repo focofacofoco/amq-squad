@@ -289,17 +289,22 @@ Its states are `running`, `parked_waiting_amq`,
 `native_goal_blocked_unknown`, `lead_down`, `pane_busy_or_unverified`, and
 `goal_terminal`. Eligibility is a positive conjunction: exact namespace,
 lead, launch, pane, goal attempt, and pause generations; fresh complete
-sources; durable blocker resolution; no open or ambiguous gate; no local
-input; passing invariants; no prior claim; and available retry budget.
+sources and lifecycle; full PID/process-binary/exact-pane identity; exact typed
+goal and attempt matching the generated command and accepted prepared-run
+goal; durable blocker resolution; no open or ambiguous gate; a successful
+lead-pane local-input scan showing no prompt; passing invariants; a durably
+clear claim; and a durably available retry budget.
 Unknown, stale, missing, or contradictory evidence is ineligible.
 
 The policy projection is `manual`, `notify-only`, or `safe-auto`. Profiles
 without an explicit policy remain `manual` revision 1. In this read-only
 phase, even `safe-auto` only sets `automatic_resume_allowed` in the
 assessment; no automatic delivery occurs. Use the emitted inspect, restore,
-notify, and resume action objects as operator guidance, and re-read the
-assessment immediately before any manual action because its fingerprint and
-freshness bind the observed attempt.
+and notify action objects as operator guidance. The resume action is
+deliberately unavailable until PR5 supplies durable blocker-resolution,
+claim, and budget evidence plus the claim-once executor. Mutating action
+objects carry the exact assessment fingerprint, attempt ID, and confirmation
+wording; re-read the assessment immediately before any manual action.
 
 ## Common Failures
 

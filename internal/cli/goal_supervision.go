@@ -1,11 +1,16 @@
 package cli
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/omriariav/amq-squad/v2/internal/activity"
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
 	"github.com/omriariav/amq-squad/v2/internal/runtimeaction"
@@ -38,11 +43,14 @@ type GoalSupervisionSourceStatus struct {
 }
 
 type GoalSupervisionRuntimeIdentity struct {
-	Live        bool `json:"live"`
-	PIDLive     bool `json:"pid_live"`
-	PaneLive    bool `json:"pane_live"`
-	PIDAlive    bool `json:"pid_alive"`
-	BinaryMatch bool `json:"binary_match"`
+	Known        bool `json:"known"`
+	Live         bool `json:"live"`
+	FullLive     bool `json:"full_live"`
+	VerifiedDown bool `json:"verified_down"`
+	PIDLive      bool `json:"pid_live"`
+	PaneLive     bool `json:"pane_live"`
+	PIDAlive     bool `json:"pid_alive"`
+	BinaryMatch  bool `json:"binary_match"`
 }
 
 type GoalSupervisionPaneIdentity struct {
@@ -59,7 +67,9 @@ type GoalSupervisionPaneIdentity struct {
 type GoalSupervisionGoalIdentity struct {
 	Mode          string `json:"mode,omitempty"`
 	NativeGoal    bool   `json:"native_goal"`
+	StateKnown    bool   `json:"state_known"`
 	Verified      bool   `json:"verified"`
+	ContentExact  bool   `json:"content_exact"`
 	Source        string `json:"source,omitempty"`
 	DeliveryState string `json:"delivery_state,omitempty"`
 	GoalDigest    string `json:"goal_digest,omitempty"`
@@ -98,6 +108,13 @@ type GoalSupervisionBlockerEvidence struct {
 	ResolutionDigest string `json:"resolution_digest,omitempty"`
 }
 
+type GoalSupervisionLifecycleEvidence struct {
+	Known  bool   `json:"known"`
+	Fresh  bool   `json:"fresh"`
+	Source string `json:"source,omitempty"`
+	Phase  string `json:"phase,omitempty"`
+}
+
 type GoalSupervisionGateEvidence struct {
 	Known     bool `json:"known"`
 	Open      int  `json:"open"`
@@ -105,6 +122,7 @@ type GoalSupervisionGateEvidence struct {
 }
 
 type GoalSupervisionLocalInputEvidence struct {
+	Known       bool   `json:"known"`
 	Observed    bool   `json:"observed"`
 	Kind        string `json:"kind,omitempty"`
 	Summary     string `json:"summary,omitempty"`
@@ -123,17 +141,30 @@ type GoalSupervisionEligibilityReason struct {
 }
 
 type GoalSupervisionClaimProjection struct {
+	Known         bool   `json:"known"`
 	State         string `json:"state"`
 	ClaimID       string `json:"claim_id,omitempty"`
 	DeliveryStage string `json:"delivery_stage,omitempty"`
 	Indeterminate bool   `json:"indeterminate,omitempty"`
 }
 
+type GoalSupervisionBudgetEvidence struct {
+	Known   bool `json:"known"`
+	Allowed bool `json:"allowed"`
+}
+
+type GoalSupervisionAction struct {
+	runtimeaction.Action
+	Fingerprint  string `json:"fingerprint,omitempty"`
+	AttemptID    string `json:"attempt_id,omitempty"`
+	Confirmation string `json:"confirmation,omitempty"`
+}
+
 type GoalSupervisionActions struct {
-	Inspect runtimeActionJSON `json:"inspect"`
-	Restore runtimeActionJSON `json:"restore"`
-	Notify  runtimeActionJSON `json:"notify"`
-	Resume  runtimeActionJSON `json:"resume"`
+	Inspect GoalSupervisionAction `json:"inspect"`
+	Restore GoalSupervisionAction `json:"restore"`
+	Notify  GoalSupervisionAction `json:"notify"`
+	Resume  GoalSupervisionAction `json:"resume"`
 }
 
 // GoalSupervisionAssessment is the versioned, read-only #498 supervision
@@ -151,34 +182,32 @@ type GoalSupervisionAssessment struct {
 	AutomaticResumeAllowed bool                               `json:"automatic_resume_allowed"`
 	AttentionRequired      bool                               `json:"attention_required"`
 	Binding                GoalSupervisionBinding             `json:"binding"`
+	Lifecycle              GoalSupervisionLifecycleEvidence   `json:"lifecycle"`
 	Blocker                GoalSupervisionBlockerEvidence     `json:"blocker"`
 	Gates                  GoalSupervisionGateEvidence        `json:"gates"`
 	LocalInput             GoalSupervisionLocalInputEvidence  `json:"local_input"`
 	Invariants             GoalSupervisionInvariantEvidence   `json:"invariants"`
 	Policy                 team.GoalSupervisionPolicyStatus   `json:"policy"`
 	Claim                  GoalSupervisionClaimProjection     `json:"claim"`
+	Budget                 GoalSupervisionBudgetEvidence      `json:"budget"`
 	Reasons                []GoalSupervisionEligibilityReason `json:"eligibility_reasons"`
 	Actions                GoalSupervisionActions             `json:"actions"`
 }
 
 type goalSupervisionAssessmentInput struct {
-	ObservedAt       time.Time
-	Now              time.Time
-	MaxAge           time.Duration
-	SourceErrors     []string
-	Binding          GoalSupervisionBinding
-	GoalStateKnown   bool
-	NativePaused     bool
-	ParkedWaitingAMQ bool
-	GoalTerminal     bool
-	Blocker          GoalSupervisionBlockerEvidence
-	Gates            GoalSupervisionGateEvidence
-	LocalInput       GoalSupervisionLocalInputEvidence
-	InvariantErrors  []string
-	Policy           team.GoalSupervisionPolicyStatus
-	Claim            GoalSupervisionClaimProjection
-	ClaimClear       bool
-	BudgetAllowed    bool
+	ObservedAt      time.Time
+	Now             time.Time
+	MaxAge          time.Duration
+	SourceErrors    []string
+	Binding         GoalSupervisionBinding
+	Lifecycle       GoalSupervisionLifecycleEvidence
+	Blocker         GoalSupervisionBlockerEvidence
+	Gates           GoalSupervisionGateEvidence
+	LocalInput      GoalSupervisionLocalInputEvidence
+	InvariantErrors []string
+	Policy          team.GoalSupervisionPolicyStatus
+	Claim           GoalSupervisionClaimProjection
+	Budget          GoalSupervisionBudgetEvidence
 }
 
 type goalSupervisionGateObservation struct {
@@ -196,25 +225,46 @@ func assessGoalSupervision(in goalSupervisionAssessmentInput) GoalSupervisionAss
 	if in.Now.IsZero() {
 		in.Now = in.ObservedAt
 	}
-	if !in.GoalStateKnown {
+	in.Binding.Runtime.FullLive = goalSupervisionFullRuntimeLive(in.Binding.Runtime)
+	in.Binding.Runtime.VerifiedDown = goalSupervisionRuntimeVerifiedDown(in.Binding.Runtime)
+	nativePaused := goalSupervisionNativePaused(in.Binding.Goal)
+	nativeBlockedObserved := goalSupervisionNativeBlockedObserved(in.Binding.Goal)
+	if !in.Binding.Goal.StateKnown {
 		in.SourceErrors = append(in.SourceErrors, "native goal state is unverified")
+	}
+	if nativeBlockedObserved && !in.Binding.Goal.ContentExact {
+		in.SourceErrors = append(in.SourceErrors, "native goal binding contents are not exact")
+	}
+	if !in.Lifecycle.Known || !in.Lifecycle.Fresh {
+		in.SourceErrors = append(in.SourceErrors, "goal lifecycle evidence is absent, stale, or unreadable")
 	}
 	if !in.Gates.Known {
 		in.SourceErrors = append(in.SourceErrors, "operator gate source is unknown")
 	}
-	if in.NativePaused && !in.Binding.Pane.BusyKnown {
+	if in.Gates.Ambiguous {
+		in.SourceErrors = append(in.SourceErrors, "operator gate evidence is ambiguous")
+	}
+	if nativePaused && !in.Binding.Pane.BusyKnown {
 		in.SourceErrors = append(in.SourceErrors, "pane busy state is unknown")
 	}
-	if in.NativePaused && !in.Blocker.Known {
+	if nativePaused && in.Binding.Runtime.FullLive && !in.LocalInput.Known {
+		in.SourceErrors = append(in.SourceErrors, "lead local-input state is unknown")
+	}
+	if nativePaused && !in.Blocker.Known {
 		in.SourceErrors = append(in.SourceErrors, "native goal blocker is unknown")
 	}
-	if in.Claim.Indeterminate {
-		in.SourceErrors = append(in.SourceErrors, "claim state is indeterminate")
+	if nativePaused {
+		if !in.Claim.Known || in.Claim.Indeterminate {
+			in.SourceErrors = append(in.SourceErrors, "claim state is indeterminate")
+		}
+		if !in.Budget.Known {
+			in.SourceErrors = append(in.SourceErrors, "retry budget state is unknown")
+		}
 	}
 	in.SourceErrors = stableUniqueStrings(in.SourceErrors)
 	in.InvariantErrors = stableUniqueStrings(in.InvariantErrors)
 	if in.Claim.State == "" {
-		in.Claim.State = "none"
+		in.Claim.State = "unknown"
 	}
 	if in.Policy.Mode == "" {
 		in.Policy = team.GoalSupervisionPolicyStatus{
@@ -231,6 +281,7 @@ func assessGoalSupervision(in goalSupervisionAssessmentInput) GoalSupervisionAss
 			Errors:   in.SourceErrors,
 		},
 		Binding:    in.Binding,
+		Lifecycle:  in.Lifecycle,
 		Blocker:    in.Blocker,
 		Gates:      in.Gates,
 		LocalInput: in.LocalInput,
@@ -239,6 +290,7 @@ func assessGoalSupervision(in goalSupervisionAssessmentInput) GoalSupervisionAss
 		},
 		Policy: in.Policy,
 		Claim:  in.Claim,
+		Budget: in.Budget,
 	}
 	a.Reasons = goalSupervisionEligibilityReasons(a, in)
 	a.Eligible = allGoalSupervisionReasonsPass(a.Reasons)
@@ -255,28 +307,35 @@ func goalSupervisionEligibilityReasons(a GoalSupervisionAssessment, in goalSuper
 		return GoalSupervisionEligibilityReason{Code: code, Passed: passed, Detail: detail}
 	}
 	b := a.Binding
+	nativePaused := goalSupervisionNativePaused(b.Goal)
 	return []GoalSupervisionEligibilityReason{
 		reason("fresh_assessment", a.Fresh, "assessment must remain inside its freshness window"),
 		reason("sources_complete", a.Source.Complete, strings.Join(a.Source.Errors, "; ")),
 		reason("exact_namespace", goalSupervisionAllNonBlank(b.Project, b.Profile, b.Session, b.NamespaceID), "project/profile/session/namespace must be exact"),
 		reason("exact_lead_identity", goalSupervisionAllNonBlank(b.LeadRole, b.LeadHandle), "lead role and handle must be exact"),
-		reason("resumable_lifecycle", !in.ParkedWaitingAMQ && !in.GoalTerminal, "parked and terminal lifecycles are never resume-eligible"),
-		reason("native_goal_paused", in.NativePaused && b.Goal.NativeGoal && b.Goal.Verified, "verified blocked native /goal binding required"),
+		reason("lifecycle_known", a.Lifecycle.Known && a.Lifecycle.Fresh, "fresh durable lifecycle evidence is required"),
+		reason("resumable_lifecycle", a.Lifecycle.Known && a.Lifecycle.Fresh && a.Lifecycle.Phase != "parked_waiting_amq" && a.Lifecycle.Phase != "goal_terminal", "parked and terminal lifecycles are never resume-eligible"),
+		reason("native_goal_paused", nativePaused, "verified blocked native /goal binding required"),
+		reason("goal_binding_content", b.Goal.ContentExact, "typed goal and attempt must match the exact generated command and prepared-run goal"),
 		reason("goal_attempt", b.Goal.Mode == "native_goal_blocked" && goalSupervisionAllNonBlank(b.Goal.Source, b.Goal.DeliveryState, b.Goal.GoalDigest, b.Goal.AttemptID, b.Goal.BindingDigest, b.Goal.CommandDigest), "exact blocked native goal, attempt, binding, delivery, and command digests required"),
 		reason("launch_generation", goalSupervisionAllNonBlank(b.LaunchID, b.LaunchRecordDigest) && b.LaunchRecordModTime > 0 && !b.LaunchStartedAt.IsZero(), "launch ID, digest, modtime, and start time required"),
 		reason("prepared_run_binding", goalSupervisionAllNonBlank(b.PreparedRunGeneration, b.PreparedRunDigest, b.PreparedLaunchAttempt, b.PreparedGoalNamespace, b.PreparedGoalDigest) && b.PreparedGoalNamespace == b.NamespaceID, "prepared run generation, launch attempt, and exact namespace goal binding required"),
 		reason("pause_generation", goalSupervisionAllNonBlank(b.PauseGeneration), "native pause generation required"),
-		reason("pane_identity", b.Pane.Managed && goalSupervisionAllNonBlank(b.Pane.PaneID) && b.Runtime.Live && b.Runtime.PaneLive, "exact managed live pane required"),
+		reason("runtime_identity", b.Runtime.FullLive, "PID, process binary, and exact pane must all be positively live"),
+		reason("pane_identity", b.Pane.Managed && goalSupervisionAllNonBlank(b.Pane.PaneID) && b.Runtime.FullLive, "exact managed live pane required"),
 		reason("pane_idle", b.Pane.BusyKnown && !b.Pane.Busy, "positive idle evidence required"),
 		reason("blocker_known", a.Blocker.Known && goalSupervisionAllNonBlank(a.Blocker.ID), "original blocker identity required"),
 		reason("blocker_resolved", a.Blocker.Resolved && goalSupervisionAllNonBlank(a.Blocker.ResolutionDigest), "durable blocker-resolution evidence required"),
 		reason("gates_known", a.Gates.Known, "gate source must be available"),
 		reason("no_open_gate", a.Gates.Known && a.Gates.Open == 0, "operator gates must be closed"),
 		reason("no_gate_ambiguity", !a.Gates.Ambiguous, "shadowed or unbound gate evidence is ineligible"),
-		reason("no_local_input", !a.LocalInput.Observed, "permission and local-input prompts require a human"),
+		reason("local_input_known", a.LocalInput.Known, "lead pane local-input scan must succeed"),
+		reason("no_local_input", a.LocalInput.Known && !a.LocalInput.Observed, "permission and local-input prompts require a human"),
 		reason("invariants_ok", a.Invariants.OK, strings.Join(a.Invariants.Errors, "; ")),
-		reason("claim_clear", in.ClaimClear && !a.Claim.Indeterminate, "no prior or indeterminate claim may exist"),
-		reason("retry_budget", in.BudgetAllowed, "retry/cooldown/loop budget must remain"),
+		reason("claim_known", a.Claim.Known && !a.Claim.Indeterminate, "durable claim state must be observed"),
+		reason("claim_clear", a.Claim.Known && a.Claim.State == "none" && !a.Claim.Indeterminate, "no prior or indeterminate claim may exist"),
+		reason("retry_budget_known", a.Budget.Known, "durable retry/cooldown/loop budget state must be observed"),
+		reason("retry_budget", a.Budget.Known && a.Budget.Allowed, "retry/cooldown/loop budget must remain"),
 	}
 }
 
@@ -291,24 +350,31 @@ func goalSupervisionAllNonBlank(values ...string) bool {
 
 func goalSupervisionStateFor(a GoalSupervisionAssessment, in goalSupervisionAssessmentInput) GoalSupervisionState {
 	switch {
-	case in.GoalTerminal:
+	case a.Lifecycle.Known && a.Lifecycle.Fresh && a.Lifecycle.Phase == "goal_terminal":
 		return GoalSupervisionGoalTerminal
-	case !a.Binding.Runtime.Live:
-		return GoalSupervisionLeadDown
-	case in.ParkedWaitingAMQ:
+	case a.Lifecycle.Known && a.Lifecycle.Fresh && a.Lifecycle.Phase == "parked_waiting_amq":
 		return GoalSupervisionParkedWaitingAMQ
-	case in.GoalStateKnown && !in.NativePaused:
-		return GoalSupervisionRunning
-	case !in.GoalStateKnown:
-		return GoalSupervisionNativeGoalBlockedUnknown
-	case !a.Binding.Pane.Managed || !a.Binding.Runtime.PaneLive || !a.Binding.Pane.BusyKnown || a.Binding.Pane.Busy:
+	case a.LocalInput.Known && a.LocalInput.Observed || a.Gates.Known && a.Gates.Open > 0:
+		return GoalSupervisionNativeGoalBlockedHuman
+	case goalSupervisionNativePaused(a.Binding.Goal) && a.Blocker.Known && !a.Blocker.Resolved:
+		return GoalSupervisionNativeGoalBlockedHuman
+	case goalSupervisionNativePaused(a.Binding.Goal) &&
+		a.Binding.Runtime.FullLive &&
+		a.Binding.Pane.Managed &&
+		(!a.Binding.Pane.BusyKnown || a.Binding.Pane.Busy):
 		return GoalSupervisionPaneBusyOrUnverified
-	case a.LocalInput.Observed || a.Gates.Known && a.Gates.Open > 0:
-		return GoalSupervisionNativeGoalBlockedHuman
-	case !a.Source.Complete || a.Gates.Ambiguous || !a.Invariants.OK || !a.Blocker.Known:
+	case !a.Source.Complete:
 		return GoalSupervisionNativeGoalBlockedUnknown
-	case a.Blocker.Known && !a.Blocker.Resolved:
-		return GoalSupervisionNativeGoalBlockedHuman
+	case a.Binding.Runtime.VerifiedDown:
+		return GoalSupervisionLeadDown
+	case a.Binding.Goal.StateKnown && !goalSupervisionNativePaused(a.Binding.Goal):
+		return GoalSupervisionRunning
+	case !a.Binding.Goal.StateKnown:
+		return GoalSupervisionNativeGoalBlockedUnknown
+	case !a.Binding.Runtime.FullLive || !a.Binding.Pane.Managed || !a.Binding.Pane.BusyKnown || a.Binding.Pane.Busy:
+		return GoalSupervisionPaneBusyOrUnverified
+	case a.Gates.Ambiguous || !a.Invariants.OK || !a.Blocker.Known:
+		return GoalSupervisionNativeGoalBlockedUnknown
 	case a.Eligible:
 		return GoalSupervisionNativeGoalPausedEligible
 	default:
@@ -352,17 +418,18 @@ func goalSupervisionFingerprint(a GoalSupervisionAssessment) string {
 func goalSupervisionActions(a GoalSupervisionAssessment) GoalSupervisionActions {
 	scope := runtimeActionScope(a.Binding.Project, a.Binding.Profile, a.Binding.Session)
 	namespaceID := a.Binding.NamespaceID
+	mutationBound := goalSupervisionAllNonBlank(a.Fingerprint, a.Binding.Goal.AttemptID)
 	restoreAvailable := a.State == GoalSupervisionLeadDown &&
+		a.Source.Complete &&
+		a.Binding.Runtime.VerifiedDown &&
 		goalSupervisionReasonPassed(a.Reasons, "exact_namespace") &&
 		goalSupervisionReasonPassed(a.Reasons, "exact_lead_identity") &&
-		!a.Gates.Ambiguous
-	resumeAvailable := a.Eligible && a.Policy.Mode != team.GoalSupervisionNotifyOnly
-	resumeReason := ""
-	switch {
-	case !a.Eligible:
+		goalSupervisionReasonPassed(a.Reasons, "launch_generation") &&
+		a.Gates.Known && a.Gates.Open == 0 && !a.Gates.Ambiguous &&
+		mutationBound
+	resumeReason := "claim-once native goal resume execution is reserved for PR5"
+	if !a.Eligible {
 		resumeReason = firstFailedGoalSupervisionReason(a.Reasons)
-	case a.Policy.Mode == team.GoalSupervisionNotifyOnly:
-		resumeReason = "goal supervision policy is notify-only"
 	}
 	actions := runtimeaction.ApplyCanonical([]runtimeaction.Action{
 		{
@@ -384,18 +451,50 @@ func goalSupervisionActions(a GoalSupervisionAssessment) GoalSupervisionActions 
 		},
 		{
 			Kind: "native_goal_resume", Label: "resume exact native /goal attempt",
-			Scope: "agent", NamespaceID: namespaceID, Command: "/goal resume",
-			Mutates: true, NeedsConfirmation: a.Policy.Mode != team.GoalSupervisionSafeAuto,
-			Available: resumeAvailable, Reason: resumeReason,
+			Scope: "agent", NamespaceID: namespaceID,
+			Command: "amq-squad goal supervision-resume" + scope +
+				" --attempt-id " + shellQuote(a.Binding.Goal.AttemptID) +
+				" --assessment-fingerprint " + shellQuote(a.Fingerprint),
+			Mutates: true, NeedsConfirmation: true,
+			Available: false, Reason: resumeReason,
 		},
 	})
 	// These two are read-only display actions even though their new kinds are
 	// unknown to the legacy runtimeaction classifier.
 	actions[0].ActionKind = "display"
 	actions[2].ActionKind = "display"
-	return GoalSupervisionActions{
-		Inspect: actions[0], Restore: actions[1], Notify: actions[2], Resume: actions[3],
+	wrap := func(action runtimeaction.Action) GoalSupervisionAction {
+		out := GoalSupervisionAction{Action: action}
+		if action.Mutates {
+			out.Fingerprint = a.Fingerprint
+			out.AttemptID = a.Binding.Goal.AttemptID
+			out.Confirmation = "Reassess this exact fingerprint and attempt immediately before mutation."
+		}
+		return out
 	}
+	return GoalSupervisionActions{
+		Inspect: wrap(actions[0]), Restore: wrap(actions[1]),
+		Notify: wrap(actions[2]), Resume: wrap(actions[3]),
+	}
+}
+
+func goalSupervisionNativePaused(goal GoalSupervisionGoalIdentity) bool {
+	return goalSupervisionNativeBlockedObserved(goal) && goal.ContentExact
+}
+
+func goalSupervisionNativeBlockedObserved(goal GoalSupervisionGoalIdentity) bool {
+	return goal.StateKnown && goal.Verified && goal.NativeGoal &&
+		goal.Mode == "native_goal_blocked"
+}
+
+func goalSupervisionFullRuntimeLive(runtime GoalSupervisionRuntimeIdentity) bool {
+	return runtime.Known && runtime.Live && runtime.PIDLive && runtime.PaneLive &&
+		runtime.PIDAlive && runtime.BinaryMatch
+}
+
+func goalSupervisionRuntimeVerifiedDown(runtime GoalSupervisionRuntimeIdentity) bool {
+	return runtime.Known && !runtime.Live && !runtime.PIDLive && !runtime.PaneLive &&
+		!runtime.PIDAlive
 }
 
 func goalSupervisionReasonPassed(reasons []GoalSupervisionEligibilityReason, code string) bool {
@@ -452,6 +551,10 @@ var goalSupervisionPaneBusy = func(paneID string) (busy bool, known bool) {
 	return busy, err == nil
 }
 
+var goalSupervisionPaneInspector = tmuxpane.InspectPaneExactByID
+
+var goalSupervisionLocalInputDetector = tmuxpane.DetectLocalInputBlocker
+
 func buildGoalSupervisionAssessment(
 	t team.Team,
 	profile, session string,
@@ -464,14 +567,10 @@ func buildGoalSupervisionAssessment(
 	now time.Time,
 ) GoalSupervisionAssessment {
 	profile = squadnamespace.NormalizeProfile(profile)
-	bindingData := goalBindingForStatus(ns, newSessionStatusContext(t, profile, session, firstLiveTmuxSession(rows)), rows)
+	var lifecycle *activity.Snapshot
 	input := goalSupervisionAssessmentInput{
-		ObservedAt:      now.UTC(),
-		Now:             now.UTC(),
 		Policy:          team.EffectiveGoalSupervisionPolicy(t),
-		Claim:           GoalSupervisionClaimProjection{State: "none"},
-		ClaimClear:      true,
-		BudgetAllowed:   true,
+		Claim:           GoalSupervisionClaimProjection{State: "unknown"},
 		SourceErrors:    append([]string(nil), gateObservation.SourceErrors...),
 		Gates:           gateObservation.Evidence,
 		InvariantErrors: goalSupervisionInvariantStrings(invariantErrors),
@@ -480,18 +579,28 @@ func buildGoalSupervisionAssessment(
 			LeadRole: strings.TrimSpace(t.Lead),
 		},
 	}
+	finish := func() GoalSupervisionAssessment {
+		observedAt := time.Now().UTC()
+		if probe.Now != nil {
+			observedAt = probe.Now().UTC()
+		}
+		input.ObservedAt = observedAt
+		input.Now = observedAt
+		input.Lifecycle = goalSupervisionLifecycleObservation(lifecycle, observedAt)
+		return assessGoalSupervision(input)
+	}
 	if namespaceConflict != nil {
 		input.SourceErrors = append(input.SourceErrors, "namespace/profile identity is ambiguous")
 		input.Gates.Ambiguous = true
 	}
 	if !t.Orchestrated || input.Binding.LeadRole == "" {
 		input.SourceErrors = append(input.SourceErrors, "profile has no configured visible lead")
-		return assessGoalSupervision(input)
+		return finish()
 	}
 	leadMember, ok := teamMemberByRole(t, input.Binding.LeadRole)
 	if !ok {
 		input.SourceErrors = append(input.SourceErrors, "configured lead role does not resolve to one member")
-		return assessGoalSupervision(input)
+		return finish()
 	}
 	input.Binding.LeadHandle = strings.TrimSpace(leadMember.Handle)
 	if input.Binding.LeadHandle == "" {
@@ -505,17 +614,27 @@ func buildGoalSupervisionAssessment(
 	}
 	if len(leadRows) != 1 {
 		input.SourceErrors = append(input.SourceErrors, "visible lead runtime does not resolve to exactly one record")
-		return assessGoalSupervision(input)
+		return finish()
 	}
 	row := leadRows[0]
+	lifecycle = row.Activity
 	if row.ClassificationError != "" {
 		input.SourceErrors = append(input.SourceErrors, "lead runtime classification: "+row.ClassificationError)
 	}
 	if !row.liveness.LaunchFound {
 		input.SourceErrors = append(input.SourceErrors, "lead launch record is missing")
-		return assessGoalSupervision(input)
+		return finish()
 	}
-	rec := row.liveness.LaunchRecord
+	rec, digest, modTime, snapshotErr := readGoalSupervisionLaunchSnapshot(row.AgentDir)
+	if snapshotErr != nil {
+		input.SourceErrors = append(input.SourceErrors, "capture coherent launch snapshot: "+snapshotErr.Error())
+		return finish()
+	}
+	if digestJSON(row.liveness.LaunchRecord) != digestJSON(rec) {
+		input.SourceErrors = append(input.SourceErrors, "lead launch record drifted during status assessment")
+	}
+	input.Binding.LaunchRecordDigest = digest
+	input.Binding.LaunchRecordModTime = modTime
 	if rec.BootstrapExpectation != nil {
 		input.Binding.LaunchID = strings.TrimSpace(rec.BootstrapExpectation.LaunchID)
 	}
@@ -525,67 +644,240 @@ func buildGoalSupervisionAssessment(
 	input.Binding.PreparedLaunchAttempt = strings.TrimSpace(rec.PreparedRunLaunchAttempt)
 	input.Binding.PreparedGoalNamespace = strings.TrimSpace(rec.PreparedRunGoalNamespace)
 	input.Binding.PreparedGoalDigest = strings.TrimSpace(rec.PreparedRunGoalDigest)
-	digest, modTime, generationErr := readGoalFileGeneration(launch.ExistingPath(row.AgentDir))
-	if generationErr != nil {
-		input.SourceErrors = append(input.SourceErrors, "capture launch generation: "+generationErr.Error())
-	} else {
-		input.Binding.LaunchRecordDigest = digest
-		input.Binding.LaunchRecordModTime = modTime
-	}
 	paneID := ""
 	if rec.Tmux != nil {
 		paneID = strings.TrimSpace(rec.Tmux.PaneID)
 		input.Binding.Pane = GoalSupervisionPaneIdentity{
-			Managed: paneID != "" && rec.Tmux.Target != "adopted",
+			Managed: paneID != "" && goalSupervisionManagedTmuxTarget(rec.Tmux.Target),
 			Session: rec.Tmux.Session, WindowID: rec.Tmux.WindowID, WindowName: rec.Tmux.WindowName,
 			PaneID: paneID, Target: rec.Tmux.Target,
 		}
 	}
 	runtimeIdentity := classifyLaunchRuntimeIdentity(rec, leadMember.Binary, paneID, launchRuntimeProbeFromDuplicate(probe))
+	paneInspection := goalSupervisionPaneInspector(paneID)
+	paneObservationKnown := paneInspection.State == tmuxpane.PaneInspectionFound ||
+		paneInspection.State == tmuxpane.PaneInspectionGone
+	paneLive := false
+	if paneInspection.State == tmuxpane.PaneInspectionFound {
+		paneLive = goalSupervisionExactPaneIdentity(
+			paneInspection.Pane, rec.Tmux, session, input.Binding.LeadRole,
+		)
+		if !paneLive {
+			input.SourceErrors = append(input.SourceErrors, "live tmux pane does not match the exact recorded lead identity")
+			paneObservationKnown = false
+		}
+	} else if !paneObservationKnown {
+		detail := strings.TrimSpace(paneInspection.Detail)
+		if detail == "" {
+			detail = string(paneInspection.State)
+		}
+		input.SourceErrors = append(input.SourceErrors, "exact lead pane inspection unavailable: "+detail)
+	}
 	input.Binding.Runtime = GoalSupervisionRuntimeIdentity{
-		Live: runtimeIdentity.Live, PIDLive: runtimeIdentity.PIDLive, PaneLive: runtimeIdentity.PaneLive,
+		Known: probe.PIDAlive != nil && probe.ProcessMatch != nil &&
+			probe.ProcessTTY != nil && probe.ProcessStartTime != nil && paneObservationKnown,
+		Live: runtimeIdentity.PIDLive || paneLive, PIDLive: runtimeIdentity.PIDLive, PaneLive: paneLive,
 		PIDAlive: runtimeIdentity.PIDAlive, BinaryMatch: runtimeIdentity.BinaryMatch,
 	}
-	if runtimeIdentity.PaneLive {
+	if paneLive {
 		input.Binding.Pane.Busy, input.Binding.Pane.BusyKnown = goalSupervisionPaneBusy(paneID)
+		blocker, observed, err := goalSupervisionLocalInputDetector(paneID)
+		if err != nil {
+			input.SourceErrors = append(input.SourceErrors, "inspect lead local input: "+err.Error())
+		} else {
+			input.LocalInput = GoalSupervisionLocalInputEvidence{
+				Known: true, Observed: observed, Kind: blocker.Kind, Summary: blocker.Summary,
+				Destructive: blocker.Destructive,
+			}
+		}
 	}
-	if row.goalBinding != nil {
+	bindingData := goalBindingForStatus(
+		ns, newSessionStatusContext(t, profile, session, firstLiveTmuxSession(rows)), rows,
+	)
+	if rec.GoalBinding != nil {
 		input.Binding.Goal = GoalSupervisionGoalIdentity{
-			Mode: row.goalBinding.Mode, NativeGoal: row.goalBinding.NativeGoal,
-			Verified: bindingData.Verified,
-			Source:   row.goalBinding.Source, DeliveryState: row.goalBinding.DeliveryState,
-			GoalDigest: digestGoalSupervisionString(row.goalBinding.Goal), AttemptID: strings.TrimSpace(row.goalBinding.AttemptID),
-			BindingDigest: digestJSON(*row.goalBinding), CommandDigest: digestGoalSupervisionString(row.goalBinding.Command),
+			Mode: rec.GoalBinding.Mode, NativeGoal: rec.GoalBinding.NativeGoal,
+			StateKnown: bindingData.Verified, Verified: bindingData.Verified,
+			Source: rec.GoalBinding.Source, DeliveryState: rec.GoalBinding.DeliveryState,
+			GoalDigest: digestGoalSupervisionString(rec.GoalBinding.Goal), AttemptID: strings.TrimSpace(rec.GoalBinding.AttemptID),
+			BindingDigest: digestJSON(*rec.GoalBinding), CommandDigest: digestGoalSupervisionString(rec.GoalBinding.Command),
+		}
+		if nativeGoalBindingBlocked(rec.GoalBinding) {
+			goal, attemptID, err := verifyGoalSupervisionBlockedBinding(
+				t, profile, session, leadMember, rec,
+			)
+			if err != nil {
+				input.SourceErrors = append(input.SourceErrors, "verify blocked native goal binding: "+err.Error())
+				input.Binding.Goal.StateKnown = false
+				input.Binding.Goal.Verified = false
+			} else {
+				input.Binding.Goal.StateKnown = true
+				input.Binding.Goal.Verified = true
+				input.Binding.Goal.ContentExact = true
+				input.Binding.Goal.GoalDigest = digestGoalSupervisionString(goal)
+				input.Binding.Goal.AttemptID = attemptID
+			}
+		} else {
+			input.Binding.Goal.ContentExact = bindingData.Verified
 		}
 		input.Binding.PauseGeneration = digestJSON(struct {
 			Launch  string
 			Binding string
 			Mode    string
-		}{digest, input.Binding.Goal.BindingDigest, row.goalBinding.Mode})
+		}{digest, input.Binding.Goal.BindingDigest, rec.GoalBinding.Mode})
 	}
-	input.GoalStateKnown = bindingData.Verified
-	input.NativePaused = input.GoalStateKnown && bindingData.NativeGoal && bindingData.Mode == "native_goal_blocked"
-	if input.NativePaused {
-		detail := strings.TrimSpace(bindingData.Detail)
+	if goalSupervisionNativePaused(input.Binding.Goal) {
+		detail := strings.TrimSpace(rec.GoalBinding.Detail)
 		input.Blocker = GoalSupervisionBlockerEvidence{
 			ID: digestGoalSupervisionString(detail), Known: detail != "", Detail: detail,
 		}
 	}
-	if row.LocalInput != nil {
-		input.LocalInput = GoalSupervisionLocalInputEvidence{
-			Observed: true, Kind: row.LocalInput.Kind, Summary: row.LocalInput.Summary,
-			Destructive: row.LocalInput.Destructive,
-		}
+	return finish()
+}
+
+func readGoalSupervisionLaunchSnapshot(agentDir string) (launch.Record, string, int64, error) {
+	path := launch.ExistingPath(agentDir)
+	file, err := os.Open(path)
+	if err != nil {
+		return launch.Record{}, "", 0, err
 	}
-	if row.Activity != nil && !row.Activity.Stale {
-		switch strings.TrimSpace(row.Activity.Phase) {
-		case "parked_waiting_amq":
-			input.ParkedWaitingAMQ = true
-		case "goal_terminal":
-			input.GoalTerminal = true
-		}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return launch.Record{}, "", 0, err
 	}
-	return assessGoalSupervision(input)
+	payload, err := io.ReadAll(file)
+	if err != nil {
+		return launch.Record{}, "", 0, err
+	}
+	var rec launch.Record
+	if err := json.Unmarshal(payload, &rec); err != nil {
+		return launch.Record{}, "", 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return rec, digestBytes(payload), info.ModTime().UnixNano(), nil
+}
+
+func verifyGoalSupervisionBlockedBinding(
+	t team.Team,
+	profile, session string,
+	member team.Member,
+	rec launch.Record,
+) (string, string, error) {
+	binding := rec.GoalBinding
+	goal, attemptID, err := verifyGoalSupervisionBlockedBindingContents(
+		t, profile, session, member, binding,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	manifest, digest, err := readPreparedRunManifestSnapshot(t.Project, profile, session)
+	if err != nil {
+		return "", "", fmt.Errorf("read accepted prepared goal: %w", err)
+	}
+	if err := verifyGoalSupervisionPreparedGoal(
+		goal, profile, session, rec, manifest, digest,
+	); err != nil {
+		return "", "", err
+	}
+	return goal, attemptID, nil
+}
+
+func verifyGoalSupervisionBlockedBindingContents(
+	t team.Team,
+	profile, session string,
+	member team.Member,
+	binding *launch.GoalBinding,
+) (string, string, error) {
+	if binding == nil || binding.Mode != "native_goal_blocked" || !binding.NativeGoal {
+		return "", "", fmt.Errorf("binding is not a blocked native goal")
+	}
+	if binding.Source != "goal-runtime" || binding.DeliveryState != "blocked" {
+		return "", "", fmt.Errorf("binding source/delivery is not exact blocked runtime evidence")
+	}
+	if !goalSupervisionAllNonBlank(binding.Goal, binding.AttemptID, binding.Command) {
+		return "", "", fmt.Errorf("typed goal, attempt, and command are required")
+	}
+	goal, attemptID, err := parseNativeGoalBindingCommand(binding.Command)
+	if err != nil {
+		return "", "", err
+	}
+	if binding.Goal != goal || strings.TrimSpace(binding.AttemptID) != attemptID {
+		return "", "", fmt.Errorf("typed goal or attempt differs from the generated command")
+	}
+	contract, err := goalDeliveryContractForBinary(member.Binary)
+	if err != nil || !contract.NativeGoal {
+		return "", "", fmt.Errorf("lead binary does not support a native goal contract")
+	}
+	if binding.Command != contract.prompt(goal, t, profile, session, member.Role, attemptID) {
+		return "", "", fmt.Errorf("blocked binding command differs from the exact generated command")
+	}
+	return goal, attemptID, nil
+}
+
+func verifyGoalSupervisionPreparedGoal(
+	goal, profile, session string,
+	rec launch.Record,
+	manifest preparedRunManifest,
+	digest string,
+) error {
+	token := preparedRunTokenFromRecord(rec)
+	if !token.complete() || strings.TrimSpace(token.LaunchAttempt) == "" {
+		return fmt.Errorf("prepared launch identity is incomplete")
+	}
+	if err := validatePreparedRunToken(token, manifest, digest); err != nil {
+		return fmt.Errorf("prepared generation mismatch: %w", err)
+	}
+	if !squadnamespace.ProfilesEqual(manifest.Profile, profile) ||
+		manifest.Session != session ||
+		manifest.Namespace != squadnamespace.ID(profile, session) ||
+		manifest.GoalText != goal ||
+		manifest.GoalNamespace != squadnamespace.ID(profile, session) ||
+		manifest.GoalDigest != strings.TrimSpace(rec.PreparedRunGoalDigest) {
+		return fmt.Errorf("blocked goal differs from the accepted prepared-run goal")
+	}
+	return nil
+}
+
+func goalSupervisionExactPaneIdentity(
+	pane tmuxpane.TmuxPane,
+	recorded *launch.TmuxInfo,
+	session, role string,
+) bool {
+	if recorded == nil {
+		return false
+	}
+	return goalSupervisionAllNonBlank(
+		recorded.PaneID, recorded.WindowID, recorded.Session,
+		pane.PaneID, pane.WindowID, pane.Session, pane.Title,
+	) &&
+		pane.PaneID == recorded.PaneID &&
+		pane.WindowID == recorded.WindowID &&
+		pane.Session == recorded.Session &&
+		pane.Title == paneTitleToken(session, role)
+}
+
+func goalSupervisionLifecycleObservation(
+	snapshot *activity.Snapshot,
+	observedAt time.Time,
+) GoalSupervisionLifecycleEvidence {
+	if snapshot == nil || snapshot.Source != activity.SourceHeartbeat ||
+		snapshot.WrittenAt.IsZero() || observedAt.Before(snapshot.WrittenAt) ||
+		observedAt.Sub(snapshot.WrittenAt) > activity.DefaultStaleAfter {
+		return GoalSupervisionLifecycleEvidence{}
+	}
+	return GoalSupervisionLifecycleEvidence{
+		Known: true, Fresh: true, Source: snapshot.Source,
+		Phase: strings.TrimSpace(snapshot.Phase),
+	}
+}
+
+func goalSupervisionManagedTmuxTarget(target string) bool {
+	switch target {
+	case "current-window", "new-window", "new-session":
+		return true
+	default:
+		return false
+	}
 }
 
 func inspectGoalSupervisionGates(
