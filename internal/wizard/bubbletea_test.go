@@ -661,10 +661,10 @@ func TestGlobalCatalogChoicesMatchAcrossAdapters(t *testing.T) {
 			m.cursor = i
 		}
 	}
-	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // effort
+	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // trust and sandbox posture
 	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // native args
 	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // window
-	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter}) // review
 
 	var numberedOut bytes.Buffer
 	numbered, err := RunNumbered(strings.NewReader("2\n\n\n6\n7\n\n\n\n"), &numberedOut, NumberedOptions{Defaults: defaults, LoadCatalog: load})

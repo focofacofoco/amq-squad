@@ -778,12 +778,7 @@ func (m BubbleModel) choices() []choice {
 	case stageGlobalEffort:
 		return effortChoicesCatalog(m.spec.GlobalAgent, m.ctx.Catalog)
 	case stageGlobalPosture:
-		postures := GlobalPostureChoices(m.spec.GlobalAgent)
-		out := make([]choice, 0, len(postures))
-		for _, posture := range postures {
-			out = append(out, choice{value: posture.Value, label: posture.Label + " · " + posture.Consequence})
-		}
-		return out
+		return globalPostureRows(m.spec.GlobalAgent, m.spec.GlobalPosture)
 	case stageProfile:
 		choices := make([]choice, 0, len(m.ctx.Profiles)+1)
 		for _, profile := range m.ctx.Profiles {
@@ -908,6 +903,18 @@ func (m BubbleModel) defaultCursor() int {
 		want = defaultModelChoiceCatalog(m.spec.GlobalModel, m.spec.GlobalAgent, m.ctx.Catalog)
 	case stageGlobalEffort:
 		want = defaultEffortChoiceCatalog(m.spec.GlobalEffort, m.spec.GlobalAgent, m.ctx.Catalog, effortAutomatic)
+	case stageGlobalPosture:
+		// A stored posture must survive accepting defaults. Omitting this case left the
+		// cursor at index 0, which is the tmux-capable and MOST PERMISSIVE choice, so a
+		// prefilled read-only or workspace-write spec silently upgraded to
+		// danger-full-access on Enter. A trust step that escalates a stored safer value
+		// is the inverse of its purpose.
+		//
+		// An UNRECOGNISED stored value deliberately does NOT resolve to a choice: the
+		// find-loop leaves the cursor at index 0 for display, but commitChoice preserves
+		// the stored value unless the operator actively selects, so the visible
+		// degradation render stays reachable.
+		want = m.spec.GlobalPosture
 	case stageProfile:
 		want = m.spec.Profile
 		if findProfile(m.ctx.Profiles, want) < 0 {
@@ -1688,6 +1695,31 @@ func (m BubbleModel) phaseLabels() []string {
 		return []string{"Scope", "Agent", "Run controls", "Review"}
 	}
 	return []string{"Scope", "Profile & run", "Team", "Run controls", "Brief", "Review"}
+}
+
+// globalPostureRows returns the posture choices for an agent, plus an explicit row for an
+// UNRECOGNISED stored value.
+//
+// Offering the unknown value rather than dropping it is what makes the visible-degradation
+// path reachable. Without the row, the cursor fell to index 0 (the most permissive choice)
+// and pressing Enter OVERWROTE a typo-d posture with danger-full-access, so a value that
+// should have degraded visibly instead silently GAINED sandbox flags. The operator may
+// re-select, but nothing coerces on their behalf.
+func globalPostureRows(agent, stored string) []choice {
+	postures := GlobalPostureChoices(agent)
+	rows := make([]choice, 0, len(postures)+1)
+	stored = strings.TrimSpace(stored)
+	known := false
+	for _, posture := range postures {
+		if strings.EqualFold(posture.Value, stored) {
+			known = true
+		}
+		rows = append(rows, choice{value: posture.Value, label: posture.Label + " · " + posture.Consequence})
+	}
+	if stored != "" && !known {
+		rows = append(rows, choice{value: stored, label: "Keep unknown posture " + stored + " · no sandbox flags applied"})
+	}
+	return rows
 }
 
 // globalPostureReviewLine states the posture AND its tmux consequence, because the

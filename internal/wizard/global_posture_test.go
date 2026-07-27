@@ -1,6 +1,7 @@
 package wizard
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -100,5 +101,90 @@ func TestReviewLineStatesTheTmuxConsequence(t *testing.T) {
 	restricted := globalPostureReviewLine("codex", "read-only")
 	if !strings.Contains(restricted, "CANNOT drive tmux") {
 		t.Errorf("restricted posture line %q must state it CANNOT drive tmux", restricted)
+	}
+}
+
+// The tests above exercise the helpers. Findings 1 and 2 of #568's review lived in ADAPTER
+// WIRING that the helpers never see: defaultCursor omitted the posture stage, and an unknown
+// stored value was coerced to index 0. Helper-level tests plus adapter-level features is the
+// union-vs-component disease again, so these drive each adapter END TO END.
+
+func TestStoredSaferPostureSurvivesAcceptingDefaultsInBubble(t *testing.T) {
+	defaults := Spec{
+		Scope: "global", GlobalRoot: "/neutral", GlobalAgent: "codex",
+		GlobalPosture: "workspace-write", GlobalWindow: "global-orch",
+	}
+	m, err := NewBubbleModel(NumberedOptions{Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.stage = stageGlobalPosture
+	m.configureStage()
+	m.cursor = m.defaultCursor()
+
+	rows := m.choices()
+	if got := rows[m.cursor].value; got != "workspace-write" {
+		t.Fatalf("cursor sits on %q, want the STORED workspace-write; accepting defaults would escalate to %q", got, rows[0].value)
+	}
+}
+
+func TestStoredSaferPostureSurvivesAcceptingDefaultsInNumbered(t *testing.T) {
+	defaults := Spec{
+		Scope: "global", GlobalRoot: "/neutral", GlobalAgent: "codex",
+		GlobalPosture: "workspace-write", GlobalWindow: "global-orch",
+	}
+	got, err := RunNumbered(strings.NewReader(strings.Repeat("\n", 30)), &bytes.Buffer{}, NumberedOptions{Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GlobalPosture != "workspace-write" {
+		t.Errorf("numbered posture = %q, want the stored workspace-write preserved", got.GlobalPosture)
+	}
+	if strings.Contains(strings.Join(got.GlobalArgs(), " "), "danger-full-access") {
+		t.Errorf("accepting defaults escalated to danger-full-access: %v", got.GlobalArgs())
+	}
+}
+
+func TestUnknownStoredPostureIsNotCoercedInBubble(t *testing.T) {
+	defaults := Spec{
+		Scope: "global", GlobalRoot: "/neutral", GlobalAgent: "codex",
+		GlobalPosture: "typo-posture", GlobalWindow: "global-orch",
+	}
+	m, err := NewBubbleModel(NumberedOptions{Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.stage = stageGlobalPosture
+	m.configureStage()
+	m.cursor = m.defaultCursor()
+
+	rows := m.choices()
+	if got := rows[m.cursor].value; got != "typo-posture" {
+		t.Fatalf("cursor sits on %q, want the unknown typo-posture offered and preserved", got)
+	}
+	if !strings.Contains(rows[m.cursor].label, "no sandbox flags applied") {
+		t.Errorf("the unknown row must say what it does: %q", rows[m.cursor].label)
+	}
+}
+
+func TestUnknownStoredPostureIsNotCoercedInNumbered(t *testing.T) {
+	defaults := Spec{
+		Scope: "global", GlobalRoot: "/neutral", GlobalAgent: "codex",
+		GlobalPosture: "typo-posture", GlobalWindow: "global-orch",
+	}
+	var out bytes.Buffer
+	got, err := RunNumbered(strings.NewReader(strings.Repeat("\n", 30)), &out, NumberedOptions{Defaults: defaults})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GlobalPosture != "typo-posture" {
+		t.Errorf("numbered posture = %q, want the unknown value preserved rather than coerced", got.GlobalPosture)
+	}
+	// The whole point of the ruled degradation path: no flags, and the operator can see it.
+	if args := strings.Join(got.GlobalArgs(), " "); strings.Contains(args, "--sandbox") {
+		t.Errorf("an unknown posture must apply NO sandbox flags, got: %s", args)
+	}
+	if !strings.Contains(out.String(), "unknown posture typo-posture") {
+		t.Errorf("the preview must render the degradation visibly:\n%s", out.String())
 	}
 }

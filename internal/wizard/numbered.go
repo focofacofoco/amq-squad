@@ -594,14 +594,12 @@ func runNumberedGlobal(r *bufio.Reader, out io.Writer, s Spec, loadCatalog func(
 	// and this is the flow CI and scripted launches use, where a silently sandboxed NOC is
 	// hardest to notice.
 	{
-		postures := GlobalPostureChoices(s.GlobalAgent)
-		items := make([]choice, 0, len(postures))
-		for _, posture := range postures {
-			items = append(items, choice{value: posture.Value, label: posture.Label + " · " + posture.Consequence})
-		}
+		items := globalPostureRows(s.GlobalAgent, s.GlobalPosture)
 		fmt.Fprintln(out)
 		fmt.Fprintln(out, "A global orchestrator drives tmux. Under a restricted sandbox that control is denied at the socket: the agent launches, then cannot spawn or focus panes.")
-		selected, perr := promptChoice(r, out, "Trust and sandbox posture", items, defaultString(s.GlobalPosture, postures[0].Value))
+		// Default to the STORED value, recognised or not, so accepting the prompt cannot
+		// escalate a safer stored posture or overwrite an unknown one.
+		selected, perr := promptChoice(r, out, "Trust and sandbox posture", items, defaultString(s.GlobalPosture, items[0].value))
 		if perr != nil {
 			return Spec{}, perr
 		}

@@ -809,7 +809,8 @@ func TestNumberedGlobalWizardDelegatesPreviewThenDefaultNo(t *testing.T) {
 	_, globalCalls := withWizardExecutionSeams(t)
 	oldInput, oldOutput := runStartWizardInput, runStartWizardOutput
 	t.Cleanup(func() { runStartWizardInput, runStartWizardOutput = oldInput, oldOutput })
-	// Scope, root, agent, model, effort, Claude args, and window. EOF is default-No confirmation.
+	// Scope, root, agent, model, effort, trust/sandbox posture, Claude args, and window.
+	// EOF is default-No confirmation. Eight newlines: one per prompt.
 	runStartWizardInput = strings.NewReader(strings.Repeat("\n", 8))
 	var prompts strings.Builder
 	runStartWizardOutput = &prompts
