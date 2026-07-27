@@ -196,7 +196,7 @@ func resolveVerifiedLiveIdentityWithDeps(scope liveIdentityScope, deps liveIdent
 	}
 	rec := managed.Record
 	if rec.BootstrapExpectation == nil || strings.TrimSpace(rec.BootstrapExpectation.LaunchID) == "" {
-		return failedLiveIdentityResult(fmt.Errorf("managed launch record has no exact launch id"))
+		return failedLiveIdentityResult(incompleteLaunchRecordError())
 	}
 	key := liveidentity.Key{Project: project, Profile: scope.Profile, Session: scope.Session, Handle: scope.Handle,
 		PreparedGeneration: prepared.Generation, PreparedDigest: prepared.Digest, LaunchID: rec.BootstrapExpectation.LaunchID}
@@ -324,10 +324,23 @@ func resolvePreparedLiveActor(scope liveIdentityScope, managed managedLiveLaunch
 		Generation: ctx.Manifest.Generation, Digest: ctx.Digest, Role: identity.Role, Binary: identity.Binary, Model: identity.Model}, nil
 }
 
+// incompleteLaunchRecordError reports a record that cannot be VERIFIED, as distinct from
+// one that verifiably disagrees. #571 counts a worker launched only after identity is
+// verified, which requires those two outcomes to be distinguishable: a mismatch means stop,
+// an incomplete record means the launch never recorded its identity and the remedy is
+// re-launch or repair, not investigating a conflict that does not exist.
+//
+// Shared by both refusal sites so the wording cannot drift between them.
+func incompleteLaunchRecordError() error {
+	return fmt.Errorf("launch record is INCOMPLETE, not mismatched: it carries no exact launch id, " +
+		"so live identity cannot be verified either way. The launch did not stamp its identity; " +
+		"re-launch the member, or repair the record. This is not an identity conflict")
+}
+
 func observeManagedLiveActor(scope liveIdentityScope, managed managedLiveLaunch, probe duplicateLaunchProbe, childrenIndex func() (func(int) []int, error)) (observedLiveActor, error) {
 	rec := managed.Record
 	if rec.BootstrapExpectation == nil || strings.TrimSpace(rec.BootstrapExpectation.LaunchID) == "" {
-		return observedLiveActor{}, fmt.Errorf("managed launch record has no exact launch id")
+		return observedLiveActor{}, incompleteLaunchRecordError()
 	}
 	runtimeIdentity := classifyLaunchPIDRuntimeIdentity(rec, rec.Binary, probe)
 	if !runtimeIdentity.PIDLive {
