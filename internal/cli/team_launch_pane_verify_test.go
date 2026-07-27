@@ -343,11 +343,12 @@ func TestTmuxSessionAttributesTheCreatedPaneOrRefuses(t *testing.T) {
 					if !hasFlag(args, "-s") {
 						return "", fmt.Errorf("list-panes must pass -s to enumerate the whole session; without it tmux returns one window only: %s", call)
 					}
-					// The sentinel is not "=issue-96", so a lone dangling -t already fails this
-					// comparison -- stated because it is luck of the exact-value check, not a property
-					// of the count, and the next flag guard should not copy the count-only shape.
+					// Three independent properties, all asserted: exactly ONE -t, it HAS a value, and
+					// that value is the exact-match target. Presence is out-of-band (HasValue), so no
+					// format or target string can imitate an absent one -- and rejection no longer
+					// depends on the exact-value comparison happening to differ from a marker.
 					targets := targetArgs(args)
-					if len(targets) != 1 || targets[0] != "=issue-96" {
+					if len(targets) != 1 || !targets[0].HasValue || targets[0].Value != "=issue-96" {
 						return "", fmt.Errorf("list-panes must pass exactly one -t whose value is =issue-96; got %v in %s", targets, call)
 					}
 					// Count AND validity, decided in ONE place (paneListFormatArg) that the direct
@@ -582,29 +583,41 @@ func renderPaneRows(rows []paneRow, format string) string {
 	return out.String()
 }
 
-// danglingFlagSentinel marks a flag that appeared with NO value. It is a distinguishable value
-// rather than an empty string so a caller can reject it explicitly: an empty string is also what
-// a legitimately empty argument looks like, and conflating them is how the lone-dangling case
-// slipped past a count-only guard.
-const danglingFlagSentinel = "<dangling flag with no value>"
+// flagValue is extraction as OUT-OF-BAND state: the value, plus whether one was present at all.
+//
+// #577 round 8: the previous version marked a dangling flag with an in-band sentinel STRING. I
+// had rejected the empty string precisely to avoid collision and then chose another value from
+// the SAME DOMAIN, so the decider could not distinguish a real dangling flag from the legitimate
+// (if weird) invocation -F "<dangling flag with no value>", which real tmux accepts. An in-band
+// sentinel collides with its domain by construction; no better magic string fixes that.
+//
+// hasValue answers a question the value cannot: "was there a value?" is not a fact about the
+// value, so it does not belong in the value.
+type flagValue struct {
+	Value    string
+	HasValue bool
+}
 
-// formatArgs returns every -F value, counting a DANGLING -F via a sentinel.
+// formatArgs returns every -F occurrence, recording presence separately from content.
 //
 // #577 round 7 F2: paneListFormatArg returned the FIRST valid -F and silently ignored later
 // ones, so a duplicate or dangling second -F stayed green where real tmux rejects the
-// invocation. Same fix as the dangling -t sentinel: a valueless flag must COUNT, or "exactly
-// one" is a claim about value-bearing pairs rather than about flags.
-func formatArgs(args []string) []string {
-	var formats []string
+// invocation. Both -F and -t use the SAME shared representation, flagValue{Value, HasValue}: a
+// value-less flag is still recorded, so it counts toward multiplicity, and its absence of a value
+// is carried out of band rather than by any in-domain marker. Without counting it, "exactly one"
+// would be a claim about value-bearing pairs rather than about flags.
+func formatArgs(args []string) []flagValue {
+	var formats []flagValue
 	for i, a := range args {
 		if a != "-F" {
 			continue
 		}
 		if i+1 >= len(args) {
-			formats = append(formats, danglingFlagSentinel)
+			// Counted, and marked value-less OUT OF BAND so no format string can imitate it.
+			formats = append(formats, flagValue{})
 			continue
 		}
-		formats = append(formats, args[i+1])
+		formats = append(formats, flagValue{Value: args[i+1], HasValue: true})
 	}
 	return formats
 }
@@ -623,12 +636,12 @@ func formatArgs(args []string) []string {
 func paneListFormatArg(args []string) (string, error) {
 	formats := formatArgs(args)
 	if len(formats) != 1 {
-		return "", fmt.Errorf("list-panes must pass exactly one -F; got %d (%v)", len(formats), formats)
+		return "", fmt.Errorf("list-panes must pass exactly one -F; got %d", len(formats))
 	}
-	if formats[0] == danglingFlagSentinel {
+	if !formats[0].HasValue {
 		return "", fmt.Errorf("list-panes passed a -F with no value; real tmux rejects the invocation")
 	}
-	return formats[0], nil
+	return formats[0].Value, nil
 }
 
 // hasFlag reports whether a bare flag is present, for flags that take no value.
@@ -647,22 +660,23 @@ func hasFlag(args []string, flag string) bool {
 // the argv, which would also pass if it appeared inside a format string, and said nothing about
 // how many -t flags there were. The comment claimed the -t value was pinned; the code pinned a
 // substring. Adjacency is the property, so adjacency is what is inspected.
-func targetArgs(args []string) []string {
-	var targets []string
+func targetArgs(args []string) []flagValue {
+	var targets []flagValue
 	for i, a := range args {
 		if a != "-t" {
 			continue
 		}
 		if i+1 >= len(args) {
 			// A DANGLING -t is still a -t. Appending only when a value follows meant
-			// "-t =issue-96 ... -t" produced ONE target and passed, contradicting the claim
-			// that exactly one -t is required -- and real tmux would reject the malformed
-			// invocation outright. The sentinel makes a valueless flag COUNT, so any second -t
-			// fails whether or not it carries a value.
-			targets = append(targets, danglingFlagSentinel)
+			// "-t =issue-96 ... -t" produced ONE target and passed, contradicting the claim that
+			// exactly one -t is required -- and real tmux rejects the malformed invocation. A
+			// value-less flag is recorded with HasValue false, so it COUNTS toward multiplicity
+			// and is separately identifiable as absent. Presence is out-of-band on purpose: an
+			// in-band marker would collide with legitimate values (#577 r8).
+			targets = append(targets, flagValue{})
 			continue
 		}
-		targets = append(targets, args[i+1])
+		targets = append(targets, flagValue{Value: args[i+1], HasValue: true})
 	}
 	return targets
 }
@@ -672,7 +686,7 @@ func targetArgs(args []string) []string {
 // The previous version called formatArgs and asserted a sentinel came back, which stayed green
 // if the rejection clause was deleted -- it proved a helper's output, not that anything refused.
 // It now calls paneListFormatArg, the same decider the list-panes fake uses, so removing either
-// the count check or the sentinel check inside it fails THIS test by name.
+// the count check or the !HasValue check inside it fails THIS test by name.
 func TestPaneListFormatArgRejectsDanglingAndDuplicateFlags(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -709,5 +723,26 @@ func TestPaneListFormatArgRejectsDanglingAndDuplicateFlags(t *testing.T) {
 	format, err := paneListFormatArg([]string{"-F", "#{pane_id}"})
 	if err != nil || format != "#{pane_id}" {
 		t.Errorf("a valid single -F must be accepted unchanged; got %q, %v", format, err)
+	}
+}
+
+// #577 round 8: the in-band sentinel made this argv indistinguishable from a dangling flag. Real
+// tmux accepts it as a literal (if useless) format value, so the decider must too -- an in-band
+// marker cannot tell a domain value from an absence, which is why presence moved out of band.
+//
+// WHAT THIS ROW PROVES, narrowly: it falsifies REINTRODUCTION OF THE OLD SENTINEL specifically.
+// It cannot prevent every future magic string, because it names one. The general property is
+// carried by the representation itself -- flagValue keeps presence out of the value domain -- and
+// a new in-band marker would need its own row. Stated so the row is not mistaken for a guard
+// against the whole class.
+func TestPaneListFormatArgAcceptsAFormatEqualToTheOldSentinel(t *testing.T) {
+	const looksLikeTheOldSentinel = "<dangling flag with no value>"
+
+	got, err := paneListFormatArg([]string{"list-panes", "-s", "-t", "=issue-96", "-F", looksLikeTheOldSentinel})
+	if err != nil {
+		t.Fatalf("a literal format value must be accepted even when it spells the old sentinel: %v", err)
+	}
+	if got != looksLikeTheOldSentinel {
+		t.Errorf("format must pass through unchanged; got %q", got)
 	}
 }
