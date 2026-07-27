@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +13,39 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/team"
 	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 )
+
+type floorRenderingBackend struct {
+	fakeBackend
+}
+
+func (*floorRenderingBackend) Name() string { return "floor-rendering" }
+
+func (b *floorRenderingBackend) DryRun(t team.Team, opts teamLaunchOptions) error {
+	if err := b.fakeBackend.DryRun(t, opts); err != nil {
+		return err
+	}
+	for _, pane := range buildTeamLaunchPanes(t, opts) {
+		if _, err := fmt.Fprintln(os.Stdout, pane.Command); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func useFloorRenderingBackend(t *testing.T) *floorRenderingBackend {
+	t.Helper()
+	backend := &floorRenderingBackend{}
+	prev, hadPrev := teamLaunchBackends[backend.Name()]
+	teamLaunchBackends[backend.Name()] = backend
+	t.Cleanup(func() {
+		if hadPrev {
+			teamLaunchBackends[backend.Name()] = prev
+			return
+		}
+		delete(teamLaunchBackends, backend.Name())
+	})
+	return backend
+}
 
 func TestTeamLaunchRejectsPreFloorAMQBeforeParentMutations(t *testing.T) {
 	base := setupFakeAMQSessionRoots(t)
@@ -47,12 +81,12 @@ func TestTeamLaunchDryRunReportsPreFloorAMQAndRendersPreviewWithoutMutations(t *
 	dir := seedTeam(t, team.Team{
 		Members: []team.Member{{Role: "cto", Binary: "codex", Handle: "cto", Session: "floor-dry-run"}},
 	})
-	backend := useFakeBackend(t)
+	backend := useFloorRenderingBackend(t)
 	t.Setenv("AMQ_FAKE_VERSION", "0.48.0")
 
 	stdout, _, err := captureOutput(t, func() error {
 		return executeTeamLaunch(teamLaunchOptions{
-			Terminal: "fake", Workstream: "floor-dry-run", Profile: team.DefaultProfile,
+			Terminal: backend.Name(), Workstream: "floor-dry-run", Profile: team.DefaultProfile,
 			Trust: trustModeApproveForMe, SquadBin: "amq-squad", NoBootstrap: true, DryRun: true,
 		}, true, true)
 	})
@@ -62,6 +96,7 @@ func TestTeamLaunchDryRunReportsPreFloorAMQAndRendersPreviewWithoutMutations(t *
 	for _, want := range []string{
 		"AMQ FLOOR VIOLATIONS", "role=cto", "observed=0.48.0",
 		"required_min=" + doctorMinAMQVersion, "live=refused",
+		"agent up codex", "--role cto", "--session floor-dry-run",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("pre-floor dry-run report missing %q:\n%s", want, stdout)
@@ -117,8 +152,8 @@ func TestUpDryRunReportsPreFloorAMQAndRendersCommandsWithoutMutations(t *testing
 }
 
 func TestUpDryRunJSONReportsPreFloorAMQAndRetainsFullPlan(t *testing.T) {
-	setupFakeAMQSessionRoots(t)
-	seedTeam(t, team.Team{
+	base := setupFakeAMQSessionRoots(t)
+	dir := seedTeam(t, team.Team{
 		Members: []team.Member{{Role: "cto", Binary: "codex", Handle: "cto", Session: "floor-up-dry-json"}},
 	})
 	t.Setenv("AMQ_FAKE_VERSION", "0.48.0")
@@ -144,6 +179,15 @@ func TestUpDryRunJSONReportsPreFloorAMQAndRetainsFullPlan(t *testing.T) {
 	}
 	if !strings.Contains(env.Data.Plan[0].Command, "agent up") {
 		t.Fatalf("dry-run json omitted live command: %+v", env.Data.Plan[0])
+	}
+	for _, path := range []string{
+		filepath.Join(base, "floor-up-dry-json"),
+		briefPathForProfile(dir, team.DefaultProfile, "floor-up-dry-json"),
+		notificationWatcherRuntimePath(dir, team.DefaultProfile, "floor-up-dry-json"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("pre-floor JSON up dry-run mutated %s: %v", path, statErr)
+		}
 	}
 }
 
@@ -230,6 +274,89 @@ func TestUpResetRejectsNewlyPreFloorResolutionBeforeByteIdenticalSessionDeletion
 	}
 	if _, err := os.Stat(briefPathForProfile(dir, team.DefaultProfile, "floor-reset-late")); !os.IsNotExist(err) {
 		t.Fatalf("pre-floor reset wrote brief: %v", err)
+	}
+}
+
+func TestUpResetExternalLeadConsumesPinnedAMQSnapshotAfterDeletion(t *testing.T) {
+	base := setupFakeAMQSessionRoots(t)
+	seedTeam(t, team.Team{
+		Orchestrated: true,
+		Lead:         "cto",
+		Members: []team.Member{
+			{Role: "cto", Binary: "codex", Handle: "cto", Session: "floor-reset-external"},
+			{Role: "qa", Binary: "claude", Handle: "qa", Session: "floor-reset-external"},
+		},
+	})
+	backend := useFakeBackend(t)
+	root := filepath.Join(base, "floor-reset-external")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(root, "deleted-by-reset")
+	if err := os.WriteFile(sentinel, []byte("old session\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	originalPane := currentPaneIdentity
+	currentPaneIdentity = func() (*tmuxpane.PaneIdentity, error) {
+		return &tmuxpane.PaneIdentity{
+			Session: "tmux-main", WindowID: "@7", WindowName: "shell", PaneID: "%5",
+		}, nil
+	}
+	t.Cleanup(func() { currentPaneIdentity = originalPane })
+	t.Setenv("AM_ME", "cto")
+	t.Setenv("AM_BASE_ROOT", base)
+	t.Setenv("AM_ROOT", root)
+	t.Setenv("AM_SESSION", "floor-reset-external")
+
+	originalResolver := resolveTeamLaunchAMQEnv
+	resolution := 0
+	resolveTeamLaunchAMQEnv = func(cwd, profile, session, handle string) (amqEnv, error) {
+		env, err := originalResolver(cwd, profile, session, handle)
+		resolution++
+		// Calls 1-4 are the two complete floor passes. Calls 5-6 build the
+		// complete pinned snapshot before reset. A seventh call would be the
+		// historical post-deletion external-lead re-resolution.
+		if err == nil && resolution >= 7 {
+			env.AMQVersion = "0.48.0"
+		}
+		return env, err
+	}
+	t.Cleanup(func() { resolveTeamLaunchAMQEnv = originalResolver })
+
+	originalStamp := stampCapturedLaunchPane
+	stampCalls := 0
+	stampCapturedLaunchPane = func(string, string, string) error {
+		stampCalls++
+		return nil
+	}
+	t.Cleanup(func() { stampCapturedLaunchPane = originalStamp })
+
+	_, _, err := captureOutput(t, func() error {
+		return runUp([]string{"floor-reset-external", "--reset", "--yes", "--terminal", "fake"})
+	})
+	if err != nil {
+		t.Fatalf("up --reset with pinned external lead: %v (resolution calls=%d)", err, resolution)
+	}
+	if resolution != 6 {
+		t.Fatalf("resolution calls=%d, want only six pre-reset roster resolutions", resolution)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("reset did not cross the destructive boundary: %v", err)
+	}
+	if stampCalls != 1 {
+		t.Fatalf("external lead pane stamps=%d, want 1", stampCalls)
+	}
+	if len(backend.launches) != 1 || len(backend.teams) != 1 ||
+		len(backend.teams[0].Members) != 1 || backend.teams[0].Members[0].Role != "qa" {
+		t.Fatalf("post-reset worker launch=%d teams=%+v", len(backend.launches), backend.teams)
+	}
+	rec, err := launch.Read(filepath.Join(root, "agents", "cto"))
+	if err != nil {
+		t.Fatalf("read pinned external lead record: %v", err)
+	}
+	if !rec.External || rec.Handle != "cto" || rec.Session != "floor-reset-external" {
+		t.Fatalf("pinned external lead record=%+v", rec)
 	}
 }
 

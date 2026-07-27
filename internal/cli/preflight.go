@@ -70,6 +70,7 @@ type agentLaunchPreflight struct {
 	Workstream string
 	Root       string
 	BaseRoot   string
+	RootSource string
 	Binary     string
 	AMQVersion string
 	// AMQFloorViolation is populated only for a dry-run whose resolved AMQ

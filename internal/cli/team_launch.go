@@ -385,7 +385,7 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 			t = filtered
 			externalLeadFiltered = true
 		}
-	} else if filtered, skipped, err := maybeFilterCurrentExternalLead(t, opts.Workstream, opts.Profile, trustMode, mergedBinaryArgs, opts.ModelOverrides, !opts.DryRun); err != nil {
+	} else if filtered, skipped, err := maybeFilterCurrentExternalLeadFromPreflights(t, opts.Workstream, opts.Profile, trustMode, mergedBinaryArgs, opts.ModelOverrides, preflights, !opts.DryRun); err != nil {
 		return err
 	} else if skipped {
 		t = filtered
@@ -685,6 +685,7 @@ func buildTeamPreflights(t team.Team, opts teamLaunchOptions) ([]agentLaunchPref
 			Workstream:        env.SessionName,
 			Root:              root,
 			BaseRoot:          absoluteAMQRoot(cwd, env.BaseRoot),
+			RootSource:        env.RootSource,
 			Binary:            m.Binary,
 			AMQVersion:        env.AMQVersion,
 			AMQFloorViolation: floorViolation,
@@ -803,7 +804,59 @@ func buildTeamLaunchPanes(t team.Team, opts teamLaunchOptions) []teamLaunchPane 
 	return panes
 }
 
+type externalLeadAMQResolver func(team.Member, string, string, string, string) (amqEnv, error)
+
 func maybeFilterCurrentExternalLead(t team.Team, workstream, profile, trustMode string, binaryArgs map[string][]string, modelOverrides map[string]string, write bool) (team.Team, bool, error) {
+	return maybeFilterCurrentExternalLeadUsing(
+		t,
+		workstream,
+		profile,
+		trustMode,
+		binaryArgs,
+		modelOverrides,
+		func(_ team.Member, cwd, profile, workstream, handle string) (amqEnv, error) {
+			return resolveTeamLaunchAMQEnv(cwd, profile, workstream, handle)
+		},
+		write,
+	)
+}
+
+// maybeFilterCurrentExternalLeadFromPreflights is the only external-lead path
+// reachable from executeTeamLaunch. In particular, up --reset calls it after
+// deleting the prior session, so it must consume the pre-reset snapshot and
+// must never resolve AMQ again.
+func maybeFilterCurrentExternalLeadFromPreflights(t team.Team, workstream, profile, trustMode string, binaryArgs map[string][]string, modelOverrides map[string]string, preflights []agentLaunchPreflight, write bool) (team.Team, bool, error) {
+	return maybeFilterCurrentExternalLeadUsing(
+		t,
+		workstream,
+		profile,
+		trustMode,
+		binaryArgs,
+		modelOverrides,
+		func(lead team.Member, cwd, _ string, workstream, _ string) (amqEnv, error) {
+			for _, preflight := range preflights {
+				if !strings.EqualFold(strings.TrimSpace(preflight.Role), strings.TrimSpace(lead.Role)) {
+					continue
+				}
+				if !sameResolvedDir(preflight.CWD, cwd) || preflight.Workstream != workstream {
+					return amqEnv{}, fmt.Errorf("pinned AMQ preflight no longer matches external lead %s", lead.Role)
+				}
+				return amqEnv{
+					AMQVersion:  preflight.AMQVersion,
+					Root:        preflight.Root,
+					BaseRoot:    preflight.BaseRoot,
+					SessionName: preflight.Workstream,
+					Me:          preflight.Handle,
+					RootSource:  preflight.RootSource,
+				}, nil
+			}
+			return amqEnv{}, fmt.Errorf("pinned AMQ preflight is missing external lead %s", lead.Role)
+		},
+		write,
+	)
+}
+
+func maybeFilterCurrentExternalLeadUsing(t team.Team, workstream, profile, trustMode string, binaryArgs map[string][]string, modelOverrides map[string]string, resolve externalLeadAMQResolver, write bool) (team.Team, bool, error) {
 	if !t.Orchestrated || strings.TrimSpace(t.Lead) == "" {
 		return t, false, nil
 	}
@@ -817,7 +870,7 @@ func maybeFilterCurrentExternalLead(t team.Team, workstream, profile, trustMode 
 	}
 	cwd := lead.EffectiveCWD(t.Project)
 	handle := memberHandle(lead)
-	env, err := resolveTeamLaunchAMQEnv(cwd, profile, workstream, handle)
+	env, err := resolve(lead, cwd, profile, workstream, handle)
 	if err != nil {
 		if !write {
 			return t, false, nil
