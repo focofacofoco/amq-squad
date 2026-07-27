@@ -599,7 +599,7 @@ func runNumberedGlobal(r *bufio.Reader, out io.Writer, s Spec, loadCatalog func(
 		fmt.Fprintln(out, "A global orchestrator drives tmux. Under a restricted sandbox that control is denied at the socket: the agent launches, then cannot spawn or focus panes.")
 		// Default to the STORED value, recognised or not, so accepting the prompt cannot
 		// escalate a safer stored posture or overwrite an unknown one.
-		selected, perr := promptChoice(r, out, "Trust and sandbox posture", items, defaultString(s.GlobalPosture, items[0].value))
+		selected, perr := promptChoice(r, out, "Trust and sandbox posture", items, defaultString(canonicalGlobalPosture(s.GlobalPosture), items[0].value))
 		if perr != nil {
 			return Spec{}, perr
 		}

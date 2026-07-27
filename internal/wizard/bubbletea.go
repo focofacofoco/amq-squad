@@ -914,7 +914,7 @@ func (m BubbleModel) defaultCursor() int {
 		// find-loop leaves the cursor at index 0 for display, but commitChoice preserves
 		// the stored value unless the operator actively selects, so the visible
 		// degradation render stays reachable.
-		want = m.spec.GlobalPosture
+		want = canonicalGlobalPosture(m.spec.GlobalPosture)
 	case stageProfile:
 		want = m.spec.Profile
 		if findProfile(m.ctx.Profiles, want) < 0 {
@@ -978,6 +978,12 @@ func (m BubbleModel) defaultCursor() int {
 				want = mode
 			}
 		}
+	case stageLaunchShape:
+		// Same bug class as the posture stage: omitting this case left the cursor at index
+		// 0, so a prefilled lead-only-staged spec silently committed as
+		// working-team-together and launched workers that were meant to stay behind spawn
+		// gates. A prefillable choice stage MUST appear here.
+		want = defaultString(m.spec.LaunchShape, LaunchShapeWorkingTeamTogether)
 	case stageToolPolicy:
 		want = defaultString(m.spec.ToolPolicyMode, "recommended")
 	case stageOperator:
@@ -1697,6 +1703,21 @@ func (m BubbleModel) phaseLabels() []string {
 	return []string{"Scope", "Profile & run", "Team", "Run controls", "Brief", "Review"}
 }
 
+// canonicalGlobalPosture is the ONE canonicalization every comparison of a posture value
+// must use.
+//
+// Two comparisons of one value diverged: rows were matched with TrimSpace/EqualFold while
+// the cursor find-loop compared the ORIGINAL string exactly. So a stored "WORKSPACE-WRITE"
+// matched its row, missed the cursor, and escalated to full access; " typo-posture " did the
+// same through whitespace. The escalation fixed in the previous round was re-openable
+// through case alone.
+//
+// Same rule as the frontmatter reader shared with doctor and the release validator: when two
+// places compare one value, they share one canonicalization or they will drift.
+func canonicalGlobalPosture(v string) string {
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
 // globalPostureRows returns the posture choices for an agent, plus an explicit row for an
 // UNRECOGNISED stored value.
 //
@@ -1708,10 +1729,10 @@ func (m BubbleModel) phaseLabels() []string {
 func globalPostureRows(agent, stored string) []choice {
 	postures := GlobalPostureChoices(agent)
 	rows := make([]choice, 0, len(postures)+1)
-	stored = strings.TrimSpace(stored)
+	stored = canonicalGlobalPosture(stored)
 	known := false
 	for _, posture := range postures {
-		if strings.EqualFold(posture.Value, stored) {
+		if canonicalGlobalPosture(posture.Value) == stored {
 			known = true
 		}
 		rows = append(rows, choice{value: posture.Value, label: posture.Label + " · " + posture.Consequence})

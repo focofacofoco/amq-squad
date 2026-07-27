@@ -836,7 +836,8 @@ func TestNumberedGlobalWizardWithoutScopeNeverDiscoversProject(t *testing.T) {
 		inspections++
 		return runwizard.ProjectContext{}, errors.New("project discovery must stay behind Project scope")
 	}
-	// Global scope; root, agent, model, effort, native args, window; default-No confirmation.
+	// Global scope; root, agent, model, effort, trust/sandbox posture, native args, window;
+	// default-No confirmation. Eight responses: one per prompt.
 	runStartWizardInput = strings.NewReader("2\n\n\n\n\n\n\n\n")
 	var prompts strings.Builder
 	runStartWizardOutput = &prompts

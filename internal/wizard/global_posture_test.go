@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // #455 item 2: a codex NOC under default sandboxing cannot drive tmux at all, and the
@@ -126,6 +128,16 @@ func TestStoredSaferPostureSurvivesAcceptingDefaultsInBubble(t *testing.T) {
 	if got := rows[m.cursor].value; got != "workspace-write" {
 		t.Fatalf("cursor sits on %q, want the STORED workspace-write; accepting defaults would escalate to %q", got, rows[0].value)
 	}
+
+	// Press Enter and assert the COMMITTED spec. Stopping at cursor inspection would let a
+	// commitChoice wiring regression restore the escalation invisibly.
+	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.spec.GlobalPosture != "workspace-write" {
+		t.Errorf("committed posture = %q, want workspace-write", m.spec.GlobalPosture)
+	}
+	if args := strings.Join(m.spec.GlobalArgs(), " "); strings.Contains(args, "danger-full-access") {
+		t.Errorf("committing defaults escalated to danger-full-access: %s", args)
+	}
 }
 
 func TestStoredSaferPostureSurvivesAcceptingDefaultsInNumbered(t *testing.T) {
@@ -165,6 +177,14 @@ func TestUnknownStoredPostureIsNotCoercedInBubble(t *testing.T) {
 	if !strings.Contains(rows[m.cursor].label, "no sandbox flags applied") {
 		t.Errorf("the unknown row must say what it does: %q", rows[m.cursor].label)
 	}
+
+	m = updateBubble(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.spec.GlobalPosture != "typo-posture" {
+		t.Errorf("committed posture = %q, want the unknown value preserved", m.spec.GlobalPosture)
+	}
+	if args := strings.Join(m.spec.GlobalArgs(), " "); strings.Contains(args, "--sandbox") {
+		t.Errorf("an unknown posture must commit NO sandbox flags, got: %s", args)
+	}
 }
 
 func TestUnknownStoredPostureIsNotCoercedInNumbered(t *testing.T) {
@@ -186,5 +206,28 @@ func TestUnknownStoredPostureIsNotCoercedInNumbered(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "unknown posture typo-posture") {
 		t.Errorf("the preview must render the degradation visibly:\n%s", out.String())
+	}
+}
+
+// Finding 1 of #568 round 2: the escalation was re-openable through case or whitespace,
+// because rows were matched case-insensitively while the cursor compared exactly. One
+// canonicalization now feeds both.
+func TestStoredPostureSurvivesCaseAndWhitespace(t *testing.T) {
+	for _, stored := range []string{"WORKSPACE-WRITE", "  workspace-write  ", "Workspace-Write"} {
+		t.Run(stored, func(t *testing.T) {
+			m, err := NewBubbleModel(NumberedOptions{Defaults: Spec{
+				Scope: "global", GlobalRoot: "/neutral", GlobalAgent: "codex",
+				GlobalPosture: stored, GlobalWindow: "global-orch",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.stage = stageGlobalPosture
+			m.configureStage()
+			m.cursor = m.defaultCursor()
+			if got := m.choices()[m.cursor].value; got != "workspace-write" {
+				t.Errorf("stored %q put the cursor on %q; a case or whitespace variant must not escalate", stored, got)
+			}
+		})
 	}
 }
