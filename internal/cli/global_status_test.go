@@ -438,10 +438,10 @@ func TestGlobalStatusStoppedNOCWithLiveRuntimeIsDegradedAndCannotStart(t *testin
 		t.Fatalf("stopped/live contradiction = %+v", noc)
 	}
 	actions := globalNOCStatusActions("/noc-control", noc, "healthy")
-	assertGlobalStatusActionsConfirmGated(t, actions, "global_status", "global_start")
+	assertGlobalStatusActionsConfirmGated(t, actions, "global_status")
 	for _, action := range actions {
-		if action.Kind == "global_start" && action.Available {
-			t.Fatalf("live canonical NOC exposed a second-start action: %+v", action)
+		if action.Kind == "global_start" {
+			t.Fatalf("live canonical NOC exposed a second-start command: %+v", action)
 		}
 	}
 }
@@ -871,28 +871,49 @@ func TestDoctorGlobalNOCRegistrationProjection(t *testing.T) {
 	})
 
 	t.Run("duplicate run id fails closed", func(t *testing.T) {
-		controlRoot := t.TempDir()
-		canonicalControlRoot, err := canonicalGlobalNOCControlRoot(controlRoot)
-		if err != nil {
-			t.Fatal(err)
-		}
-		project := t.TempDir()
-		sessionRoot := t.TempDir()
-		session := "duplicate-run"
-		registry := globalStatusTestRegistry(canonicalControlRoot, now)
-		run := globalStatusTestRun(canonicalControlRoot, project, session, "run-duplicate", now)
-		registry.Runs = []globalNOCRun{run, run}
-		writeGlobalStatusTestRegistry(t, canonicalControlRoot, registry)
-		writeGlobalStatusDoctorRecord(t, sessionRoot, "global-orch", project, session, run.ExternalRegistration)
+		for _, forgedFirst := range []bool{false, true} {
+			order := "legitimate_then_forged"
+			if forgedFirst {
+				order = "forged_then_legitimate"
+			}
+			t.Run(order, func(t *testing.T) {
+				controlRoot := t.TempDir()
+				canonicalControlRoot, err := canonicalGlobalNOCControlRoot(controlRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				project := t.TempDir()
+				sessionRoot := t.TempDir()
+				session := "duplicate-run"
+				registry := globalStatusTestRegistry(canonicalControlRoot, now)
+				legitimate := globalStatusTestRun(canonicalControlRoot, project, session, "run-duplicate", now)
+				forged := globalStatusTestRun(
+					canonicalControlRoot,
+					filepath.Join(project, "forged"),
+					"forged-session",
+					"run-duplicate",
+					now,
+				)
+				registry.Runs = []globalNOCRun{legitimate, forged}
+				if forgedFirst {
+					registry.Runs = []globalNOCRun{forged, legitimate}
+				}
+				if reflect.DeepEqual(registry.Runs[0], registry.Runs[1]) {
+					t.Fatal("duplicate-ID fixture must use distinct legitimate and forged records")
+				}
+				writeGlobalStatusTestRegistry(t, canonicalControlRoot, registry)
+				writeGlobalStatusDoctorRecord(t, sessionRoot, "global-orch", project, session, legitimate.ExternalRegistration)
 
-		check := doctorCheckGlobalNOCRegistrationAtRoot(
-			team.Team{Project: project},
-			team.DefaultProfile,
-			session,
-			sessionRoot,
-		)
-		if check.Status != doctorFail || !strings.Contains(check.Detail, "duplicate run registrations") {
-			t.Fatalf("duplicate-run doctor check = %+v", check)
+				check := doctorCheckGlobalNOCRegistrationAtRoot(
+					team.Team{Project: project},
+					team.DefaultProfile,
+					session,
+					sessionRoot,
+				)
+				if check.Status != doctorFail || !strings.Contains(check.Detail, "duplicate run registrations") {
+					t.Fatalf("%s doctor check = %+v", order, check)
+				}
+			})
 		}
 	})
 }

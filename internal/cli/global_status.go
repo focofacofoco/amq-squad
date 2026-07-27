@@ -663,23 +663,29 @@ func globalStatusReadinessFor(health string, sourceErrors []globalStatusSourceEr
 
 func globalNOCStatusActions(root string, noc *globalStatusNOCView, registryState string) []runtimeActionJSON {
 	scope := " --root " + runtimeaction.ShellQuote(root)
-	repairAvailable := registryState == "missing" || (registryState == "healthy" && (noc == nil || noc.Health == globalStatusStopped))
-	repairReason := "confirm-gated: launches and persists a new global NOC runtime"
-	if !repairAvailable {
-		repairReason = "a new NOC launch is available only when the registry is absent or the current canonical runtime is stopped"
-	}
-	return runtimeaction.ApplyCanonical([]runtimeActionJSON{
+	actions := []runtimeActionJSON{
 		{
 			Kind: "global_status", Label: "inspect global NOC status", Scope: "global",
 			Command: "amq-squad global status" + scope + " --json",
 			Mutates: false, NeedsConfirmation: false, Available: true,
 		},
-		{
+	}
+	if noc != nil && noc.PersistedState == globalNOCLaunchStopped && noc.Runtime.Live {
+		return runtimeaction.ApplyCanonical(actions)
+	}
+	repairAvailable := registryState == "missing" || (registryState == "healthy" && (noc == nil || noc.Health == globalStatusStopped))
+	repairReason := "confirm-gated: launches and persists a new global NOC runtime"
+	if !repairAvailable {
+		repairReason = "a new NOC launch is available only when the registry is absent or the current canonical runtime is stopped"
+	}
+	actions = append(actions,
+		runtimeActionJSON{
 			Kind: "global_start", Label: "confirm launch global NOC", Scope: "global",
 			Command: "amq-squad global start" + scope + " --go",
 			Mutates: true, NeedsConfirmation: true, Available: repairAvailable, Reason: repairReason,
 		},
-	})
+	)
+	return runtimeaction.ApplyCanonical(actions)
 }
 
 func confirmGatedSessionActions(namespace squadnamespace.Ref) []runtimeActionJSON {
