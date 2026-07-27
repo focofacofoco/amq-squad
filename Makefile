@@ -32,7 +32,11 @@ fmt:
 	gofmt -w $(GO_FILES)
 
 fmt-check:
-	@offenders="$$(gofmt -l $(GO_FILES))"; \
+	@offenders="$$(gofmt -l $(GO_FILES))"; status=$$?; \
+	if [ $$status -ne 0 ]; then \
+		echo "error: gofmt -l failed (exit $$status); the check could not run" >&2; \
+		exit $$status; \
+	fi; \
 	if [ -n "$$offenders" ]; then \
 		echo "error: gofmt needed on:" >&2; \
 		echo "$$offenders" >&2; \

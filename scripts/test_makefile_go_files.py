@@ -133,6 +133,28 @@ class GoFilesScope(unittest.TestCase):
         finally:
             offender.unlink(missing_ok=True)
 
+    def test_fmt_check_fails_when_gofmt_itself_fails(self):
+        """A check that passes when its instrument breaks is worse than no check.
+
+        `offenders="$(gofmt -l ...)"` drops gofmt's own exit status, and make recipes
+        run sh WITHOUT -e, so the next command runs regardless. If gofmt errors while
+        printing nothing to stdout -- a stat error on a missing path, or a path with
+        spaces word-splitting into invalid arguments -- the offender list is empty and
+        fmt-check reports success having formatted-checked nothing.
+
+        The GO_FILES override is a clean one-variable fixture: a nonexistent file makes
+        gofmt fail WITHOUT producing an offender, separating "instrument broke" from
+        "found a problem".
+        """
+        result = make("fmt-check", "GO_FILES=./definitely-missing-560.go")
+        self.assertNotEqual(
+            result.returncode, 0,
+            "fmt-check must fail when gofmt cannot run; it reported success instead",
+        )
+        combined = result.stdout + result.stderr
+        self.assertIn("gofmt -l failed", combined,
+                      f"the failure must say the check could not run; got:\n{combined}")
+
     def test_exclusion_is_path_based_not_git_tracked(self):
         """Untracked new .go files must stay in coverage, so the fix cannot be
         `git ls-files`: a newly written, not-yet-added file is exactly when formatting
