@@ -126,7 +126,7 @@ func tmuxSessionDryRunLines(plan tmuxSessionLaunchPlan) []string {
 	for i, pane := range plan.Panes {
 		lines = append(lines,
 			shellCommand(tmuxSessionBinary, tmuxSessionCreateArgv(plan.Workstream, pane.Role, pane.CWD)...),
-			tmuxSessionSendKeysDryRunLine(plan.Workstream, pane.Role, pane.Command),
+			tmuxSessionPaneCommandDryRunLine(plan.Workstream, pane.Role, pane.Command),
 			shellCommand(tmuxSessionBinary, tmuxSessionRenameArgv(plan.Workstream, pane.Role)...),
 		)
 		if i < len(plan.Panes)-1 && plan.StartDelay > 0 {
@@ -137,10 +137,17 @@ func tmuxSessionDryRunLines(plan tmuxSessionLaunchPlan) []string {
 	return lines
 }
 
-// tmuxSessionSendKeysDryRunLine targets the agent's own named window by its
-// "<session>:<role>" tmux target (the window-per-agent equivalent of the
-// pane-id targeting the default backend uses) and types the agent command.
-func tmuxSessionSendKeysDryRunLine(workstream, role, command string) string {
+// tmuxSessionPaneCommandDryRunLine targets the agent's own named window by its
+// "<session>:<role>" tmux target (the window-per-agent equivalent of the pane-id
+// targeting the default backend uses) and makes the agent command that window's
+// ROOT PROCESS.
+//
+// #571: the previous name said SendKeys and the previous comment said "types the
+// agent command". Both were still accurate about the mechanism this backend used
+// and both became false in the same commit that stopped typing. A name that
+// survives the mechanism it names is how the next reader searching for typing
+// paths misses this one.
+func tmuxSessionPaneCommandDryRunLine(workstream, role, command string) string {
 	return tmuxPaneCommandDryRunLine(workstream+":"+role, command)
 }
 
@@ -156,8 +163,21 @@ func runTmuxSessionLaunchPlan(plan tmuxSessionLaunchPlan) error {
 		// contract is one named, attached iTerm2 window per agent (tmuxSessionResumeArgv
 		// attaches the session for focus), so status maps it to adoption_mode=managed_window
 		// (operator-visible), NOT a detached session. Do not remap to managed_session.
-		if err := deliverPaneCommand(plan.Workstream+":"+pane.Role, withTmuxTargetEnv("new-window", pane.Command)); err != nil {
-			return err
+		target := plan.Workstream + ":" + pane.Role
+		if err := deliverPaneCommand(target, withTmuxTargetEnv("new-window", pane.Command)); err != nil {
+			return fmt.Errorf("deliver command for %s: %w", pane.Role, err)
+		}
+		// Verified counting applies to THIS backend too. #571 landed the pane-pid check
+		// on the two default-backend sites and left this one delivering unverified, so
+		// "pane creation can no longer count as success" held for two of three paths.
+		// This is the operator-visible iTerm2 path, where an unstarted agent is a window
+		// sitting at a shell prompt -- the exact failure that read as a successful launch.
+		//
+		// Placed BEFORE the rename deliberately: tmuxSessionRenameArgv retires the
+		// "<session>:<role>" window name in favour of the amq: token, so this target only
+		// resolves until that call.
+		if _, err := verifyPaneProcessLaunched(target); err != nil {
+			return fmt.Errorf("worker %s not launched: %w", pane.Role, err)
 		}
 		if err := runCommand(tmuxSessionBinary, tmuxSessionRenameArgv(plan.Workstream, pane.Role)...); err != nil {
 			return err
