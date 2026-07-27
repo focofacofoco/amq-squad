@@ -273,8 +273,9 @@ func TestBothSurfacesConsumeThePredicateVerdict(t *testing.T) {
 				if !governed {
 					return true
 				}
-				// And does that if's body actually REFUSE -- return an error or set the blocked
-				// action? A governed condition guarding nothing is still not control.
+				// And does that if's body return a value or set the blocked action? This is a
+				// SHAPE check, not proof of refusal semantics: `return nil` satisfies it. Refusal
+				// semantics are reviewed at the site, per the ruling.
 				ast.Inspect(ifs.Body, func(b ast.Node) bool {
 					switch node := b.(type) {
 					case *ast.ReturnStmt:
@@ -291,10 +292,11 @@ func TestBothSurfacesConsumeThePredicateVerdict(t *testing.T) {
 				return true
 			})
 			if !consumed {
-				t.Errorf("%s calls %s but its required() verdict never CONTROLS a refusing branch -- "+
+				t.Errorf("%s calls %s but its required() verdict never appears in the CONDITION of an if -- "+
 					"a dead `_ = x.required()` beside an independent verdict computer would look identical. "+
-					"The predicate must govern the condition, or a predicate change moves one surface and "+
-					"not the other, which is the disagreement #573 exists to end.",
+					"The predicate must govern a conditional, or a predicate change moves one surface and "+
+					"not the other, which is the disagreement #573 exists to end. Refusal semantics "+
+					"themselves are reviewed at the site, not proven here.",
 					tc.file, tc.symbol)
 			}
 		})
@@ -411,8 +413,26 @@ func TestStagedRecoveryQuotesTheInterpolatedBinary(t *testing.T) {
 // My falsifier proved the function; the claim was about the system.
 //
 // This drives preparedRunAdmissionForMember against REAL on-disk state where the record's token
-// matches a SUPERSEDED generation. It fails if either call site threads the wrong digest,
-// which is the property the claim actually asserts.
+// matches a SUPERSEDED generation.
+//
+// SCOPE, per the ruling (#579 r5 R5-3): falsifier-proven AT THE LOADER. It says nothing about
+// the admission site, whose digest is INERT by construction (rec = nil) and pinned separately by
+// TestAdmissionPassesNoRecordSoTheDigestIsProvablyInert. The earlier wording -- "fails if either
+// call site threads the wrong digest" -- was written before that ruling and is false under it.
+//
+// DECLARED BOUND (#579 r5 R5-1): this row bites a loader threading a WRONG-VALUED digest,
+// because the before-assertion requires Bindable to be true on the current generation. It does
+// NOT bite a loader threading rec.PreparedRunDigest: the before-check passes (the values are
+// equal by fixture construction) and the after-check still rejects, because republishing rotates
+// the GENERATION ID and samePreparedRunGeneration compares that independently.
+//
+// The fixture that would bite it -- same generation id, different manifest digest -- CANNOT BE
+// BUILT through the sanctioned writer: publishPreparedRunGeneration installs the generation
+// manifest with durableCreateExclusive, which uses os.Link and therefore fails with EEXIST
+// rather than replacing. One generation id publishes exactly once, by design. Hand-writing the
+// artifacts would fabricate a state the system cannot produce, which is worse evidence than an
+// honest bound. So the record-derived mutation is closed STRUCTURALLY instead, by
+// TestLoaderThreadsTheProjectionDigestNotTheRecords.
 func TestLoaderRefusesBindableForASupersededGeneration(t *testing.T) {
 	dir, manifest, token := preparedRunStateFixture(t)
 	attempt, err := reservePreparedRunLaunch(dir, team.DefaultProfile, "prepared", token)
@@ -570,5 +590,85 @@ func typeName(e ast.Expr) string {
 		return "a unary expression (likely &record)"
 	default:
 		return "a non-nil expression"
+	}
+}
+
+// #579 r5 R5-1, structural closure of the mutation no behavioural fixture can reach.
+//
+// The loader must pass THE PROJECTION'S digest to the predicate -- the value returned by
+// preparedRunManifestForProjection -- and not one derived from the launch record. A
+// record-derived digest makes the comparison self-referential: the token is checked against a
+// snapshot built from its own field, so it always agrees and Bindable is true for a superseded
+// generation.
+//
+// Pinned structurally because the behavioural falsifier is impossible: the fixture would need
+// one generation id published twice with different content, and publishPreparedRunGeneration
+// installs generation artifacts with os.Link, which fails EEXIST rather than replacing. Same
+// reasoning as the admission inertness pin -- when a property cannot be given a falsifying
+// INPUT, give it a falsifying EDIT.
+func TestLoaderThreadsTheProjectionDigestNotTheRecords(t *testing.T) {
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filepath.Join(".", "prepared_run_admission.go"), nil, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	checked := false
+	ast.Inspect(parsed, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "preparedRunAdmissionForMember" || fn.Body == nil {
+			return true
+		}
+		// The digest identifier the projection binds, taken from the assignment rather than
+		// assumed to be called "digest" -- a rename must not silently disable this pin.
+		projectionDigest := ""
+		ast.Inspect(fn.Body, func(x ast.Node) bool {
+			as, isAssign := x.(*ast.AssignStmt)
+			if !isAssign || len(as.Rhs) != 1 || len(as.Lhs) < 2 {
+				return true
+			}
+			call, isCall := as.Rhs[0].(*ast.CallExpr)
+			if !isCall {
+				return true
+			}
+			id, isID := call.Fun.(*ast.Ident)
+			if !isID || id.Name != "preparedRunManifestForProjection" {
+				return true
+			}
+			if ident, ok := as.Lhs[1].(*ast.Ident); ok {
+				projectionDigest = ident.Name
+			}
+			return true
+		})
+		if projectionDigest == "" || projectionDigest == "_" {
+			t.Fatalf("the loader does not bind the projection's digest at all, so it cannot be passing it")
+		}
+
+		ast.Inspect(fn.Body, func(x ast.Node) bool {
+			call, isCall := x.(*ast.CallExpr)
+			if !isCall {
+				return true
+			}
+			id, isID := call.Fun.(*ast.Ident)
+			if !isID || id.Name != "preparedRunActorAdmission" || len(call.Args) < 2 {
+				return true
+			}
+			checked = true
+			arg, isIdent := call.Args[1].(*ast.Ident)
+			if !isIdent || arg.Name != projectionDigest {
+				t.Errorf("%s: the loader must pass the PROJECTION's digest (%s) as the digest argument.\n"+
+					"A record-derived digest makes the generation comparison self-referential -- the token is "+
+					"checked against a snapshot built from its own field, always agrees, and a SUPERSEDED "+
+					"generation reads as Bindable. No behavioural fixture can catch that, because one "+
+					"generation id cannot be published twice (os.Link EEXIST), which is why this is pinned.",
+					fset.Position(call.Args[1].Pos()), projectionDigest)
+			}
+			return true
+		})
+		return true
+	})
+
+	if !checked {
+		t.Fatal("found no preparedRunActorAdmission call inside preparedRunAdmissionForMember; the pin is blind")
 	}
 }
