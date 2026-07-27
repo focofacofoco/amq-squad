@@ -15,6 +15,16 @@ inactive state. `status` and `doctor` expose watcher health without exposing
 command arguments, credentials, or other secrets. This add-on never answers a
 gate, clicks approval, or sends pane input.
 
+That same scoped owner runs the managed AMQ backend. It uses bounded
+`amq watch` only as a non-consuming signal for the canonical operator mailbox,
+then performs one kill-safe, exact-root collect before evaluating attention
+notifications. Watch output and doorbell text are never parsed as message
+content or authority. Duplicate signals that collect no unread message do not
+trigger another delivery scan. The watcher retries crashes with bounded
+backoff; after exhaustion, `status`/`doctor` report the backend and restart
+count as degraded while fsnotify plus periodic rescan remain active. Use a
+bounded `amq-squad monitor --once` when a manual backstop is needed.
+
 Delivery is **at least once**, not exactly once. The supervised watcher, a
 manual `operator watch`, and `notify --deliver` all coordinate through the same
 per-event/per-sink reservation and success-commit state in

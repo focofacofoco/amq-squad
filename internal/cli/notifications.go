@@ -77,23 +77,31 @@ type notificationsStateView struct {
 }
 
 type notificationWatcherView struct {
-	PolicyEnabled  bool      `json:"policy_enabled"`
-	Expected       bool      `json:"expected"`
-	Running        bool      `json:"running"`
-	Health         string    `json:"health"`
-	Reason         string    `json:"reason,omitempty"`
-	RuntimePath    string    `json:"runtime_path"`
-	SchemaVersion  int       `json:"schema_version,omitempty"`
-	PID            int       `json:"pid,omitempty"`
-	Host           string    `json:"host,omitempty"`
-	Owner          string    `json:"owner,omitempty"`
-	LeaseTTL       string    `json:"lease_ttl,omitempty"`
-	LeaseExpiresAt time.Time `json:"lease_expires_at,omitempty"`
-	HeartbeatAt    time.Time `json:"heartbeat_at,omitempty"`
-	LastScanAt     time.Time `json:"last_scan_at,omitempty"`
-	LastEventAt    time.Time `json:"last_event_at,omitempty"`
-	StatePath      string    `json:"state_path,omitempty"`
-	LastError      string    `json:"last_error,omitempty"`
+	PolicyEnabled   bool      `json:"policy_enabled"`
+	Expected        bool      `json:"expected"`
+	Running         bool      `json:"running"`
+	Health          string    `json:"health"`
+	Reason          string    `json:"reason,omitempty"`
+	RuntimePath     string    `json:"runtime_path"`
+	SchemaVersion   int       `json:"schema_version,omitempty"`
+	PID             int       `json:"pid,omitempty"`
+	Host            string    `json:"host,omitempty"`
+	Owner           string    `json:"owner,omitempty"`
+	LeaseTTL        string    `json:"lease_ttl,omitempty"`
+	LeaseExpiresAt  time.Time `json:"lease_expires_at,omitempty"`
+	HeartbeatAt     time.Time `json:"heartbeat_at,omitempty"`
+	LastScanAt      time.Time `json:"last_scan_at,omitempty"`
+	LastEventAt     time.Time `json:"last_event_at,omitempty"`
+	WatchBackend    string    `json:"watch_backend,omitempty"`
+	WatchRoot       string    `json:"watch_root,omitempty"`
+	WatchMailbox    string    `json:"watch_mailbox,omitempty"`
+	WatchTimeout    string    `json:"watch_timeout,omitempty"`
+	WatchRestarts   int       `json:"watch_restarts,omitempty"`
+	WatchMaxRetries int       `json:"watch_max_retries,omitempty"`
+	LastWatchAt     time.Time `json:"last_watch_at,omitempty"`
+	LastCollectAt   time.Time `json:"last_collect_at,omitempty"`
+	StatePath       string    `json:"state_path,omitempty"`
+	LastError       string    `json:"last_error,omitempty"`
 }
 
 type notificationsDoctorData struct {
@@ -511,6 +519,9 @@ func buildNotificationWatcherView(expected bool, watcher notificationWatcherStat
 		Host: watcher.Host, Owner: watcher.Owner, LeaseTTL: rec.LeaseTTL,
 		LeaseExpiresAt: watcher.LeaseExpiresAt, HeartbeatAt: watcher.HeartbeatAt,
 		LastScanAt: watcher.LastScanAt, LastEventAt: rec.LastEventAt, StatePath: watcher.StatePath,
+		WatchBackend: rec.WatchBackend, WatchRoot: rec.WatchRoot, WatchMailbox: rec.WatchMailbox,
+		WatchTimeout: rec.WatchTimeout, WatchRestarts: rec.WatchRestarts, WatchMaxRetries: rec.WatchMaxRetries,
+		LastWatchAt: rec.LastWatchAt, LastCollectAt: rec.LastCollectAt,
 		LastError: boundedNotificationText(rec.LastError),
 	}
 }

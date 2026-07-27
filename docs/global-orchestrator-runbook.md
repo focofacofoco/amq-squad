@@ -56,6 +56,14 @@ readiness, source errors, and inspect/repair action objects. The command never
 scans arbitrary repositories and never executes an action; every mutation is
 confirmation-gated.
 
+For registered project runs, watcher state includes the managed AMQ backend,
+its exact operator mailbox binding, bounded restart count, and last
+watch/collect timestamps. `amq watch` is only a non-consuming wake signal; the
+scoped watcher then performs one root-correct safe collect and drives the
+existing attention notifier. Exhausted watch retries degrade visibly while the
+fsnotify/periodic-rescan path remains active. Use bounded
+`amq-squad monitor --once` as the explicit manual fallback.
+
 Then drive each run by explicit namespace (`goal draft`/`goal start`,
 `monitor --once`, `status`, `next`, `operator answer`). See the skill's
 multi-workstream board protocol.
