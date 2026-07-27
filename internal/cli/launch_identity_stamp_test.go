@@ -47,6 +47,34 @@ func TestNoProductionCodeBuildsExpectationLiterals(t *testing.T) {
 			return parseErr
 		}
 		inspected++
+		// Exempting EVERY empty literal was too broad (#575 round 3): production code could
+		// write rec.BootstrapExpectation = &bootstrapack.Expectation{} and recreate the
+		// exact empty-LaunchID defect while passing. The exemption is now POSITIONAL - only
+		// a zero-value literal returned alongside a non-nil error, which is the
+		// `return Expectation{}, err` shape whose value the caller discards.
+		exempt := map[ast.Node]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			ret, ok := n.(*ast.ReturnStmt)
+			if !ok || len(ret.Results) < 2 {
+				return true
+			}
+			for i, res := range ret.Results {
+				lit, isLit := res.(*ast.CompositeLit)
+				if !isLit || len(lit.Elts) != 0 {
+					continue
+				}
+				// a sibling result must be a non-nil error-ish identifier
+				for j, sib := range ret.Results {
+					if j == i {
+						continue
+					}
+					if id, isID := sib.(*ast.Ident); isID && id.Name != "nil" {
+						exempt[lit] = true
+					}
+				}
+			}
+			return true
+		})
 		ast.Inspect(file, func(n ast.Node) bool {
 			lit, ok := n.(*ast.CompositeLit)
 			if !ok {
@@ -60,10 +88,7 @@ func TestNoProductionCodeBuildsExpectationLiterals(t *testing.T) {
 			if !ok || pkg.Name != "bootstrapack" {
 				return true
 			}
-			// A zero-value literal stamps nothing: it is the `Expectation{}, err` shape on
-			// an error path, discarded by the caller. Judged on the AST node's own fields,
-			// so nothing else on the line can smuggle a populated literal past this.
-			if len(lit.Elts) == 0 {
+			if exempt[lit] {
 				return true
 			}
 			offenders = append(offenders, fset.Position(lit.Pos()).String())
@@ -133,5 +158,62 @@ func TestRenderedPromotionRefusalDoesNotCallAnIncompleteRecordAMismatch(t *testi
 	}
 	if !strings.Contains(msg, "could not be verified") {
 		t.Errorf("rendered refusal must say identity could not be verified:\n  %s", msg)
+	}
+}
+
+// Three review rounds found the same shape: the cannot-verify classification exists, and
+// some surface routes around it and relabels the error a mismatch. Sites found so far:
+// two in live_identity's wrapper, four in the refusal family, one pre-validator that ran
+// BEFORE the sentinel, one control-continue wrapper, and one no-verdict case.
+//
+// This makes the acceptance criterion permanent instead of a grep someone remembers to run:
+// every site that wraps an error with the mismatch label must first route the sentinel away.
+func TestEveryMismatchWrapperGuardsTheIncompleteSentinel(t *testing.T) {
+	const label = "verified live identity mismatch"
+	const guard = "errIncompleteLaunchRecord"
+	root := filepath.Join("..", "..", "internal")
+
+	var unguarded []string
+	sites := 0
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		lines := strings.Split(string(raw), "\n")
+		for i, line := range lines {
+			if !strings.Contains(line, label) || strings.HasPrefix(strings.TrimSpace(line), "//") {
+				continue
+			}
+			sites++
+			// The guard must appear in the enclosing few lines above the wrap.
+			lo := i - 6
+			if lo < 0 {
+				lo = 0
+			}
+			if !strings.Contains(strings.Join(lines[lo:i], "\n"), guard) {
+				unguarded = append(unguarded, filepath.ToSlash(path)+":"+itoa(i+1))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	// Anti-vacuity: if the label is ever renamed this test must fail loudly rather than
+	// silently pass by finding nothing to check.
+	if sites == 0 {
+		t.Fatalf("found no %q wrap sites; the label was renamed and this test is now blind", label)
+	}
+	if len(unguarded) != 0 {
+		t.Errorf("these sites wrap an error as %q without first routing %s away: %v. "+
+			"An incomplete record is cannot-verify, not verifiably-wrong", label, guard, unguarded)
 	}
 }

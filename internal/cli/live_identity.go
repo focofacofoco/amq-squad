@@ -145,8 +145,8 @@ func verifyRuntimeActionWithRecord(action, project, profile, session, handle str
 		return result, true, fmt.Errorf("%s refused: verified live identity mismatch: %w", action, err)
 	}
 	if result.Verified == nil {
-		result, baseErr := failedLiveIdentityResult(fmt.Errorf("authoritative resolver returned no verified identity"))
-		return result, true, fmt.Errorf("%s refused: verified live identity mismatch: %w", action, baseErr)
+		result, baseErr := failedLiveIdentityResult(fmt.Errorf("%w: authoritative resolver returned no verified identity", errIncompleteLaunchRecord))
+		return result, true, fmt.Errorf("%s refused: launch identity could not be verified: %w", action, baseErr)
 	}
 	return result, true, nil
 }
@@ -543,11 +543,17 @@ func validateLiveIdentityTerminalProjection(rec launch.Record) error {
 	}
 	switch strings.TrimSpace(terminal.Backend) {
 	case "tmux":
+		// ABSENCE and CONTRADICTION are different failures and must not share a message.
+		// This returned one non-sentinel error for both, and it runs BEFORE the "no exact
+		// tmux pane" check, so that sentinel was unreachable and the family member still
+		// rendered as a mismatch (#575 round 3).
 		if rec.Tmux == nil || strings.TrimSpace(terminal.Target) == "" || strings.TrimSpace(terminal.Session) == "" ||
-			strings.TrimSpace(terminal.WindowID) == "" || strings.TrimSpace(terminal.PaneID) == "" ||
-			terminal.Target != rec.Tmux.Target || terminal.Session != rec.Tmux.Session ||
+			strings.TrimSpace(terminal.WindowID) == "" || strings.TrimSpace(terminal.PaneID) == "" {
+			return fmt.Errorf("%w: managed launch tmux and terminal target identities are not fully recorded", errIncompleteLaunchRecord)
+		}
+		if terminal.Target != rec.Tmux.Target || terminal.Session != rec.Tmux.Session ||
 			terminal.WindowID != rec.Tmux.WindowID || terminal.PaneID != rec.Tmux.PaneID {
-			return fmt.Errorf("managed launch tmux and terminal target identities are incomplete or contradictory")
+			return fmt.Errorf("managed launch tmux and terminal target identities contradict each other")
 		}
 	case "iterm2":
 		if rec.Tmux != nil {
@@ -556,8 +562,11 @@ func validateLiveIdentityTerminalProjection(rec launch.Record) error {
 		if strings.TrimSpace(terminal.Target) == "" || strings.TrimSpace(terminal.Session) == "" ||
 			strings.TrimSpace(terminal.WindowID) == "" || strings.TrimSpace(terminal.TabID) == "" ||
 			strings.TrimSpace(terminal.SessionID) == "" || strings.TrimSpace(terminal.TTY) == "" ||
-			strings.TrimSpace(rec.AgentTTY) == "" || rec.AgentTTY != terminal.TTY || strings.TrimSpace(terminal.PaneID) != "" {
-			return fmt.Errorf("managed native terminal target identity is incomplete or contradictory")
+			strings.TrimSpace(rec.AgentTTY) == "" {
+			return fmt.Errorf("%w: managed native terminal target identity is not fully recorded", errIncompleteLaunchRecord)
+		}
+		if rec.AgentTTY != terminal.TTY || strings.TrimSpace(terminal.PaneID) != "" {
+			return fmt.Errorf("managed native terminal target identity contradicts the record")
 		}
 	default:
 		return fmt.Errorf("managed launch record has unsupported terminal backend %q", terminal.Backend)
