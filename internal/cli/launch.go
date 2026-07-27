@@ -573,10 +573,16 @@ Examples:
 		applyPreparedRunTokenToRecord(&rec, requestedPreparedToken)
 	}
 	if !*dryRun && requestedPreparedToken.empty() && preparedLaunchContext != nil {
-		if containsRole(preparedLaunchContext.Manifest.StagedRoster, rec.Role) {
-			return fmt.Errorf("agent up refused before launch-record or process side effects: staged actor %s/%s requires an exact single-use spawn reservation for prepared generation %s", rec.Role, rec.Handle, preparedLaunchContext.Manifest.Generation)
-		}
-		return fmt.Errorf("agent up refused before launch-record or process side effects: prepared actor %s/%s requires the exact reserved generation token", rec.Role, rec.Handle)
+		// #573: the refusal REASON is owned by preparedRunActorAdmission, not composed here,
+		// so `team resume` cannot describe this same state in different words. Sharing only a
+		// boolean would have let the two surfaces agree on the verdict and still disagree in
+		// front of the operator, which is a weaker version of the bug being fixed.
+		//
+		// rec is passed as nil deliberately: this site decides about an IN-PROCESS token, not a
+		// persisted one. Passing the record would set Bindable and change nothing about the
+		// verdict, while implying admission consults record state, which it does not.
+		adm := preparedRunActorAdmission(preparedLaunchContext.Manifest, true, rec.Role, rec.Handle, nil)
+		return fmt.Errorf("agent up refused before launch-record or process side effects: %s", adm.Reason)
 	}
 	if requestedPreparedToken.empty() {
 		applyPreparedRunTokenToRecord(&rec, preparedRunTokenForContext(preparedLaunchContext))
