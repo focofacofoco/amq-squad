@@ -382,15 +382,19 @@ func GlobalPostureChoices(agent string) []GlobalPostureChoice {
 }
 
 // globalPostureArgs returns the native args for a posture, or "" when unset or unknown.
-// Unknown is deliberately silent rather than an error: posture is additive to free-text
-// native args, and an unrecognised stored value must not break a preview.
+// Unknown applies no args, and the review line says so; both must reach the same verdict
+// about the same stored value, which is why both route through canonicalGlobalPosture.
+// They did not: this helper trimmed and compared case-insensitively while the review line
+// compared RAW, so a stored " workspace-write " APPLIED workspace-write sandboxing while
+// the review rendered "unknown posture, no sandbox flags applied". The operator approved
+// one outcome and would have got another.
 func globalPostureArgs(agent, posture string) string {
-	posture = strings.TrimSpace(posture)
+	posture = canonicalGlobalPosture(posture)
 	if posture == "" {
 		return ""
 	}
 	for _, c := range GlobalPostureChoices(agent) {
-		if strings.EqualFold(c.Value, posture) {
+		if canonicalGlobalPosture(c.Value) == posture {
 			return c.Args
 		}
 	}

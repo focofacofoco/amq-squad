@@ -1746,22 +1746,23 @@ func globalPostureRows(agent, stored string) []choice {
 // globalPostureReviewLine states the posture AND its tmux consequence, because the
 // consequence is what the operator is actually approving at the review screen.
 func globalPostureReviewLine(agent, posture string) string {
+	posture = canonicalGlobalPosture(posture)
 	for _, c := range GlobalPostureChoices(agent) {
-		if strings.EqualFold(c.Value, posture) {
+		if canonicalGlobalPosture(c.Value) == posture {
 			if c.DrivesTmux {
 				return c.Label + " · can drive tmux"
 			}
 			return c.Label + " · CANNOT drive tmux: " + c.Consequence
 		}
 	}
-	if strings.TrimSpace(posture) == "" {
+	if posture == "" {
 		return displayValue(posture)
 	}
 	// Non-breaking but NOT invisible. An unrecognised stored posture applies no sandbox
 	// flags, which for codex means default sandboxing and therefore no tmux control --
 	// the #455 item-2 failure recreated through the back door, and harder to suspect
 	// because the operator DID use the posture step. Say so at the gate.
-	return "unknown posture " + strings.TrimSpace(posture) + " (no sandbox flags applied)"
+	return "unknown posture " + posture + " (no sandbox flags applied)"
 }
 
 func operatorContractSummary(mode string) string {

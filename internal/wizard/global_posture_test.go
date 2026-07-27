@@ -231,3 +231,36 @@ func TestStoredPostureSurvivesCaseAndWhitespace(t *testing.T) {
 		})
 	}
 }
+
+// Finding of #568 convergence: two helpers compared the same stored value independently,
+// one trimming and one raw, so a padded-but-VALID posture applied sandbox flags while the
+// review line called it unknown and claimed none were applied. Args and review disagreed
+// about what would happen, which breaks the review-gate contract that an operator approves
+// an OUTCOME.
+//
+// This asserts agreement rather than checking each helper separately, because separate
+// correct-looking checks are exactly what let the disagreement through.
+func TestArgsAndReviewAgreeOnTheSameStoredPosture(t *testing.T) {
+	cases := []string{
+		"workspace-write", " workspace-write ", "WORKSPACE-WRITE", "\tread-only\n",
+		"full-access", " FULL-ACCESS ", "typo-posture", "  typo-posture  ",
+	}
+	for _, stored := range cases {
+		t.Run(strings.TrimSpace(stored), func(t *testing.T) {
+			args := globalPostureArgs("codex", stored)
+			review := globalPostureReviewLine("codex", stored)
+
+			appliesFlags := strings.Contains(args, "--sandbox")
+			claimsNoFlags := strings.Contains(review, "no sandbox flags applied")
+
+			if appliesFlags && claimsNoFlags {
+				t.Errorf("stored %q: args APPLY %q while the review claims no flags are applied:\n  %s",
+					stored, args, review)
+			}
+			if !appliesFlags && !claimsNoFlags {
+				t.Errorf("stored %q: args apply NOTHING but the review does not say so:\n  %s",
+					stored, review)
+			}
+		})
+	}
+}
