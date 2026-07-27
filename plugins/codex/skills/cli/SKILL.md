@@ -48,15 +48,16 @@ action; never restate what the output already says.
 | "claim this" | `amq-squad task claim ID --me H --session S` |
 | "mark it done" | `amq-squad task done ID --me H --session S` |
 | "show the task" | `amq-squad task show ID --session S` |
-| "record proof this passed" | `amq-squad evidence run ID --me H --subject TEXT` |
+| "record proof this passed" | `amq-squad evidence run ID --me H --subject TEXT -- make ci` |
 | "the evidence didn't link" | `amq-squad evidence recover ID ATTEMPT --me H` |
 | "I'm working on it" | `amq-squad activity set --session S --me H --task ID --phase coding` |
 | "read that thread" | `amq-squad amq thread --id THREAD --include-body` |
 | "where does this route" | `amq-squad amq route explain` |
 | "drain my inbox" | `amq-squad amq drain --include-body` |
-| "ask the human" | `amq-squad gate raise --session S` |
-| "is this safe to merge" | `amq-squad verify merge --session S` |
-| "plan the release" | `amq-squad verify release-plan --session S` |
+| "ask the human" | `amq-squad gate raise --gate TOPIC --kind KIND --action ACTION --target TARGET --session S --me H` |
+| "is this safe to merge" | `amq-squad verify merge --project DIR --evidence FILE` |
+| "plan the release" | `amq-squad verify release-plan --project DIR` |
+| "what gate kinds exist" | `amq-squad gate raise --list-kinds` |
 | "which profile am I in" | `amq-squad context explain` |
 | "prepare a squad" | Wrong skill, use `amq-squad:wizard` |
 | "run the lead loop" | Wrong skill, use `amq-squad:orchestrator` |

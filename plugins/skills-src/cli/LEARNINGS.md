@@ -49,6 +49,36 @@ thing; and the assertion is evaluated where the behaviours diverge.
 
 ---
 
+## Flag existence is not invocation correctness
+
+A drift gate that verifies every named flag EXISTS still cannot tell you the command
+would run. Four documented invocations in this skill errored as written while passing the
+gate:
+
+    evidence run ID --me H --subject TEXT        missing the required `-- COMMAND`
+    gate raise --session S                       missing required --gate/--kind/--action/--target
+    verify merge --session S                     --session is not a flag of this command
+    verify release-plan --session S               same
+
+The gate could not refute any of them. Two were incomplete rather than wrong — every flag
+present was real, just insufficient — and two named a flag the command does not accept, on
+an illustrative help surface the gate can only confirm from, never refute against.
+
+A reviewer found them by EXECUTING the table. That is the only method that works here.
+
+Practical rules:
+
+- **Copy a form you have actually run.** Not one assembled from a flag list.
+- **Run the command with no arguments** to learn what it requires; these four all name
+  their missing pieces immediately (`requires TASK [flags] -- COMMAND [ARG...]`,
+  `project is required`, `--evidence is required`).
+- **Treat "the gate is green" as covering existence only.** Verified flag count is a floor
+  on correctness, not a measure of it.
+
+The general shape, and the reason this sits in a skill rather than a commit message: a
+check proves the property it tests, and its silence about everything else is not evidence.
+Three separate gates in this repo were green on these lines.
+
 ## Posture: what a check should do when it cannot tell
 
 **Probe posture is context-derived, not code-shaped.** The same observation code

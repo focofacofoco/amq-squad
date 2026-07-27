@@ -154,7 +154,7 @@ First steps:
 {{- else }}
     Bootstrap acknowledgement is not required for this launch.
 {{- end }}
-12. Start your first response by stating your role, handle, and the amq-squad skill version (the `Skill version:` marker in the amq-squad skill you loaded — e.g. `amq-squad skill v2.0.0`); if you cannot find that marker, say so, since it means the 2.0 skill did not load. Then summarize relevant prior context and what you are waiting for.
+12. Start your first response by stating your role and handle. If you need the resolved skill and binary versions, run `amq-squad doctor` rather than asserting them from memory. Then summarize relevant prior context and what you are waiting for.
 13. Stop and wait for instructions.
 {{- if and .Orchestrated (not .IsLead) .LeadHandle }}
 

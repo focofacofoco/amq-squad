@@ -108,6 +108,16 @@ func TestDoctorAcceptsTheRealShippedBundle(t *testing.T) {
 // Comment lines are ignored: prose explaining what was removed is documentation, not a
 // consumer. Excluding them by rule rather than by an exemption list keeps this test from
 // needing maintenance of its own.
+//
+// ACCEPTED RESIDUALS, recorded rather than chased. Any substring test can be evaded by
+// string concatenation ("Skill ver" + "sion:") or by a raw string literal whose line
+// happens to start with //. Both are residuals of substring matching itself, not gaps
+// this test can close, and neither is a plausible accident. The failure mode this test
+// exists to catch is a consumer written NORMALLY, which it does catch.
+//
+// Note also that block-comment INTERIORS are not excluded, so a marker inside /* */
+// produces a false positive. That direction is deliberate: it fails loud rather than
+// hiding a real consumer.
 func TestNoGoCodeReadsTheDeletedMarker(t *testing.T) {
 	const marker = "Skill version:"
 	root := filepath.Join("..", "..", "internal")
@@ -117,7 +127,16 @@ func TestNoGoCodeReadsTheDeletedMarker(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		// .md is walked as well as .go: internal/cli/bootstrap.md is an EMBEDDED
+		// PRODUCTION PROMPT, so a marker instruction there ships to every launched
+		// agent. A .go-only walk missed it, and review found it -- the gap is why
+		// this covers both extensions rather than only source code.
+		if info.IsDir() {
+			return nil
+		}
+		isGo := strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go")
+		isMarkdown := strings.HasSuffix(path, ".md") && !strings.Contains(filepath.ToSlash(path), "/testdata/")
+		if !isGo && !isMarkdown {
 			return nil
 		}
 		raw, readErr := os.ReadFile(path)

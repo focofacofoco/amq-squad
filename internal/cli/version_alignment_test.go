@@ -88,7 +88,7 @@ func TestBuildVersionAlignmentWarnsOnPluginAndSkillMismatch(t *testing.T) {
 		CodexSkillCacheRoot:  func() string { return codexRoot },
 		ClaudeSkillCacheRoot: func() string { return claudeRoot },
 		SkillMDContent: func(string) (string, string, bool) {
-			return "**Skill version: 2.9.0** - stale", "/cache/skill", true
+			return "---\nname: \"amq-squad\"\nversion: \"2.9.0\"\n---\n", "/cache/skill", true
 		},
 	})
 	if got.Aligned {
@@ -165,7 +165,7 @@ func TestVersionAlignmentWarningBeforeLaunch(t *testing.T) {
 			CodexSkillCacheRoot:  func() string { return "" },
 			ClaudeSkillCacheRoot: func() string { return "" },
 			SkillMDContent: func(string) (string, string, bool) {
-				return "**Skill version: 2.12.0** - ok", "/cache/skill", true
+				return "---\nname: \"amq-squad\"\nversion: \"2.12.0\"\n---\n", "/cache/skill", true
 			},
 		})
 		return nil
