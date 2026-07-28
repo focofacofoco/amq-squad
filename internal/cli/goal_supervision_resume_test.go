@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
+	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
 // dev-2's three PR5 falsifiers, plus the mismatched-NamespaceID row.
@@ -38,12 +40,17 @@ func TestSupervisionResumeConsumesThePauseGenerationItIsGiven(t *testing.T) {
 	namespaceID := squadnamespace.ID(profile, session)
 
 	record, path, err := newRecoveryTransitionRecord(recoveryTransitionInput{
-		Base:                resumeGoalTransitionRecord{Project: project, Profile: profile, Session: session},
+		Base:                nativeTransitionBase(project, profile, session),
 		Kind:                recoveryTransitionKindNativeGoalResume,
+		Supervisor:          "supervisor-1",
 		NamespaceID:         namespaceID,
 		AttemptID:           attemptID,
 		PauseGeneration:     authoritative,
 		PreclaimFingerprint: "fingerprint-1",
+		// THE EXACT BINDING, required for native. Absent here before, which made this row -- whose whole
+		// subject is that the pause generation is CONSUMED -- refuse at the binding check instead, so it
+		// asserted nothing about consumption.
+		NativeBinding: validNativeBinding(namespaceID, attemptID),
 	})
 	if err != nil {
 		t.Fatalf("a complete supervision input must be accepted: %v", err)
@@ -81,23 +88,76 @@ func TestSupervisionResumeConsumesThePauseGenerationItIsGiven(t *testing.T) {
 // THE FALSIFYING INPUT is precisely the combination that a single-flag check would let through:
 // everything eligibility-related is GREEN, and only the policy flag is false. An assessment that
 // was also ineligible would refuse for the other reason and prove nothing about this gate.
+// nativeResumePayload is the exact bytes a native resume would type into the pane -- NOT the CLI
+// invocation. Kept as a named fixture so every row that needs an authorized payload agrees on one
+// value rather than each inventing its own.
+const nativeResumePayload = "/goal resume attempt-abc"
+
 func TestEligibleButPolicyForbiddenRefusesWithoutReservingOrDelivering(t *testing.T) {
 	project := t.TempDir()
+	now := time.Now().UTC()
 	assessment := GoalSupervisionAssessment{
 		Fresh:                  true,
 		Eligible:               true, // GREEN
 		AutomaticResumeAllowed: false,
 		Fingerprint:            "fingerprint-1",
+		// FreshUntil must be in the FUTURE, or this row would refuse on the new wall-clock gate
+		// and stop proving anything about the policy boundary it is named for -- the
+		// single-defect-per-row property, applied to a row an unrelated change could have
+		// silently repurposed.
+		ObservedAt: now,
+		FreshUntil: now.Add(time.Hour),
+		// EXPLICIT non-safe-auto policy. The constructor derives Available from
+		// AutomaticResumeAllowed and NeedsConfirmation from Policy.Mode, so leaving Mode at its zero
+		// value would have the fixture depend on what the zero value happens to mean today.
+		Policy: team.GoalSupervisionPolicyStatus{
+			Mode: team.GoalSupervisionNotifyOnly, Revision: 1, Source: "test",
+		},
 		Binding: GoalSupervisionBinding{
 			Project: project, Profile: "squad", Session: "v2-25-0",
 			NamespaceID:     squadnamespace.ID("squad", "v2-25-0"),
 			PauseGeneration: "pause-gen-1",
-			Goal:            GoalSupervisionGoalIdentity{AttemptID: "attempt-abc", BindingDigest: "digest-def"},
+			Goal: GoalSupervisionGoalIdentity{
+				AttemptID: "attempt-abc", BindingDigest: "digest-def",
+				// Binds the digest of nativeResumePayload so authorization passes and the POLICY gate
+				// is what this row actually tests.
+				CommandDigest: digestGoalSupervisionString(nativeResumePayload),
+			},
 		},
 	}
 
 	delivered := 0
-	err := executeSupervisionResume(assessment, func(string) error { delivered++; return nil })
+	// The clock is INJECTED and this call site is explicit rather than defaulted: the executor
+	// refuses a nil clock instead of falling back to time.Now(), so no caller can silently opt out
+	// of the gate the seam exists for.
+	// The action is passed EXPLICITLY and must match the assessment, so this row exercises the
+	// policy gate rather than tripping the new action-binding check ahead of it. Building it from
+	// the assessment's own fields is correct HERE because the subject of this test is the policy
+	// boundary; the binding check gets its own rows with deliberately mismatched actions.
+	// THE ACTION COMES FROM THE PRODUCTION CONSTRUCTOR, not hand-synchronized field by field.
+	//
+	// dev-2's correction, and it is strictly better than what I proposed. My version set Command and
+	// Available by hand and I had already missed Mutates once; every canonical field I copy manually
+	// makes this fixture a SECOND DEFINITION of what the canonical action is, and it will drift from
+	// goalSupervisionActions exactly as it drifted from the gates. Consuming the constructor means the
+	// fixture cannot disagree with production about canon -- the same single-decider rule the
+	// production code follows, applied to the test.
+	assessment.Actions = goalSupervisionActions(assessment)
+	action := assessment.Actions.Resume
+
+	// A loader that returns a SELF-CONSISTENT pair matching the assessment's bound digest, so this
+	// row still exercises the policy gate rather than tripping payload authorization ahead of it.
+	// The payload-mismatch and digest-mismatch cases get their own rows -- single defect per row,
+	// applied again as gates accumulate upstream of an existing test.
+	loader := func(GoalSupervisionAssessment) (string, string, error) {
+		return nativeResumePayload, digestGoalSupervisionString(nativeResumePayload), nil
+	}
+
+	_, err := executeSupervisionResume(assessment, action, "supervisor-1",
+		func() time.Time { return now }, loader,
+		passingGenerationReader(assessment), passingPaneReader(assessment),
+		readReservedRecoveryTransition,
+		func(string) error { delivered++; return nil })
 
 	if err == nil {
 		t.Fatal("a profile that forbids automatic resume must refuse even when the actor is ELIGIBLE: " +
@@ -186,12 +246,18 @@ func TestSupervisionResumeRefusesAForeignNamespaceID(t *testing.T) {
 	}
 
 	_, _, err := newRecoveryTransitionRecord(recoveryTransitionInput{
-		Base:                resumeGoalTransitionRecord{Project: project, Profile: profile, Session: session},
+		Base:                nativeTransitionBase(project, profile, session),
 		Kind:                recoveryTransitionKindNativeGoalResume,
+		Supervisor:          "supervisor-1",
 		NamespaceID:         foreign,
 		AttemptID:           "attempt-abc",
 		PauseGeneration:     "pause-gen-1",
 		PreclaimFingerprint: "fingerprint-1",
+		// The binding AGREES with the foreign namespace on purpose, so the sole defect is that the namespace
+		// is not canonical for this profile/session. A binding carrying the CANONICAL namespace would refuse
+		// on the binding-versus-claim namespace disagreement instead -- a different check, and this row
+		// would then pass while proving the wrong thing.
+		NativeBinding: validNativeBinding(foreign, "attempt-abc"),
 	})
 	if err == nil {
 		t.Fatal("a namespace id that is not canonical for this profile/session must be refused: the " +

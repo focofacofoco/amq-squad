@@ -25,6 +25,31 @@ const resumeGoalPlanSchemaVersion = 1
 
 const resumeGoalTransitionSchemaVersion = 1
 
+// resumeGoalNativeBinding is the exact assessment binding authorized by a native goal-resume
+// reservation that is not already represented by the transition record's shared flat fields.
+//
+// Every field is required for native reservations and deliberately lacks omitempty. The containing
+// pointer is the compatibility boundary: it is absent for legacy/redeliver records, while a broken
+// native writer leaves visibly invalid evidence that readers refuse instead of silently omitting
+// the missing identity.
+//
+// GoalAttemptID intentionally duplicates the VALUE in the flat NewAttemptID under a different
+// semantic contract. GoalAttemptID is the assessment identity that authorized the reservation;
+// NewAttemptID is the lifecycle identity carried through bound/consumed artifacts. Native
+// construction and recovery require them to agree.
+type resumeGoalNativeBinding struct {
+	NamespaceID             string `json:"namespace_id"`
+	PaneID                  string `json:"pane_id"`
+	GoalMode                string `json:"goal_mode"`
+	GoalAttemptID           string `json:"goal_attempt_id"`
+	GoalBindingDigest       string `json:"goal_binding_digest"`
+	GoalCommandDigest       string `json:"goal_command_digest"`
+	BlockerID               string `json:"blocker_id"`
+	BlockerResolutionDigest string `json:"blocker_resolution_digest"`
+	PolicyMode              string `json:"policy_mode"`
+	PolicyRevision          int    `json:"policy_revision"`
+}
+
 type resumeGoalTransitionRecord struct {
 	SchemaVersion         int       `json:"schema_version"`
 	TransitionID          string    `json:"transition_id"`
@@ -50,11 +75,12 @@ type resumeGoalTransitionRecord struct {
 	LaunchRecordModTime   int64     `json:"launch_record_mod_time_unix_nano"`
 	CreatedAt             time.Time `json:"created_at"`
 
-	// PR5 / #498. Three ADDITIVE fields that let this record serve every recovery kind rather
-	// than redelivery alone. All three are omitempty, and that is a compatibility REQUIREMENT,
-	// not a style choice: a legacy record on disk carries none of them, so they must stay absent
-	// from its round trip instead of appearing as empty strings a reader could mistake for
-	// deliberate values.
+	// PR5 / #498. ADDITIVE top-level fields that let this record serve every recovery kind rather
+	// than redelivery alone. Every top-level addition is omitempty, and that is a compatibility
+	// REQUIREMENT, not a style choice: a legacy record on disk carries none of them, so they must
+	// stay absent from its round trip instead of appearing as empty values a reader could mistake
+	// for deliberate evidence. NativeBinding's required interior fields are the intentional inverse:
+	// once the pointer is present, an empty field stays visible so native validation can refuse it.
 	//
 	// READ/WRITE ASYMMETRY (ruled): on READ, absence means legacy/redeliver, identified by the
 	// legacy key. On WRITE, absence of a field the kind requires REFUSES -- a defaulted identity
@@ -79,6 +105,31 @@ type resumeGoalTransitionRecord struct {
 	// fingerprint-keyed claim would rotate its own identity at the moment of being recorded and
 	// become unmatchable on read.
 	PreclaimFingerprint string `json:"preclaim_fingerprint,omitempty"`
+
+	// Supervisor is WHO AUTHORISED this resume, recorded because accountability that exists only in a
+	// live process cannot be audited after it. The pre-mutation gates already refuse a blank or
+	// placeholder supervisor, so the value is validated before it gets here -- but validating an
+	// identity and then discarding it means the claim on disk cannot answer the one question an
+	// operator asks about an unexpected resume.
+	//
+	// NEVER INFERRED FROM Role/Handle. The lead and the supervisor are two different actors with two
+	// different accountabilities; deriving one from the other would durably record the wrong actor,
+	// and a wrong attribution is worse than a missing one because it looks like an answer.
+	//
+	// REDELIVER MUST NOT CARRY ONE, same asymmetry as PauseGeneration: that path holds no assessment
+	// and no supervisor, so a value there was invented rather than observed.
+	Supervisor string `json:"supervisor,omitempty"`
+
+	// NativeBinding is nil for legacy/redeliver and non-nil exactly for native goal-resume
+	// reservations. The constructor owns this entire block: Base.NativeBinding is never a valid
+	// source (even when its values would agree), and accepted native input is copied into a fresh
+	// value rather than retaining a caller or Base pointer.
+	//
+	// Existing shared identities deliberately stay flat: Project/Profile/Session, Role/Handle,
+	// LaunchID and launch generation, SchemaVersion, transition/kind, pause/fingerprint,
+	// Supervisor, and NewAttemptID. Duplicating them here would create permanent disagreement
+	// states between two durable owners of the same fact.
+	NativeBinding *resumeGoalNativeBinding `json:"native_binding,omitempty"`
 
 	// BindingReserved is runtime-only recovery state. It records that a prior
 	// process durably published this transition's exact new binding before it
@@ -733,6 +784,182 @@ func resumeGoalDeliveryErrorState(err error) (state, attemptID, attemptPath stri
 	return "", "", ""
 }
 
+// resumeGoalRecoveryScanOptions carries the delivery identity used to decide
+// whether CONSUMED recovery evidence belongs to this pause. UNCONSUMED evidence
+// is directory-wide and always blocks; unlike consumed audit history it is
+// transient, operator-recoverable evidence that another delivery may still be
+// in flight.
+type resumeGoalRecoveryScanOptions struct {
+	LegacyKey       string
+	TargetNamespace string
+	TargetAttemptID string
+	OwnPath         string
+	OwnTransitionID string
+}
+
+type resumeGoalRecoveryCompanion struct {
+	Base string
+	Path string
+}
+
+// scanResumeGoalRecoveryTransitions is the redelivery-side reader for both
+// recovery-transition derivations. Recognition always goes through the shared
+// tri-state parser: ordinary attempt files are ignored, transition-like malformed
+// names block, and recognized legacy/current reservations are inspected.
+func scanResumeGoalRecoveryTransitions(dir string, opts resumeGoalRecoveryScanOptions) (*recoveryTransitionBlocker, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read recovery transition directory %s: %w", dir, err)
+	}
+
+	reservations := make(map[string]struct{})
+	var companions []resumeGoalRecoveryCompanion
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if base, ok := companionReservationBase(name); ok {
+			_, recognition := recognizeRecoveryTransitionName(base + ".json")
+			switch recognition {
+			case recoveryNameNotATransition:
+				continue
+			case recoveryNameMalformed:
+				return &recoveryTransitionBlocker{
+					Path:   filepath.Join(dir, name),
+					Reason: "a recovery-transition companion has a malformed, unknown-kind or damaged reservation name",
+				}, nil
+			}
+			companions = append(companions, resumeGoalRecoveryCompanion{
+				Base: base,
+				Path: filepath.Join(dir, name),
+			})
+			continue
+		}
+
+		parsed, recognition := recognizeRecoveryTransitionName(name)
+		switch recognition {
+		case recoveryNameNotATransition:
+			continue
+		case recoveryNameMalformed:
+			return &recoveryTransitionBlocker{
+				Path:   filepath.Join(dir, name),
+				Reason: "a recovery-transition-like file is malformed, unknown-kind or missing structure",
+			}, nil
+		}
+		path := filepath.Join(dir, name)
+		reservations[name] = struct{}{}
+		record, identityErr := readResumeGoalRecoveryIdentity(path, parsed)
+		if identityErr != nil {
+			return &recoveryTransitionBlocker{Path: path, Reason: identityErr.Error()}, nil
+		}
+		if path == opts.OwnPath &&
+			record.TransitionID == opts.OwnTransitionID &&
+			strings.TrimSpace(record.RecoveryKind) == string(recoveryTransitionKindRedeliver) {
+			// Exact path is not enough. Only the body identity of the reservation
+			// this redelivery wrote permits self-exclusion; a replaced or renamed
+			// record remains a blocker.
+			continue
+		}
+
+		consumedPath := resumeGoalTransitionConsumedPath(path)
+		if _, statErr := os.Stat(consumedPath); statErr == nil {
+			matches, matchErr := resumeGoalConsumedRecoveryMatchesDelivery(parsed, record, opts)
+			if matchErr != nil {
+				return &recoveryTransitionBlocker{
+					Path:   consumedPath,
+					Reason: "consumed recovery-transition identity is indeterminate: " + matchErr.Error(),
+				}, nil
+			}
+			if !matches {
+				// A consumed transition proven to belong to a different pause is
+				// durable audit history, not a poison pill for all future delivery.
+				continue
+			}
+		} else if !os.IsNotExist(statErr) {
+			return &recoveryTransitionBlocker{
+				Path:   consumedPath,
+				Reason: "cannot stat the consumption record, so recovery-transition identity is indeterminate",
+			}, nil
+		}
+
+		// Unconsumed evidence blocks directory-wide; consumed evidence reaches
+		// here only after exact delivery-identity matching.
+		if blocker := reservationBlocker(path); blocker != nil {
+			return blocker, nil
+		}
+	}
+
+	for _, companion := range companions {
+		if _, ok := reservations[companion.Base+".json"]; ok {
+			continue
+		}
+		return &recoveryTransitionBlocker{
+			Path:   companion.Path,
+			Reason: "ORPHAN recovery-transition companion: its reservation is absent, so prior delivery cannot be disproved",
+		}, nil
+	}
+	return nil, nil
+}
+
+func readResumeGoalRecoveryIdentity(path string, parsed parsedRecoveryTransitionName) (resumeGoalTransitionRecord, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return resumeGoalTransitionRecord{}, fmt.Errorf("cannot read recovery reservation identity: %w", err)
+	}
+	var record resumeGoalTransitionRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		return resumeGoalTransitionRecord{}, fmt.Errorf("recovery reservation identity does not parse: %w", err)
+	}
+	if strings.TrimSpace(record.TransitionID) != parsed.ClaimKey {
+		return resumeGoalTransitionRecord{}, fmt.Errorf(
+			"recovery reservation filename key %q disagrees with record transition id %q",
+			parsed.ClaimKey, record.TransitionID,
+		)
+	}
+	recordKind := recoveryTransitionKind(strings.TrimSpace(record.RecoveryKind))
+	if parsed.Legacy {
+		// Pre-PR5 legacy records have no kind field; current redelivery writes
+		// carry the explicit redeliver kind while retaining the legacy filename.
+		if recordKind != "" && recordKind != recoveryTransitionKindRedeliver {
+			return resumeGoalTransitionRecord{}, fmt.Errorf(
+				"legacy redelivery reservation record carries incompatible kind %q", record.RecoveryKind,
+			)
+		}
+	} else if recordKind != parsed.Kind {
+		return resumeGoalTransitionRecord{}, fmt.Errorf(
+			"recovery reservation filename kind %q disagrees with record kind %q",
+			parsed.Kind, record.RecoveryKind,
+		)
+	}
+	return record, nil
+}
+
+func resumeGoalConsumedRecoveryMatchesDelivery(
+	parsed parsedRecoveryTransitionName,
+	record resumeGoalTransitionRecord,
+	opts resumeGoalRecoveryScanOptions,
+) (bool, error) {
+	if parsed.Legacy {
+		if strings.TrimSpace(opts.LegacyKey) == "" {
+			return false, fmt.Errorf("delivery has no exact legacy attempt+binding key")
+		}
+		return parsed.ClaimKey == opts.LegacyKey, nil
+	}
+	expected, err := supervisionClaimKey(
+		opts.TargetNamespace,
+		record.PauseGeneration,
+		opts.TargetAttemptID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("recompute current claim key from delivery namespace, record pause generation, and delivery attempt: %w", err)
+	}
+	return parsed.ClaimKey == expected, nil
+}
+
 func reserveResumeGoalTransition(t team.Team, profile, workstream string, verified resumeExecLaunchResult, plan runwizard.ResumeGoalPlan) error {
 	check := verified.Check
 	opts := goalDeliveryOptions{Project: t.Project, Profile: profile, Session: workstream, Role: plan.LeadRole}
@@ -778,6 +1005,18 @@ func reserveResumeGoalTransition(t team.Team, profile, workstream string, verifi
 		launchDigest, launchMod, err := readGoalFileGeneration(launch.ExistingPath(check.AgentDir))
 		if err != nil {
 			return fmt.Errorf("capture launch generation: %w", err)
+		}
+		if blocker, err := scanResumeGoalRecoveryTransitions(
+			goalAttemptDir(t.Project, profile, workstream),
+			resumeGoalRecoveryScanOptions{
+				LegacyKey:       plan.TransitionID,
+				TargetNamespace: squadnamespace.ID(profile, workstream),
+				TargetAttemptID: plan.OriginalAttemptID,
+			},
+		); err != nil {
+			return fmt.Errorf("inspect recovery transitions before redelivery reserve: %w", err)
+		} else if blocker != nil {
+			return fmt.Errorf("redelivery claim-once refusal before reserve: %s", blocker.describe())
 		}
 		// PR5 / #498. This site no longer derives a path, no longer stamps a TransitionID, and no
 		// longer publishes: the CONSTRUCTOR owns identity and path, and the RESERVER owns
@@ -825,23 +1064,51 @@ func reserveResumeGoalTransition(t team.Team, profile, workstream string, verifi
 	})
 }
 
+func resumeGoalDeliveryLegacyKey(opts goalDeliveryOptions, mr memberRuntime) (string, error) {
+	attemptID := strings.TrimSpace(opts.AttemptID)
+	if attemptID == "" {
+		return "", fmt.Errorf("delivery attempt id is blank")
+	}
+	contract, err := goalDeliveryContractForBinary(opts.Member.Binary)
+	if err != nil {
+		return "", err
+	}
+	if mr.HasRecord && mr.Record.GoalBinding != nil {
+		if _, boundAttempt, bindingErr := goalBindingPayload(mr.Record.GoalBinding, contract); bindingErr == nil && boundAttempt == attemptID {
+			return resumeGoalTransitionID(attemptID, digestJSON(*mr.Record.GoalBinding)), nil
+		}
+	}
+	prompt := contract.prompt(opts.Goal, opts.Team, opts.Profile, opts.Session, opts.Role, attemptID)
+	binding := contract.binding(
+		opts.Goal,
+		attemptID,
+		prompt,
+		"goal-control",
+		contract.Label+" reserved as a claim-once control action",
+	)
+	return resumeGoalTransitionID(attemptID, digestJSON(*binding)), nil
+}
+
 func validateResumeGoalTransitionForDelivery(opts goalDeliveryOptions, mr memberRuntime) (*resumeGoalTransitionRecord, error) {
 	dir := goalAttemptDir(opts.Project, opts.Profile, opts.Session)
 	if opts.ResumeTransitionID == "" {
-		entries, err := os.ReadDir(dir)
-		if err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("inspect goal redelivery transitions: %w", err)
+		legacyKey, err := resumeGoalDeliveryLegacyKey(opts, mr)
+		if err != nil {
+			return nil, fmt.Errorf("derive goal delivery recovery identity: %w", err)
 		}
-		for _, entry := range entries {
-			name := entry.Name()
-			if !strings.HasPrefix(name, ".resume-redelivery-") || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".consumed.json") || strings.HasSuffix(name, ".bound.json") {
-				continue
-			}
-			path := filepath.Join(dir, name)
-			if _, err := os.Stat(resumeGoalTransitionConsumedPath(path)); err == nil {
-				continue
-			}
-			return nil, fmt.Errorf("goal delivery refused: an unconsumed durable resume-goal transition already exists at %s", path)
+		blocker, err := scanResumeGoalRecoveryTransitions(
+			dir,
+			resumeGoalRecoveryScanOptions{
+				LegacyKey:       legacyKey,
+				TargetNamespace: squadnamespace.ID(opts.Profile, opts.Session),
+				TargetAttemptID: opts.AttemptID,
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("inspect goal recovery transitions: %w", err)
+		}
+		if blocker != nil {
+			return nil, fmt.Errorf("goal delivery refused: %s", blocker.describe())
 		}
 		return nil, nil
 	}
@@ -861,6 +1128,22 @@ func validateResumeGoalTransitionForDelivery(opts goalDeliveryOptions, mr member
 	var tr resumeGoalTransitionRecord
 	if err := json.Unmarshal(payload, &tr); err != nil {
 		return nil, fmt.Errorf("goal delivery refused: durable resume-goal transition is corrupt: %w", err)
+	}
+	blocker, err := scanResumeGoalRecoveryTransitions(
+		dir,
+		resumeGoalRecoveryScanOptions{
+			LegacyKey:       opts.ResumeTransitionID,
+			TargetNamespace: squadnamespace.ID(opts.Profile, opts.Session),
+			TargetAttemptID: tr.OriginalAttemptID,
+			OwnPath:         path,
+			OwnTransitionID: tr.TransitionID,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("goal delivery refused: inspect recovery-transition mutex: %w", err)
+	}
+	if blocker != nil {
+		return nil, fmt.Errorf("goal delivery refused by cross-kind claim-once mutex: %s", blocker.describe())
 	}
 	currentTeam, err := team.ReadProfile(opts.Project, opts.Profile)
 	if err != nil {

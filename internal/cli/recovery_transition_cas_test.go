@@ -155,11 +155,13 @@ func TestConstructorOverwritesASmuggledTransitionID(t *testing.T) {
 	}
 
 	project := t.TempDir()
+	smuggling := redeliverTransitionBase(project, "squad", "v2-25-0", attemptID, bindingDigest)
+	// THE SMUGGLING CHANNEL, applied to an otherwise complete Base so the supplied id is the row's only
+	// defect. With an incomplete Base this row would now refuse on the redeliver contract and prove nothing
+	// about smuggling.
+	smuggling.TransitionID = foreign
 	record, path, err := newRecoveryTransitionRecord(recoveryTransitionInput{
-		Base: resumeGoalTransitionRecord{
-			Project: project, Profile: "squad", Session: "v2-25-0",
-			TransitionID: foreign, // the smuggling channel
-		},
+		Base:          smuggling,
 		Kind:          recoveryTransitionKindRedeliver,
 		AttemptID:     attemptID,
 		BindingDigest: bindingDigest,
@@ -219,13 +221,29 @@ func TestRecoveryTransitionInputGainsNoDirectTransitionIDField(t *testing.T) {
 // other half of the three-way asymmetry. Without this, "bind is the exception" is a claim about
 // bind alone rather than a contrast that could be wrong.
 func TestReserveAndConsumeBothRefuseALostRace(t *testing.T) {
-	dir := t.TempDir()
-	record := resumeGoalTransitionRecord{
-		SchemaVersion: resumeGoalTransitionSchemaVersion,
-		TransitionID:  strings.Repeat("c", 64),
-		NewAttemptID:  "attempt-new",
+	// THE FIXTURE NOW COMES FROM THE CONSTRUCTOR, and that change is the point rather than a tidy-up.
+	//
+	// It used to be a hand-built record carrying only SchemaVersion/TransitionID/NewAttemptID at a
+	// hand-joined path. The publication contract correctly refuses that -- it has no kind and no scope --
+	// so this test broke the moment publication started validating, and it broke for a reason that had
+	// NOTHING to do with lost races. That is the fixture failure mode dev-2 keeps finding: a row whose
+	// setup encodes only what its author was thinking about, which silently becomes a row about something
+	// else as soon as the contract grows.
+	//
+	// Built from the one constructor, the fixture cannot drift out of validity without the constructor
+	// itself changing, and this row stays a row about CAS semantics.
+	const profile = "squad"
+	const session = "v2-25-0"
+	project := t.TempDir()
+	record, path, err := newRecoveryTransitionRecord(recoveryTransitionInput{
+		Base:          redeliverTransitionBase(project, profile, session, "attempt-abc", "binding-digest-1"),
+		Kind:          recoveryTransitionKindRedeliver,
+		AttemptID:     "attempt-abc",
+		BindingDigest: "binding-digest-1",
+	})
+	if err != nil {
+		t.Fatalf("a complete redeliver input must be accepted: %v", err)
 	}
-	path := filepath.Join(dir, ".resume-redelivery-"+record.TransitionID+".json")
 
 	if _, err := reserveRecoveryTransition(record, path); err != nil {
 		t.Fatalf("first reserve must succeed: %v", err)

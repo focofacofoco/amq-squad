@@ -43,6 +43,11 @@ type recoveryReservation struct {
 
 // reserveRecoveryTransition publishes the reservation. First writer wins; a loser REFUSES.
 func reserveRecoveryTransition(record resumeGoalTransitionRecord, path string) (recoveryReservation, error) {
+	// PUBLICATION CONTRACT, before marshal. Every constructor guard is bypassable by a caller that builds a
+	// record itself and calls this directly, so the last step must re-decide rather than trust.
+	if err := validateRecoveryTransitionPublication(record, path); err != nil {
+		return recoveryReservation{}, err
+	}
 	payload, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return recoveryReservation{}, fmt.Errorf("marshal recovery transition reservation: %w", err)
