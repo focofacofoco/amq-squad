@@ -108,6 +108,7 @@ type statusEnvelopeData struct {
 	Lead                string                      `json:"lead,omitempty"`
 	LeadHandle          string                      `json:"lead_handle,omitempty"`
 	GoalBinding         goalBindingData             `json:"goal_binding"`
+	GoalSupervision     GoalSupervisionAssessment   `json:"goal_supervision"`
 	Autonomous          team.AutonomousStatus       `json:"autonomous"`
 	Execution           executionModeData           `json:"execution"`
 	Versions            versionAlignmentData        `json:"versions"`
@@ -168,9 +169,13 @@ type statusRecord struct {
 	Status      statusState        `json:"status"`
 	RecordState string             `json:"record_state"`
 	Detail      string             `json:"detail,omitempty"`
-	Signals     statusSignals      `json:"signals"`
-	liveness    agentLiveness
-	goalBinding *launch.GoalBinding
+	// ClassificationError is fail-visible source evidence for callers that
+	// must distinguish an ordinary missing member from an unreadable or
+	// otherwise unclassifiable identity.
+	ClassificationError string        `json:"classification_error,omitempty"`
+	Signals             statusSignals `json:"signals"`
+	liveness            agentLiveness
+	goalBinding         *launch.GoalBinding
 	// Tmux is the persisted tmux runtime identity (exact pane/window ids) plus
 	// a computed pane_alive, so clients can target follow-up control. Omitted
 	// when the agent's launch record carried no tmux identity.
@@ -195,6 +200,11 @@ type statusRecord struct {
 	// client can positively identify the wakeable orchestrator identity rather
 	// than inferring it from lead role alone. Set from launch.Record.External.
 	External bool `json:"external,omitempty"`
+	// OrchestratorRegistration is the persisted provenance for the external
+	// orchestrator bound to this project run. Status exposes the exact policy,
+	// NOC launch generation, registration id, and timestamp rather than asking
+	// clients to infer registration from wake liveness or prose.
+	OrchestratorRegistration *launch.OrchestratorRegistration `json:"orchestrator_registration,omitempty"`
 	// WakeAutoDrain reports that this member's wake sidecar is configured to
 	// inject a drain instruction on each durable-message arrival (the launch
 	// record carries WakeInjectCmd). It means inbound messages are processed
@@ -396,6 +406,10 @@ func executeStatus(s statusExecution) error {
 		binding := goalBindingForStatus(ns, ctx, rows)
 		operatorView := statusOperatorForTeam(t, ns)
 		applyGoalBindingOpenBlockers(&operatorView, binding)
+		gateObservation := inspectGoalSupervisionGates(t, s.Profile, workstream, firstStatusRoot(rows), s.Probe, now)
+		if gateObservation.Evidence.Known && operatorView.Poll != nil {
+			operatorView.Poll.OpenGates = gateObservation.Evidence.Open
+		}
 		topology := statusTopologyForRows(rows, ctx.Orchestrated)
 		externalEvidence := statusExternalEvidence(t, s.Profile, workstream, rows, now)
 		version := strings.TrimSpace(s.RuntimeVersion)
@@ -412,6 +426,10 @@ func executeStatus(s statusExecution) error {
 		execution.InvariantOK = len(invariantErrors) == 0
 		execution.InvariantErrors = invariantErrors
 		applyLeadExecutionContract(&execution, t.LeadExecution)
+		goalSupervision := buildGoalSupervisionAssessment(
+			t, s.Profile, workstream, ns, rows, gateObservation, invariantErrors,
+			conflict, s.Probe, now,
+		)
 		return writeJSONEnvelope(s.Out, "status", statusEnvelopeData{
 			TeamHome:            t.Project,
 			Workstream:          workstream,
@@ -426,6 +444,7 @@ func executeStatus(s statusExecution) error {
 			Lead:                ctx.Lead,
 			LeadHandle:          ctx.LeadHandle,
 			GoalBinding:         binding,
+			GoalSupervision:     goalSupervision,
 			Autonomous:          team.EffectiveAutonomousStatus(t),
 			Execution:           execution,
 			Versions:            buildVersionAlignment(versionSources),
@@ -1698,6 +1717,7 @@ func classifyMemberStatusWithReplacementResolver(t team.Team, profile string, m 
 		rec.Status = statusStateMissing
 		rec.RecordState = "missing"
 		rec.Detail = "amq env unresolved: " + err.Error()
+		rec.ClassificationError = rec.Detail
 		return rec
 	}
 	if env.Me != "" {
@@ -1714,11 +1734,13 @@ func classifyMemberStatusWithReplacementResolver(t team.Team, profile string, m 
 	// verdict->statusState mapping lives in the classifier (Status field).
 	live := classifyAgentLivenessWithReplacementResolver(rec.AgentDir, root, profile, rec.Handle, m.Role, m.Binary, workstream, rec.CWD, probe, replacement)
 	rec.liveness = live
+	rec.ClassificationError = live.SourceError
 	rec.Tmux = tmuxRuntimeFromInfo(live.Tmux)
 	if live.LaunchFound {
 		rec.Terminal = terminalRuntimeFromInfo(live.LaunchRecord.Terminal)
 		rec.goalBinding = live.LaunchRecord.GoalBinding
 		rec.External = live.LaunchRecord.External
+		rec.OrchestratorRegistration = live.LaunchRecord.OrchestratorRegistration
 		rec.WakeAutoDrain = strings.TrimSpace(live.LaunchRecord.WakeInjectCmd) != ""
 		rec.PreauthorizedActions = live.LaunchRecord.PreauthorizedActions
 		rec.AdoptionMode = strings.TrimSpace(live.LaunchRecord.AdoptionMode)
@@ -1760,6 +1782,9 @@ func classifyMemberStatusWithReplacementResolver(t team.Team, profile string, m 
 	}
 	if rec.LiveIdentityMode != "managed_refused" {
 		rec.Detail = live.Detail
+		if rec.ClassificationError != "" {
+			rec.Detail = rec.ClassificationError
+		}
 	}
 	if rec.Tmux != nil {
 		rec.AgentPaneID = strings.TrimSpace(rec.Tmux.PaneID)

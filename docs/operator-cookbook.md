@@ -15,6 +15,26 @@ inactive state. `status` and `doctor` expose watcher health without exposing
 command arguments, credentials, or other secrets. This add-on never answers a
 gate, clicks approval, or sends pane input.
 
+That same scoped owner runs the managed AMQ backend. It uses bounded
+`amq watch` only as a non-consuming signal for the canonical operator mailbox,
+then performs one kill-safe, exact-root collect before evaluating attention
+notifications. The watch JSON is validated as an `existing` or `new_message`
+event with at least one message; malformed, truncated, empty, timeout, or
+unknown successful output is a visible backend failure and receives bounded
+backoff. Message fields and doorbell text remain untrusted data, never
+authority. A collect failure keeps its journal replay pending and retries it
+without waiting for another watch signal; each watcher generation also starts
+with one safe collect so a replay survives stop/crash and restart. Duplicate
+signals that collect no unread message do not trigger another delivery scan.
+
+Every watcher exit cancels and joins the owned AMQ child and any in-flight
+delivery within one nested shutdown budget before publishing a clean inactive
+lease. `status`/`doctor` expose backend-running state, lifetime watch restarts,
+the current failure streak, pending-collect state, and collect retry count
+separately. After bounded exhaustion the AMQ backend is explicitly not running
+and degraded while fsnotify plus periodic rescan remain active. Use a bounded
+`amq-squad monitor --once` when a manual backstop is needed.
+
 Delivery is **at least once**, not exactly once. The supervised watcher, a
 manual `operator watch`, and `notify --deliver` all coordinate through the same
 per-event/per-sink reservation and success-commit state in
@@ -248,6 +268,43 @@ amq-squad operator directive --project <project> --profile <profile> --session <
 
 Answer approval gates with `operator answer`; do not treat p2p prose such as
 "pending operator" or "manual approval" as an approval.
+
+## Inspect Native Goal Supervision
+
+The scoped status, board, and doctor JSON expose the same versioned,
+read-only `goal_supervision` assessment. This assessment does not claim an
+attempt, send AMQ, or write to a pane:
+
+```sh
+amq-squad status --project <project> --profile <profile> --session <session> --json |
+  jq '.data.goal_supervision'
+amq-squad status --project <project> --json |
+  jq '.data.sessions[] | select(.name == "<session>") | .goal_supervision'
+amq-squad doctor --project <project> --profile <profile> --session <session> --json |
+  jq '.data.checks[] | select(.kind == "goal_supervision") | .goal_supervision'
+```
+
+Its states are `running`, `parked_waiting_amq`,
+`native_goal_paused_eligible`, `native_goal_blocked_human`,
+`native_goal_blocked_unknown`, `lead_down`, `pane_busy_or_unverified`, and
+`goal_terminal`. Eligibility is a positive conjunction: exact namespace,
+lead, launch, pane, goal attempt, and pause generations; fresh complete
+sources and lifecycle; full PID/process-binary/exact-pane identity; exact typed
+goal and attempt matching the generated command and accepted prepared-run
+goal; durable blocker resolution; no open or ambiguous gate; a successful
+lead-pane local-input scan showing no prompt; passing invariants; a durably
+clear claim; and a durably available retry budget.
+Unknown, stale, missing, or contradictory evidence is ineligible.
+
+The policy projection is `manual`, `notify-only`, or `safe-auto`. Profiles
+without an explicit policy remain `manual` revision 1. In this read-only
+phase, even `safe-auto` only sets `automatic_resume_allowed` in the
+assessment; no automatic delivery occurs. Use the emitted inspect, restore,
+and notify action objects as operator guidance. The resume action is
+deliberately unavailable until PR5 supplies durable blocker-resolution,
+claim, and budget evidence plus the claim-once executor. Mutating action
+objects carry the exact assessment fingerprint, attempt ID, and confirmation
+wording; re-read the assessment immediately before any manual action.
 
 ## Common Failures
 
