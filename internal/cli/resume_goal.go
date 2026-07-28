@@ -49,6 +49,37 @@ type resumeGoalTransitionRecord struct {
 	LaunchRecordDigest    string    `json:"launch_record_digest"`
 	LaunchRecordModTime   int64     `json:"launch_record_mod_time_unix_nano"`
 	CreatedAt             time.Time `json:"created_at"`
+
+	// PR5 / #498. Three ADDITIVE fields that let this record serve every recovery kind rather
+	// than redelivery alone. All three are omitempty, and that is a compatibility REQUIREMENT,
+	// not a style choice: a legacy record on disk carries none of them, so they must stay absent
+	// from its round trip instead of appearing as empty strings a reader could mistake for
+	// deliberate values.
+	//
+	// READ/WRITE ASYMMETRY (ruled): on READ, absence means legacy/redeliver, identified by the
+	// legacy key. On WRITE, absence of a field the kind requires REFUSES -- a defaulted identity
+	// field is indistinguishable on disk from a legacy record, so a lenient writer would silently
+	// enrol new records into the legacy population.
+
+	// RecoveryKind is what this reservation is FOR. It lives here AND in the filename prefix, and
+	// the scan requires the two to AGREE: the prefix keeps the kind-agnostic scan cheap and the
+	// directory readable, the body makes the kind durable evidence rather than a naming
+	// convention, and disagreement is ambiguous evidence that refuses rather than a tie to break.
+	RecoveryKind string `json:"recovery_kind,omitempty"`
+
+	// PauseGeneration is CONSUMED from the assessment, never recomputed here. PR4 derives it from
+	// captured LaunchID + Goal.BindingDigest + Goal.AttemptID + Goal.Mode; a second derivation
+	// owner reading a different snapshot is the one-identity-two-owners failure whose symptom is
+	// DOUBLE DELIVERY. Redeliver transitions must NOT carry one: that path holds no assessment,
+	// so any value here would have been recomputed or invented.
+	PauseGeneration string `json:"pause_generation,omitempty"`
+
+	// PreclaimFingerprint is staleness EVIDENCE and deliberately NOT part of the claim key. It
+	// rotates when claim evidence changes, and writing the claim is itself such a change, so a
+	// fingerprint-keyed claim would rotate its own identity at the moment of being recorded and
+	// become unmatchable on read.
+	PreclaimFingerprint string `json:"preclaim_fingerprint,omitempty"`
+
 	// BindingReserved is runtime-only recovery state. It records that a prior
 	// process durably published this transition's exact new binding before it
 	// crashed, so continuation must reuse the same attempt rather than require
@@ -748,13 +779,19 @@ func reserveResumeGoalTransition(t team.Team, profile, workstream string, verifi
 		if err != nil {
 			return fmt.Errorf("capture launch generation: %w", err)
 		}
-		path, err := resumeGoalTransitionPath(t.Project, profile, workstream, plan.TransitionID)
-		if err != nil {
-			return err
-		}
-		tr := resumeGoalTransitionRecord{
-			SchemaVersion: resumeGoalTransitionSchemaVersion, TransitionID: plan.TransitionID,
-			Project: t.Project, Profile: squadnamespace.NormalizeProfile(profile), Session: workstream,
+		// PR5 / #498. This site no longer derives a path, no longer stamps a TransitionID, and no
+		// longer publishes: the CONSTRUCTOR owns identity and path, and the RESERVER owns
+		// publication. What redelivery records is unchanged -- every field below is exactly what
+		// this function already captured -- which is what makes the migration additive rather
+		// than a rewrite of another PR's writer.
+		//
+		// TransitionID is deliberately ABSENT from this literal. It is derived inside the
+		// constructor from AttemptID + BindingDigest, so there is nothing here for a caller to
+		// get wrong or to smuggle, and the equality check below pins it to what the plan's own
+		// readers compute.
+		base := resumeGoalTransitionRecord{
+			SchemaVersion: resumeGoalTransitionSchemaVersion,
+			Project:       t.Project, Profile: squadnamespace.NormalizeProfile(profile), Session: workstream,
 			Role: plan.LeadRole, Handle: plan.LeadHandle, MemberSession: member.Session, MemberCWD: member.EffectiveCWD(currentTeam.Project), MemberBinary: member.Binary, GoalDigest: digestBytes([]byte(plan.Goal)),
 			OriginalAttemptID: plan.OriginalAttemptID, OriginalBindingDigest: plan.BindingDigest,
 			OriginalAttemptDigest: plan.AttemptDigest, OriginalClaimDigest: plan.ClaimDigest,
@@ -763,16 +800,26 @@ func reserveResumeGoalTransition(t team.Team, profile, workstream string, verifi
 			TeamRecordDigest: teamDigest, TeamRecordModTime: teamMod, LaunchRecordDigest: launchDigest, LaunchRecordModTime: launchMod,
 			CreatedAt: time.Now().UTC(),
 		}
-		payload, err := json.MarshalIndent(tr, "", "  ")
+		tr, path, err := newRecoveryTransitionRecord(recoveryTransitionInput{
+			Base:          base,
+			Kind:          recoveryTransitionKindRedeliver,
+			AttemptID:     plan.OriginalAttemptID,
+			BindingDigest: plan.BindingDigest,
+		})
 		if err != nil {
-			return err
+			return fmt.Errorf("construct durable goal redelivery transition: %w", err)
 		}
-		published, err := publishGoalJSON(path, append(payload, '\n'))
-		if err != nil {
+		// IDENTITY PIN, at the seam rather than in a test. plan.TransitionID is what this
+		// function's own callers and every existing reader compute independently; the constructor
+		// derives its own. If those ever diverge, the reservation is written where nobody looks --
+		// present on disk and undiscoverable -- so a mismatch refuses instead of proceeding.
+		if tr.TransitionID != plan.TransitionID {
+			return fmt.Errorf("constructed redelivery transition id %q does not match the plan's %q: "+
+				"a reservation under a divergent id is invisible to the readers that look for it",
+				tr.TransitionID, plan.TransitionID)
+		}
+		if _, err := reserveRecoveryTransition(tr, path); err != nil {
 			return fmt.Errorf("publish durable goal redelivery transition: %w", err)
-		}
-		if !published {
-			return fmt.Errorf("durable goal redelivery transition %s already exists; duplicate/ABA redelivery refused", plan.TransitionID)
 		}
 		return nil
 	})
@@ -938,34 +985,14 @@ func ensureResumeGoalTransitionBinding(opts goalDeliveryOptions, tr *resumeGoalT
 	if err != nil {
 		return fmt.Errorf("capture reserved launch generation: %w", err)
 	}
-	boundPath := resumeGoalTransitionBoundPath(transitionPath)
-	bound := resumeGoalTransitionBound{
-		SchemaVersion: resumeGoalTransitionSchemaVersion, TransitionID: tr.TransitionID, NewAttemptID: tr.NewAttemptID,
-		LaunchRecordDigest: digest, LaunchRecordModTime: modTime, BoundAt: time.Now().UTC(),
-	}
-	payload, err := json.MarshalIndent(bound, "", "  ")
-	if err != nil {
-		return err
-	}
-	published, err := publishGoalJSON(boundPath, append(payload, '\n'))
-	if err != nil {
-		return fmt.Errorf("publish reserved launch binding generation: %w", err)
-	}
-	if published {
-		return nil
-	}
-	existingBytes, err := os.ReadFile(boundPath)
-	if err != nil {
-		return fmt.Errorf("read concurrent reserved launch binding generation: %w", err)
-	}
-	var existing resumeGoalTransitionBound
-	if err := json.Unmarshal(existingBytes, &existing); err != nil {
-		return fmt.Errorf("parse concurrent reserved launch binding generation: %w", err)
-	}
-	if err := validateResumeGoalTransitionBound(existing, *tr, digest, modTime); err != nil {
-		return fmt.Errorf("reserved launch binding generation changed: %w", err)
-	}
-	return nil
+	// PR5 / #498: DELEGATED. The lost-race handling that used to live here -- publish, and on
+	// ErrExist re-read and validate rather than refuse -- now lives in
+	// bindRecoveryTransitionGeneration, unchanged in behaviour. It is load-bearing and easy to
+	// mistake for boilerplate: a binding may legitimately already exist from this same actor's
+	// earlier attempt, so bind is the ONE publication of the three where !published is not a
+	// failure. Reserve and consume both refuse.
+	return bindRecoveryTransitionGeneration(
+		recoveryReservation{Record: *tr, Path: transitionPath}, digest, modTime)
 }
 
 func consumeResumeGoalTransition(opts goalDeliveryOptions, newAttemptID string) error {
@@ -973,19 +1000,10 @@ func consumeResumeGoalTransition(opts goalDeliveryOptions, newAttemptID string) 
 	if err != nil {
 		return err
 	}
-	consumed := resumeGoalTransitionConsumed{SchemaVersion: resumeGoalTransitionSchemaVersion, TransitionID: opts.ResumeTransitionID, NewAttemptID: newAttemptID, ConsumedAt: time.Now().UTC()}
-	payload, err := json.MarshalIndent(consumed, "", "  ")
-	if err != nil {
-		return err
-	}
-	published, err := publishGoalJSON(resumeGoalTransitionConsumedPath(path), append(payload, '\n'))
-	if err != nil {
-		return fmt.Errorf("publish resume-goal transition completion: %w", err)
-	}
-	if !published {
-		return fmt.Errorf("resume-goal transition %s was concurrently consumed", opts.ResumeTransitionID)
-	}
-	return nil
+	// PR5 / #498: DELEGATED. Identity passed explicitly -- this path holds no record, and
+	// fabricating one just to satisfy a signature would have created the very literal the AST pin
+	// forbids.
+	return consumeRecoveryTransition(opts.ResumeTransitionID, newAttemptID, path)
 }
 
 func captureResumeGoalSendSnapshot(opts goalDeliveryOptions, tr *resumeGoalTransitionRecord, prompt, attemptID string) (memberRuntime, resumeGoalSendSnapshot, error) {
