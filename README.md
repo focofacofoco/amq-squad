@@ -825,11 +825,11 @@ sources happens in the skills or operator tooling; the core binary owns team,
 runtime, and coordination state.
 
 AMQ 0.49.x is the supported series, with 0.49.9 as the minimum supported
-release. The 0.49.0 through 0.49.8 range is no longer supported. Both real-AMQ
-matrices validate pinned v0.49.9 and `latest`; `latest` remains a
-forward-compatibility canary and is not a support claim, and because the
-version assertion is skipped for `latest`, the pinned lane is the one that
-records what was proved. Releases older than 0.49.9 are rejected fail-closed.
+release. Both real-AMQ matrices validate pinned v0.49.9 and `latest`; `latest`
+remains a forward-compatibility canary and is not a support claim. The 0.49.0
+through 0.49.8 range is no longer supported, and releases older than 0.49.9 are
+rejected fail-closed. Because the version assertion is skipped for `latest`,
+the pinned lane is the one that records what was proved.
 
 | Real-AMQ lane | Runner | Versions |
 | --- | --- | --- |
