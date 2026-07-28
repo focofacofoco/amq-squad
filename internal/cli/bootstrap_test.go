@@ -720,6 +720,7 @@ func TestBootstrapSeparateTerminalIncludesScopedAnswerCommand(t *testing.T) {
 	}
 	for _, want := range []string{
 		"interaction_mode=separate_terminal", "approval_surface=separate operator terminal", "poll_owner=operator",
+		"amq drain --include-body --root " + shellQuote(root) + " --me user",
 		"Ready answer command: `amq send --root " + shellQuote(root), "--me user --to <agent-handle> --thread gate/<topic>",
 	} {
 		if !strings.Contains(got, want) {

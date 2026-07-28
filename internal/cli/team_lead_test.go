@@ -328,15 +328,28 @@ func TestLeadRegisterStartsDrainInjectingWakeSidecar(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("lead register: %v", err)
 	}
-	if len(wakeOpts) != 1 || wakeOpts[0].WakeInjectCmd != wakeDrainInject() {
+	wantRoot := filepath.Join(base, "issue-96")
+	if len(wakeOpts) != 1 || wakeOpts[0].Root != wantRoot || wakeOpts[0].WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("wake sidecar must be started with the drain inject-cmd: %+v", wakeOpts)
 	}
 	rec, err := launch.Read(filepath.Join(base, "issue-96", "agents", "cto"))
 	if err != nil {
 		t.Fatalf("read external launch record: %v", err)
 	}
-	if rec.WakeInjectCmd != wakeDrainInject() {
+	if rec.Root != wantRoot || rec.WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("launch record must persist WakeInjectCmd as resume-repair evidence, got %q", rec.WakeInjectCmd)
+	}
+}
+
+func TestWakeDrainInjectPinsRootWithoutOverridingPaneIdentity(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mail root", "issue-588")
+	got := wakeDrainInject(root)
+	want := "amq drain --include-body --root " + shellQuote(root)
+	if !strings.Contains(got, want) {
+		t.Fatalf("wake inject missing exact rooted drain %q: %q", want, got)
+	}
+	if strings.Contains(got, "--me") {
+		t.Fatalf("wake inject must trust the receiving pane's AM_ME: %q", got)
 	}
 }
 
@@ -378,8 +391,9 @@ func TestLeadRegisterReapplyDrainInjectOnReRegister(t *testing.T) {
 	if len(wakeOpts) != 2 {
 		t.Fatalf("expected two wake starts, got %d", len(wakeOpts))
 	}
+	wantRoot := filepath.Join(base, "issue-96")
 	for i, o := range wakeOpts {
-		if o.WakeInjectCmd != wakeDrainInject() {
+		if o.Root != wantRoot || o.WakeInjectCmd != wakeDrainInject(wantRoot) {
 			t.Fatalf("wake start %d must reapply drain inject-cmd, got %q", i, o.WakeInjectCmd)
 		}
 	}
@@ -387,7 +401,7 @@ func TestLeadRegisterReapplyDrainInjectOnReRegister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read external launch record: %v", err)
 	}
-	if rec.WakeInjectCmd != wakeDrainInject() {
+	if rec.Root != wantRoot || rec.WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("re-register must keep WakeInjectCmd persisted, got %q", rec.WakeInjectCmd)
 	}
 }
@@ -777,11 +791,12 @@ func TestLeadRegisterWakeInjectModeNoneIsZeroInput(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("lead repair explicit raw: %v", err)
 	}
-	if len(got) != 3 || got[2].WakeInjectMode != "raw" || got[2].WakeInjectCmd != wakeDrainInject() {
+	wantRoot := base
+	if len(got) != 3 || got[2].Root != wantRoot || got[2].WakeInjectMode != "raw" || got[2].WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("explicit raw must override inherited none: %+v", got)
 	}
 	rec, err = launch.Read(filepath.Join(base, "agents", "cto"))
-	if err != nil || rec.WakeInjectMode != "raw" || rec.WakeInjectCmd != wakeDrainInject() {
+	if err != nil || rec.Root != wantRoot || rec.WakeInjectMode != "raw" || rec.WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("explicit raw record = %+v, %v", rec, err)
 	}
 	if _, _, err := captureOutput(t, func() error {
@@ -812,7 +827,8 @@ func TestLeadRegisterDefaultsManagedBinaryWakeModeToRaw(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("lead register default raw: %v", err)
 	}
-	if len(got) != 1 || got[0].WakeInjectMode != "raw" || got[0].WakeInjectCmd != wakeDrainInject() {
+	wantRoot := base
+	if len(got) != 1 || got[0].Root != wantRoot || got[0].WakeInjectMode != "raw" || got[0].WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("managed external lead wake options = %+v", got)
 	}
 	rec, err := launch.Read(filepath.Join(base, "agents", "cto"))

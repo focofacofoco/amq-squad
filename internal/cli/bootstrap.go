@@ -356,7 +356,7 @@ func operatorDeliveryForRecord(rec launch.Record, teamHome string) operatorDeliv
 	if err != nil {
 		return operatorDeliveryData{}
 	}
-	return operatorDeliveryForTeam(t)
+	return operatorDeliveryForTeamAtRoot(t, rec.Root)
 }
 
 func bootstrapExecution(rec launch.Record, teamHome string) *executionModeData {
