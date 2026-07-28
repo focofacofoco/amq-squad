@@ -89,6 +89,36 @@ func validateRecoveryTransitionRecordContract(record resumeGoalTransitionRecord)
 	}); err != nil {
 		return err
 	}
+	// NONBLANK IS NOT READER-ACCEPTED (codex finding 4). The requirement above proves the field is present;
+	// it says nothing about whether the value can ever be USED. "../new" is nonblank, and for redeliver it is
+	// also different from the original attempt, so it satisfied every writer-side check and published --
+	// while the delivery path refuses it at resume_goal.go:1176 via goalAttemptPath. The result is durable
+	// evidence NOTHING CAN CONSUME: the claim blocks at the claim-once gate permanently, and no code path
+	// deletes reservations.
+	//
+	// VALIDATED THROUGH THE READER'S OWN OWNER, never re-implemented. goalAttemptPath (goal_attempt.go:105)
+	// holds the shape rule -- empty, ".", "..", non-basename, or containing a separator -- and re-stating
+	// those characters here would be a SECOND OPINION about attempt-id shape, which is the exact defect this
+	// file exists to make structurally impossible. Calling the reader's function is what makes writer and
+	// reader agree by construction instead of by maintenance.
+	//
+	// IN THE SHARED PREAMBLE, so it covers BOTH KINDS. The native branch derives its claim key by HASHING
+	// NewAttemptID (validateNativeRecoveryRecordContract below), and a hash accepts any string, so native
+	// carried the identical hole under a different derivation. Placing this in the redeliver branch alone --
+	// where the finding was reported -- would have closed one of two doors.
+	//
+	// It also closes the READ-BACK TAMPER PATH: this contract runs against the record re-read from disk
+	// (goal_supervision_resume.go:416), where catching a tampered value is the entire purpose of the call.
+	//
+	// MY OWN COMMENT CONVICTED ME. The redeliver branch below cites "the explicit-CAS branch of
+	// validateResumeGoalTransitionForDelivery at :1173-1174" as the reason for its equality check. I was
+	// reading that region and mirrored the refusal at :1173 while not mirroring the one THREE LINES LATER at
+	// :1176. Reading the adjacent line and not this one is how a writer/reader disagreement survives review.
+	if _, err := goalAttemptPath(record.Project, record.Profile, record.Session, record.NewAttemptID); err != nil {
+		return fmt.Errorf(
+			"recovery transition (%s) new attempt id %q is not a value its own delivery reader accepts (%w): the delivery path refuses it, so this record would be durable evidence nothing can consume and the pause would block forever",
+			kind, record.NewAttemptID, err)
+	}
 
 	switch kind {
 	case recoveryTransitionKindNativeGoalResume:

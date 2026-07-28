@@ -65,10 +65,47 @@ func inspectNamespaceNativeRecoveryClaims(goalAttemptsSource string, blockers *[
 			inspectNamespaceNativeRecoveryClaims(filepath.Join(goalAttemptsSource, entry.Name()), blockers)
 			continue
 		}
-		// ONE RECOGNITION OWNER. recognizeRecoveryTransitionName is the same parser the pause scan uses, so
-		// this guard cannot drift from the scanner's idea of what a claim file is. A string-prefix test here
-		// would be a second opinion about naming, which is the two-deciders shape.
-		parsed, recognition := recognizeRecoveryTransitionName(entry.Name())
+		// TWO-STEP RECOGNITION, IN THE SCAN'S ORDER -- companion base FIRST, then the name parser (codex
+		// finding 2).
+		//
+		// THE COMMENT THAT USED TO BE HERE WAS FALSE, and its falsity is the whole defect. It said
+		// "ONE RECOGNITION OWNER: recognizeRecoveryTransitionName is the same parser the pause scan uses, so
+		// this guard cannot drift from the scanner's idea of what a claim file is." The scan recognises in TWO
+		// steps -- companionReservationBase at recovery_transition_scan.go:95, THEN
+		// recognizeRecoveryTransitionName at :101. This guard adopted the second and not the first, then
+		// asserted non-drift. A PARTIAL COPY OF A TWO-STEP DECIDER, under a comment claiming it is the whole
+		// decider, is worse than an honest second opinion: the comment is what stops the next reader looking.
+		//
+		// WHAT THE MISS COST. recognizeRecoveryTransitionName classifies .consumed.json/.bound.json as
+		// recoveryNameNotATransition (recovery_transition.go:189) because companions "are handled by their own
+		// path" -- true in the scan, which has that other path, and false here, which had none. So a native
+		// CONSUMED companion raised no blocker; the adapter copies it content-unchanged
+		// (namespace_migration_adapters.go:131-137) and the copier preserves its basename verbatim
+		// (namespace_migration_tx.go:442), carrying the OLD namespace-derived claim key into the new
+		// namespace. In the destination, companionBelongsToPause matches by substring against the NEW claim
+		// key (scan.go:218-220), so the companion is never collected -- which means neither the consumed-state
+		// blocker NOR the orphan-companion blocker can fire for it. The prior consumption becomes invisible to
+		// the claim-once decision, and invisible prior delivery is a SECOND delivery.
+		//
+		// NO RESERVATION-REQUIRED PRECONDITION, ruled. It is tempting to block only companions whose
+		// reservation is absent, since a present native reservation already blocks on its own. That would make
+		// this guard's correctness depend on the ORDER files are read and on another entry existing, and the
+		// question here is "is this namespace safe to migrate AT ALL". A companion carrying a namespace-derived
+		// key in its NAME is exactly as unmigratable as its reservation, so it is judged on its own.
+		name := entry.Name()
+		inspect, isCompanion := name, false
+		if base, ok := companionReservationBase(name); ok {
+			// The companion is judged by the RESERVATION NAME it belongs to, because that is where the claim
+			// key lives -- companion paths are the reservation path plus a suffix (resume_goal.go:431,435).
+			inspect, isCompanion = base+".json", true
+		}
+		subject := "native recovery-transition claim"
+		unreadable := "recovery-transition-like file"
+		if isCompanion {
+			subject = "native recovery-transition COMPANION (consumption/binding evidence)"
+			unreadable = "recovery-transition-like COMPANION file"
+		}
+		parsed, recognition := recognizeRecoveryTransitionName(inspect)
 		switch recognition {
 		case recoveryNameRecognized:
 			// LEGACY-shaped records are what the adapter already handles: they carry no kind in the name and
@@ -78,18 +115,20 @@ func inspectNamespaceNativeRecoveryClaims(goalAttemptsSource string, blockers *[
 				continue
 			}
 			*blockers = append(*blockers, fmt.Sprintf(
-				"native recovery-transition claim %s cannot be migrated safely: its claim key is derived from the namespace, so rewriting profile/session would make the claim unmatchable on read (treated as ABSENT, permitting a second delivery). Resolve or consume the claim before migrating; native-aware migration is tracked separately",
-				filepath.Join(goalAttemptsSource, entry.Name())))
+				"%s %s cannot be migrated safely: its claim key is derived from the namespace, so rewriting profile/session would make it unmatchable on read (treated as ABSENT, permitting a second delivery). CONSUME the claim, or complete the resume it records, before migrating -- do NOT delete the reservation: removing it leaves an orphan companion, which the pause scan treats as tampering and which this guard would then be the only thing standing between you and a corrupted record. Native-aware migration is tracked separately",
+				subject, filepath.Join(goalAttemptsSource, name)))
 		case recoveryNameMalformed:
 			// UNKNOWN IS NOT ABSENT -- the same rule the pause scan enforces, and the reason this case is
 			// listed explicitly rather than folded into the default. A transition-like name we cannot classify
 			// might be a native claim; treating it as "no native claims present" would migrate anyway and
 			// corrupt exactly the record we failed to read.
 			*blockers = append(*blockers, fmt.Sprintf(
-				"recovery-transition-like file %s cannot be classified, so it cannot be shown safe to migrate: unknown is not absent, and a native claim here would be corrupted by a namespace rewrite",
-				filepath.Join(goalAttemptsSource, entry.Name())))
+				"%s %s cannot be classified, so it cannot be shown safe to migrate: unknown is not absent, and a native claim here would be corrupted by a namespace rewrite",
+				unreadable, filepath.Join(goalAttemptsSource, name)))
 		}
 		// recoveryNameNotATransition: an ordinary attempt/claim file. Ignored, because blocking on those would
-		// make every namespace unmigratable, which is amendment 1 overcorrected into an outage.
+		// make every namespace unmigratable, which is amendment 1 overcorrected into an outage. A companion of
+		// an ordinary file lands here too, and correctly: <attempt>.claim.json is not a companion suffix, so
+		// nothing ordinary reaches the companion branch above.
 	}
 }

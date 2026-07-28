@@ -40,31 +40,21 @@ func writeNativeResumeMutexReservationForAttempt(
 	attemptID string,
 ) (string, string) {
 	t.Helper()
-	key, err := supervisionClaimKey(
-		squadnamespace.ID(team.DefaultProfile, session),
-		pause,
+	in := completeNativeTransitionInput(
+		tm.Project,
+		team.DefaultProfile,
+		session,
 		attemptID,
 	)
+	in.Base.Role = plan.LeadRole
+	in.Base.Handle = plan.LeadHandle
+	in.PauseGeneration = pause
+	record, path, err := newRecoveryTransitionRecord(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(
-		goalAttemptDir(tm.Project, team.DefaultProfile, session),
-		currentRecoveryTransitionName(recoveryTransitionKindNativeGoalResume, key),
-	)
-	writeTestJSON(t, path, resumeGoalTransitionRecord{
-		SchemaVersion:   resumeGoalTransitionSchemaVersion,
-		TransitionID:    key,
-		Project:         tm.Project,
-		Profile:         team.DefaultProfile,
-		Session:         session,
-		Role:            plan.LeadRole,
-		Handle:          plan.LeadHandle,
-		NewAttemptID:    attemptID,
-		RecoveryKind:    string(recoveryTransitionKindNativeGoalResume),
-		PauseGeneration: pause,
-	})
-	return path, key
+	writeTestJSON(t, path, record)
+	return path, record.TransitionID
 }
 
 func resumeGoalMutexOptions(
@@ -191,25 +181,86 @@ func TestRedeliveryConsumedNativeUsesRecomputedDeliveryIdentity(t *testing.T) {
 	}
 }
 
+// The consumed filename and TransitionID still describe the original claim,
+// but the body has been damaged after publication. Without read-side contract
+// validation, the scanner uses the tampered nonblank PauseGeneration to derive
+// a different key, ignores the prior-consumption evidence, and this production
+// redelivery reaches one pane send.
+func TestRedeliveryConsumedNativePauseGenerationTamperBlocksProductionDelivery(t *testing.T) {
+	tm, session, _, plan, verified := freshResumeTransitionFixture(t)
+	if err := reserveResumeGoalTransition(tm, team.DefaultProfile, session, verified, plan); err != nil {
+		t.Fatal(err)
+	}
+	path, key := writeNativeResumeMutexReservation(
+		t,
+		tm,
+		session,
+		plan,
+		"pause-native-consumed-original",
+	)
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record resumeGoalTransitionRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRecoveryTransitionRecordContract(record); err != nil {
+		t.Fatalf("native reservation was not valid before the one-field tamper: %v", err)
+	}
+	record.PauseGeneration = "pause-native-consumed-tampered"
+	writeTestJSON(t, path, record)
+	writeTestJSON(t, resumeGoalTransitionConsumedPath(path), map[string]string{
+		"transition_id": key,
+	})
+
+	oldLister, oldSend := statusPaneLister, sendPromptToPane
+	statusPaneLister = func() ([]tmuxpane.TmuxPane, error) {
+		return []tmuxpane.TmuxPane{{
+			PaneID:  "%447",
+			CWD:     tm.Project,
+			Command: tm.Members[0].Binary,
+			Title:   paneTitleToken(session, plan.LeadRole),
+		}}, nil
+	}
+	sends := 0
+	sendPromptToPane = func(_ string, _ string) error {
+		sends++
+		return nil
+	}
+	t.Cleanup(func() {
+		statusPaneLister, sendPromptToPane = oldLister, oldSend
+	})
+
+	_, err = executeGoalDelivery(resumeGoalMutexOptions(tm, session, plan))
+	if err == nil || sends != 0 ||
+		!strings.Contains(err.Error(), "cross-kind claim-once mutex") ||
+		!strings.Contains(err.Error(), "not the claim key") {
+		t.Fatalf("damaged consumed native identity did not fail closed before pane input: err=%v sends=%d", err, sends)
+	}
+}
+
 func TestRedeliveryConsumedNativeWithBlankPauseGenerationBlocks(t *testing.T) {
 	tm, session, _, plan, _ := freshResumeTransitionFixture(t)
 	dir := goalAttemptDir(tm.Project, team.DefaultProfile, session)
-	key := strings.Repeat("b", 64)
-	path := filepath.Join(
-		dir,
-		currentRecoveryTransitionName(recoveryTransitionKindNativeGoalResume, key),
+	path, key := writeNativeResumeMutexReservation(
+		t,
+		tm,
+		session,
+		plan,
+		"pause-native-consumed-blank",
 	)
-	writeTestJSON(t, path, resumeGoalTransitionRecord{
-		SchemaVersion: resumeGoalTransitionSchemaVersion,
-		TransitionID:  key,
-		Project:       tm.Project,
-		Profile:       team.DefaultProfile,
-		Session:       session,
-		Role:          plan.LeadRole,
-		Handle:        plan.LeadHandle,
-		NewAttemptID:  plan.OriginalAttemptID,
-		RecoveryKind:  string(recoveryTransitionKindNativeGoalResume),
-	})
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record resumeGoalTransitionRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		t.Fatal(err)
+	}
+	record.PauseGeneration = ""
+	writeTestJSON(t, path, record)
 	writeTestJSON(t, resumeGoalTransitionConsumedPath(path), map[string]string{
 		"transition_id": key,
 	})
@@ -220,8 +271,8 @@ func TestRedeliveryConsumedNativeWithBlankPauseGenerationBlocks(t *testing.T) {
 		TargetAttemptID: plan.OriginalAttemptID,
 	})
 	if err != nil || blocker == nil ||
-		!strings.Contains(blocker.Reason, "requires namespace, pause generation and attempt id") ||
-		blocker.Path != resumeGoalTransitionConsumedPath(path) {
+		!strings.Contains(blocker.Reason, "requires a pause generation") ||
+		blocker.Path != path {
 		t.Fatalf("blank consumed pause generation did not fail closed with cause: blocker=%+v err=%v", blocker, err)
 	}
 }

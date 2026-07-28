@@ -340,7 +340,22 @@ Exit codes:
 	// the executor as a function of the PAYLOAD ONLY. The executor therefore cannot influence which
 	// pane is written to or which directive is recorded -- only what bytes go out. Narrowing what a
 	// callee can vary is the same principle as the injected loader: capability is granted, not assumed.
-	deliver := newSupervisionResumeDelivery(supervisionProductionDirectivePublisher, assessment, supervisor)
+	//
+	// THE CLOCK AND THE TWO U5 READERS ARE CONSTRUCTED ONCE, HERE, AND SHARED (codex finding 3). The executor's
+	// pre-directive gate and the boundary's immediately-before-input re-check must consult the SAME clock and
+	// the SAME readers, or they are two deciders about one world and can disagree about whether delivery is
+	// safe. Building a second set inside the gate closure would have been the two-owners defect this milestone
+	// has spent the day closing, reintroduced by the fix for it.
+	clock := func() time.Time { return time.Now().UTC() }
+	readGeneration := newSupervisionGenerationReader()
+	readPane := newSupervisionPaneReader()
+	// The gate is CAPTURED by the boundary rather than passed to the returned closure, so the closure stays a
+	// function of the PAYLOAD ONLY: the executor supplies bytes and cannot choose whether the world is
+	// re-checked. Capability is granted, not assumed -- the same principle as the injected loader.
+	deliver := newSupervisionResumeDelivery(supervisionProductionDirectivePublisher, assessment, supervisor,
+		func() *supervisionResumeRefusal {
+			return evaluateSupervisionDeliveryTimeGates(assessment, clock, readGeneration, readPane)
+		})
 	// THE POLL'S OUTPUT DESTINATION DIFFERS BY MODE, and getting this wrong produced a real bug.
 	//
 	// I first pointed the poll at os.Stdout in BOTH modes. In --json that made executeStatus write a
@@ -363,11 +378,14 @@ Exit codes:
 	defer func() { pollSupervisionStatusOnce = previousPoll }()
 	pollSupervisionStatusOnce = newSupervisionStatusPoll(pollTarget, *jsonOut)
 	outcome, err := executeSupervisionResume(assessment, assessment.Actions.Resume, supervisor,
-		func() time.Time { return time.Now().UTC() }, loader,
+		clock, loader,
 		// U5's delivery-time readers, injected as PRODUCTION implementations. They are parameters
 		// rather than package globals precisely because they authorize an irreversible delivery: a
 		// mutable global that authorizes something can be nil'd into a silent pass.
-		newSupervisionGenerationReader(), newSupervisionPaneReader(),
+		//
+		// THE SAME VALUES the boundary's re-check captured above. Passing freshly constructed readers here
+		// would leave the two gates reading the world through different instances.
+		readGeneration, readPane,
 		readReservedRecoveryTransition,
 		deliver)
 	report.Outcome = &outcome

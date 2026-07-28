@@ -935,6 +935,18 @@ func readResumeGoalRecoveryIdentity(path string, parsed parsedRecoveryTransition
 			parsed.Kind, record.RecoveryKind,
 		)
 	}
+	if !parsed.Legacy {
+		// A current record may be classified as belonging to a different pause
+		// only after its own durable identity is proved. In particular, using an
+		// unvalidated PauseGeneration to recompute the delivery-side match would
+		// turn a body/filename identity mismatch into "different" and hide prior
+		// consumption evidence.
+		if err := validateRecoveryTransitionRecordContract(record); err != nil {
+			return resumeGoalTransitionRecord{}, fmt.Errorf(
+				"current recovery reservation violates the durable record contract: %w", err,
+			)
+		}
+	}
 	return record, nil
 }
 

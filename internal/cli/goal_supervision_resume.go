@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"time"
 )
@@ -89,7 +90,12 @@ type supervisionResumeOutcome struct {
 	// Consumed reports the claim-lifecycle completion separately from Delivered, because they can
 	// genuinely disagree: delivery is irreversible and consume can fail after it.
 	// DeliveryOutcomeUnknown is set ONLY on the pane-input error path, where the bytes may or may not have
-	// landed. It cannot be inferred from Delivered: Delivered must stay FALSE when success is not known,
+	// landed. THAT SENTENCE WAS FALSE UNTIL codex finding 5: the single write site set it for EVERY error out
+	// of the delivery boundary, including a failed durable directive that provably never reached the pane. The
+	// field documented the contract correctly and the code did not implement it, which is the inverse of
+	// comment-outlives-code and just as expensive. It is now enforced by a typed branch on
+	// supervisionDefiniteNonDeliveryError, with unknown as the fail-closed default.
+	// It cannot be inferred from Delivered: Delivered must stay FALSE when success is not known,
 	// so the unknown case and an ordinary pre-delivery refusal are indistinguishable without this flag --
 	// and they are the two states U6 most needs separated, because one leaves a live reservation and an
 	// operator decision, and the other leaves nothing at all.
@@ -440,16 +446,55 @@ func executeSupervisionResume(
 		}
 	}
 
-	// THE REMAINING THREE U5 GATES, immediately before input and after the payload re-read. They run
+	// THE REMAINING THREE U5 GATES, after the payload re-read and before the delivery boundary. They run
 	// LAST on purpose: everything above establishes that the CLAIM is sound, and these establish that
 	// the WORLD still matches the claim. A refusal here leaves the reservation unconsumed and
 	// INDETERMINATE, identical to payload drift, because the ordering guarantee is the same -- nothing
 	// has been typed yet, so refusing costs a re-run while proceeding could cost a wrong delivery.
+	//
+	// THIS IS NOT THE U4.2 CHECK, and the comment here used to claim it was ("immediately before input").
+	// It is not: the delivery boundary publishes a durable directive after this point and before pane input
+	// (codex finding 3). The authoritative immediately-before-input re-check lives INSIDE the boundary, and
+	// this call is now the cheap pre-directive filter that keeps an already-doomed delivery from writing an
+	// audit record. Both exist, and each is killable on its own: remove this one and a drifted world still
+	// publishes a directive; remove the one in the boundary and drift between directive and input is invisible.
 	if refusal := evaluateSupervisionDeliveryTimeGates(assessment, now, readGeneration, readPane); refusal != nil {
 		return supervisionResumeOutcome{}, *refusal
 	}
 
 	if err := deliver(currentPayload); err != nil {
+		// PROVEN NON-DELIVERY IS NOT UNKNOWN (codex finding 5). The boundary marks the refusals that happen
+		// strictly before sendPromptToPane -- blank pane id, missing publisher, missing gate, failed durable
+		// directive, and the post-directive gate refusal -- with a typed error, because for those no bytes
+		// exist to be ambiguous about. Reporting them as unknown told the operator to go inspect a pane about
+		// a question that has no ambiguity in it, and it stranded the pause behind an "operator must decide"
+		// state with nothing to decide.
+		//
+		// POLARITY: UNKNOWN IS THE DEFAULT AND A DEFINITE VERDICT REQUIRES PROOF. This branch downgrades to
+		// definite ONLY on the typed marker; everything else, including an error from inside sendPromptToPane,
+		// keeps DeliveryOutcomeUnknown. Inverting it -- default definite, mark unknown -- reads as the same
+		// code and is a fail-open at the one seam where being wrong costs a second audited resume.
+		//
+		// THE RESERVATION IS NOT TOUCHED EITHER WAY, ruled. Proven non-delivery does NOT release, clear or
+		// delete the claim: nothing in this system deletes reservations, and a self-deleting claim would
+		// manufacture the orphan-companion state of finding 2. Only the REPORT changes.
+		var definite *supervisionDefiniteNonDeliveryError
+		if errors.As(err, &definite) {
+			if definite.Refusal != nil {
+				// THE GATE'S OWN VERDICT, not a paraphrase: its clause and recovery are what the operator needs,
+				// and re-composing them here would be a second opinion about why the world failed the check. The
+				// proven fact is PREPENDED so the operator learns it before the gate's detail. A copy is taken so
+				// the boundary's refusal value is never mutated.
+				refusal := *definite.Refusal
+				refusal.Detail = "NO PANE INPUT OCCURRED -- the durable directive was published, the world was then re-checked immediately before input, and it refused: " + refusal.Detail
+				return supervisionResumeOutcome{}, refusal
+			}
+			return supervisionResumeOutcome{}, supervisionResumeRefusal{
+				Clause:   "claim-once",
+				Detail:   "the claim was recorded and delivery was refused BEFORE any pane input: " + err.Error(),
+				Recovery: "no delivery occurred, so the pane needs no inspection; the reservation remains and must be consumed or cleared deliberately before another automatic attempt",
+			}
+		}
 		// TERMINAL INDETERMINATE, reported through the OUTCOME rather than inferred from it. Returning the
 		// zero outcome here made this case indistinguishable from an ordinary pre-delivery refusal, so the
 		// command reported "refused" for exactly U6's unknown-pane-input state -- the one state that leaves

@@ -14,13 +14,22 @@ import (
 
 // PR5 / #498 U6: the OWNED DELIVERY BOUNDARY.
 //
-// Three properties, and each has a named failure mode:
+// FOUR properties, and each has a named failure mode. Property (1b) was added by codex finding 3: this
+// header said "three" while the boundary published a durable directive between the last world-check and
+// pane input, which is the U4.2 violation. A property list that omits the ordering requirement is how the
+// gap survived a review that read this comment.
 //
 //  1. THE DIRECTIVE IS DURABLE AND COMES FIRST. An audited automatic action must leave a record of
 //     WHY it happened that survives the process, and it must exist BEFORE the pane is touched. After
 //     is too late: a crash between input and record produces a delivery nobody can explain, which is
 //     the worst outcome for an operator trying to reconstruct what an automatic system did to their
 //     agent. Directive failure or unknown result therefore produces ZERO pane input.
+//
+//  1b. THE DELIVERY-TIME GATES RE-RUN AFTER THE DIRECTIVE, IMMEDIATELY BEFORE INPUT. Property (1) puts
+//     an unbounded durable send between the executor's world-check and the pane, so freshness, launch
+//     generation and pane state must all be re-established here or the last check is a check about a
+//     world that has moved. Ratified text: acceptance line 64 and line 352 say pane INPUT; line 89 says
+//     the directive comes before input. Both hold only in this order.
 //
 //  2. THE INPUT GOES THROUGH THE OWNED ABSTRACTION, never raw send-keys. sendPromptToPane is the
 //     package's pane-input seam (runtime_actions.go:247, wrapping tmuxpane.SendPromptToPane) and it
@@ -54,6 +63,48 @@ func (e *supervisionUnknownDeliveryError) Error() string {
 	return "native resume delivery result is UNKNOWN: " + e.Detail
 }
 func (e *supervisionUnknownDeliveryError) Unwrap() error { return e.Cause }
+
+// supervisionDefiniteNonDeliveryError marks a delivery failure PROVEN to have produced ZERO pane input
+// (codex finding 5).
+//
+// WHY IT EXISTS. Every error out of this boundary was reported by the executor as
+// DeliveryOutcomeUnknown -- "the bytes may or may not have landed". Three of the boundary's refusals
+// happen strictly BEFORE sendPromptToPane is called at all, so no bytes exist to be ambiguous about:
+// a blank pane id, a missing directive publisher, and a failed directive publication. Reporting proven
+// non-delivery as ambiguous strands the pause in an operator decision that has no question in it, and
+// the field's own documentation (goal_supervision_resume.go:91) said it is set "ONLY on the pane-input
+// error path" while its single write site set it for all of these.
+//
+// THE FIX IS REPORT FIDELITY ONLY, ruled and deliberately narrow. This type NEVER causes the
+// reservation to be cleared, released or deleted. A claim that removes itself on a proven
+// non-delivery would manufacture exactly the orphan-companion state codex finding 2 is about, and
+// nothing in this system deletes reservations. What changes is what the operator is TOLD: "no delivery
+// occurred" instead of "inspect the pane to find out".
+//
+// POLARITY IS FAIL-CLOSED, and this is the part to preserve if anyone edits it: UNKNOWN REMAINS THE
+// DEFAULT and a definite verdict requires PROOF. The executor marks unknown unless this type is
+// present. The inverse -- assume definite, mark unknown -- reads as equivalent and is a fail-open at
+// the one seam where a wrong answer costs a double delivery.
+type supervisionDefiniteNonDeliveryError struct {
+	Detail string
+	Cause  error
+	// Refusal carries the delivery-time gate verdict when that is what stopped the delivery, so the
+	// operator sees the gate's own clause/detail/recovery rather than a paraphrase composed here. Nil
+	// for the pre-directive wiring refusals, which have no gate verdict to report.
+	Refusal *supervisionResumeRefusal
+}
+
+func (e *supervisionDefiniteNonDeliveryError) Error() string {
+	return "native resume was NOT delivered and no pane input occurred: " + e.Detail
+}
+func (e *supervisionDefiniteNonDeliveryError) Unwrap() error { return e.Cause }
+
+// supervisionDeliveryTimeGate re-runs the U5/U4.2 delivery-time gates from INSIDE this boundary.
+//
+// It is a captured dependency rather than a parameter of the returned closure because the closure must
+// stay a function of the PAYLOAD ONLY -- see newSupervisionResumeDelivery. The executor supplies bytes;
+// it does not get to choose whether the world is re-checked.
+type supervisionDeliveryTimeGate func() *supervisionResumeRefusal
 
 // agentDirForSupervisionResume resolves the agent directory whose launch record holds the goal
 // binding. Derived from the assessment's own binding rather than re-resolved from flags, so the
@@ -91,21 +142,70 @@ func newSupervisionResumeDelivery(
 	publishDirective supervisionDirectivePublisher,
 	assessment GoalSupervisionAssessment,
 	supervisor string,
+	// regate is the U4.2 requirement: the gates must be re-checked HERE, after the durable directive and
+	// immediately before pane input. See the call site below for why this cannot live in the executor.
+	regate supervisionDeliveryTimeGate,
 ) func(string) error {
 	return func(payload string) error {
 		paneID := strings.TrimSpace(assessment.Binding.Pane.PaneID)
 		if paneID == "" {
-			return fmt.Errorf("no pane identity in the assessment binding; refusing to deliver to an unresolved target")
+			return &supervisionDefiniteNonDeliveryError{
+				Detail: "no pane identity in the assessment binding; refusing to deliver to an unresolved target",
+			}
 		}
 		if publishDirective == nil {
 			// A missing publisher is a wiring fault, and delivering without an audit record is exactly
 			// what property (1) forbids. It refuses rather than degrading to an unaudited delivery.
-			return fmt.Errorf("no directive publisher supplied; an audited resume is never delivered unaudited")
+			return &supervisionDefiniteNonDeliveryError{
+				Detail: "no directive publisher supplied; an audited resume is never delivered unaudited",
+			}
+		}
+		if regate == nil {
+			// A MISSING GATE IS NOT A PASSING GATE -- the same rule as the nil reserved-claim loader. Without
+			// this the whole point of the re-check could be removed by dropping one argument, and every test
+			// that supplied a gate would stay green while production re-validated nothing.
+			return &supervisionDefiniteNonDeliveryError{
+				Detail: "no delivery-time gate was supplied, so the world cannot be re-checked immediately before pane input; refusing rather than typing against unverified state",
+			}
 		}
 
 		// (1) DIRECTIVE FIRST, durably. Any failure here means zero pane input.
 		if err := publishDirective(assessment, supervisor, payload); err != nil {
-			return fmt.Errorf("durable audit directive failed, so nothing was delivered: %w", err)
+			return &supervisionDefiniteNonDeliveryError{
+				Detail: "durable audit directive failed, so nothing was delivered: " + err.Error(),
+				Cause:  err,
+			}
+		}
+
+		// (1b) THE GATES, RE-RUN AFTER THE DIRECTIVE AND IMMEDIATELY BEFORE INPUT (codex finding 3).
+		//
+		// THIS ORDER IS FORCED BY THE RATIFIED TEXT, not chosen. Two requirements have to hold at once:
+		//   U4 gate 2 (acceptance line 64): "physically after reserve/bind/U2 rescan and immediately before
+		//     PANE INPUT"; A-clarification line 352 repeats "immediately before INPUT".
+		//   U6 (line 89): "Before input, durably record/send the AMQ directive".
+		// The only sequence satisfying both is reserve/bind -> rescan -> DIRECTIVE -> GATES -> pane input.
+		//
+		// WHAT WAS WRONG BEFORE. The executor's gate call was immediately before this CLOSURE, not before
+		// pane input, and publishDirective sits in between -- an `amq send` SUBPROCESS plus a receipt
+		// persist, of unbounded duration. In that window FreshUntil can pass, the launch generation can
+		// change (a relaunch is the one drift U5 exists to catch), and the pane can go busy or be replaced.
+		// The old code then typed into it with no re-check. I coded to U5 line 77's looser phrasing
+		// ("immediately before DELIVERY") and wrote the tighter one in my own comment.
+		//
+		// THE EXECUTOR'S PRE-DIRECTIVE GATE STAYS, and is not redundant with this one: it is what keeps a
+		// doomed delivery from publishing a durable directive at all. Both are killable -- one by asserting
+		// no directive is published when the world has already drifted, one by asserting a refusal AFTER a
+		// published directive -- so neither is decoration.
+		//
+		// A refusal here is DEFINITE non-delivery: nothing has been typed. The directive already published
+		// says "AUTHORIZED and being attempted" and explicitly "does not assert that the resume was
+		// delivered" (see supervisionProductionDirectivePublisher), so a published-then-refused record is
+		// honest under its existing wording and needs no new record type.
+		if refusal := regate(); refusal != nil {
+			return &supervisionDefiniteNonDeliveryError{
+				Detail:  "the world changed between the audit directive and pane input, so nothing was typed: " + refusal.Detail,
+				Refusal: refusal,
+			}
 		}
 
 		// (2) OWNED ABSTRACTION. Never tmux send-keys.
@@ -134,6 +234,11 @@ func newSupervisionResumeDelivery(
 				Cause:  err,
 			}
 		}
+		// DELIBERATELY NOT WRAPPED AS DEFINITE NON-DELIVERY, and the restraint is the point. Control has
+		// already passed into sendPromptToPane, so this error is reported by the layer that was handling the
+		// bytes -- we cannot prove from here that none of them reached the pane. Only the refusals ABOVE this
+		// call are provably input-free. Widening the definite class to "any error that is not one of the two
+		// typed unknowns" would be the fail-open polarity wearing a tidier shape.
 		return fmt.Errorf("deliver native resume to pane %s: %w", paneID, err)
 	}
 }
