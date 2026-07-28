@@ -7,11 +7,14 @@ import (
 	"testing"
 )
 
-// #577 r10 STEP 1: the Unavailable detail must carry the tmux stderr that explains the failure.
+// #577 r10, STEPS 1 AND 3 TOGETHER.
 //
-// This is a DIAGNOSTIC change and these tests pin it as one. The classification-unchanged test at
-// the bottom is the load-bearing companion: without it, a step-3 marker fix could leak into this
-// window and its behaviour change would ride in under a "diagnostics only" label.
+// Step 1 put the tmux stderr into the Unavailable detail so the failure could be OBSERVED instead
+// of guessed at. Step 3 acts on what was observed: "no server running" becomes proven-Gone.
+//
+// The file keeps both because they are one argument. The diagnostic is what made the
+// classification change evidence-based rather than plausible, and the classification pins are what
+// keep the change narrow. Read the anti-overbroad set below as the load-bearing half.
 
 // exitErrorWithStderr builds an *exec.ExitError carrying stderr, which is the ONLY place tmux's
 // actual message lives for a failed capture. err.Error() is just "exit status N".
@@ -31,7 +34,11 @@ func exitErrorWithStderr(t *testing.T, stderr string) error {
 // THE FALSIFIER FOR THE WHOLE ROUND: an unrecognized stderr must reach the detail. If it does not,
 // the next CI run reports "exit status 1" again and r10 step 3 stays a guess.
 func TestUnavailableDetailCarriesTheUnrecognizedStderr(t *testing.T) {
-	const stderr = "no server running on /tmp/tmux-501/default"
+	// Deliberately an UNRECOGNISED stderr. This used the no-server message until step 3 made that
+	// string proven-Gone -- at which point this test would have been asserting Unavailable about an
+	// input that is no longer Unavailable, and would have failed for a reason that has nothing to
+	// do with what it tests. A test's fixture has to keep meaning what the test is about.
+	const stderr = "server exited unexpectedly: some unrecognised tmux condition"
 	restore := swapCapture(t, "", exitErrorWithStderr(t, stderr))
 	_ = restore
 
@@ -90,15 +97,19 @@ func TestUnavailableDetailSanitizesTheStderr(t *testing.T) {
 	})
 }
 
-// THE LOAD-BEARING COMPANION. This window changes DIAGNOSTICS ONLY. Nothing that is Unavailable
-// today may become Gone, and a permission denial must stay Unavailable.
+// THE ANTI-OVERBROAD PIN SET. Three of these four rows assert what does NOT change, and they are
+// what stops the step-3 marker from becoming a broad exit-1 => Gone.
 //
-// Without this pin, the narrow no-server marker from step 3 -- or any broader exit-1 => Gone --
-// could ride into this window under a diagnostics label, and the wake lanes going green would look
-// like confirmation of a hypothesis I have not yet observed. cto's point applies here in advance:
-// a broad wrong fix produces the same green as the right one, so the pins that must hold are the
-// ones asserting what does NOT change.
-func TestDiagnosticsWindowChangesNoClassification(t *testing.T) {
+// This matters more than the flip itself. A broad mapping would satisfy BOTH headline properties --
+// cleanup passes, launch refuses -- while misclassifying genuinely unsafe failures as proven
+// absence. The cleanup-pass/launch-refuse pair alone is therefore insufficient evidence, and the
+// rows that must hold are the ones saying a permission denial and an unrecognised transient are
+// STILL Unavailable.
+//
+// In step 1 this set also pinned no-server AS Unavailable, to stop the fix arriving before the
+// observation that justified it. That row has now flipped deliberately; the other three have not
+// moved, and they are the reason the flip is narrow rather than a widening.
+func TestClassificationChangesOnlyForTheObservedNoServerCase(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		stderr string
@@ -106,9 +117,16 @@ func TestDiagnosticsWindowChangesNoClassification(t *testing.T) {
 		why    string
 	}{
 		{
-			name: "no server running is STILL unavailable in this window", stderr: "no server running on /tmp/tmux-501/default",
-			want: PaneInspectionUnavailable,
-			why:  "this is r10's HYPOTHESIZED cause; narrowing it to Gone is step 3 and must not land here",
+			// THE DELIBERATE FLIP. In step 1 this row asserted Unavailable, because narrowing the
+			// marker was step 3 and must not have arrived early and unobserved. Step 2's diagnostic
+			// then put the real stderr in the wake-lane log -- "no server running on
+			// /private/tmp/amq-wake-tmux-.../tmux-501/default" -- confirming the hypothesis by
+			// OBSERVATION. So this row flips, and the flip IS the fix. It is the one expected value
+			// in this file that changes, changed deliberately and named in the commit rather than
+			// quietly edited. The pin did its job: it made the change impossible to slip in early.
+			name: "no server running is PROVEN GONE (observed in the wake lanes)", stderr: "no server running on /tmp/tmux-501/default",
+			want: PaneInspectionGone,
+			why:  "a server that is not running cannot be hiding a pane; there is no tmux left for it to exist in",
 		},
 		{
 			name: "generic transient stays unavailable", stderr: "error connecting to /tmp/tmux-501/default (No such file or directory)",
@@ -120,10 +138,33 @@ func TestDiagnosticsWindowChangesNoClassification(t *testing.T) {
 			want: PaneInspectionUnavailable,
 			why:  "a sandboxed agent cannot see the pane; that is not evidence the pane is gone",
 		},
+		// ONE ROW PER ORIGINAL MARKER. dev-2's G3: the guard recognizes THREE independent strings,
+		// and a single representative row cannot support the claim that all three keep working --
+		// while a mutation deleting the whole loop would be "killed" by any one of them. That is the
+		// single-defect-per-row rule I argued for in r9, applied to my own coverage claim.
 		{
-			name: "a genuine missing pane is STILL gone", stderr: "can't find pane: %2",
+			name: "original marker: can't find pane", stderr: "can't find pane: %2",
 			want: PaneInspectionGone,
-			why:  "the existing proven-gone markers must keep working; this pin fails if the diagnostic change broke them",
+			why:  "tmux is running and says this pane does not exist in it",
+		},
+		{
+			name: "original marker: no such pane", stderr: "no such pane: %2",
+			want: PaneInspectionGone,
+			why:  "an independent no-target phrasing; deleting it must fail a row of its own",
+		},
+		{
+			name: "original marker: unknown pane", stderr: "unknown pane: %2",
+			want: PaneInspectionGone,
+			why:  "the third independent no-target phrasing, likewise separately pinned",
+		},
+		{
+			// THE NEAR-MISS THAT MUST NOT BE RECOGNIZED. This is the string the old comment called a
+			// socket/server failure, and it is one word away from the no-server marker while meaning
+			// something different: we could not REACH a server, not that none is running. If the
+			// marker match ever widens to substring-of-socket-error, this row is what catches it.
+			name: "socket connect failure is NOT proven absence", stderr: "error connecting to /tmp/tmux-501/default (No such file or directory)",
+			want: PaneInspectionUnavailable,
+			why:  "failing to reach a server is not evidence that no server is running",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,9 +174,10 @@ func TestDiagnosticsWindowChangesNoClassification(t *testing.T) {
 			got := InspectPaneExactByID("%2").State
 
 			if got != tc.want {
-				t.Errorf("state = %q, want %q.\n%s\nDiagnostics-only means diagnostics only: a "+
-					"classification change riding in under this label would be confirmed by the same "+
-					"green CI that a correct fix produces.", got, tc.want, tc.why)
+				t.Errorf("state = %q, want %q.\n%s\nExactly ONE input may map to Gone by this change. "+
+					"A broader mapping satisfies both headline properties -- cleanup passes, launch "+
+					"refuses -- while misclassifying genuinely unsafe failures as proven absence, and "+
+					"the same green CI would confirm it.", got, tc.want, tc.why)
 			}
 		})
 	}
