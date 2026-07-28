@@ -327,7 +327,7 @@ func InspectPaneExactByID(paneID string) PaneInspection {
 	}
 	detail := fmt.Sprintf("tmux pane %s inspection unavailable after %d attempts", id, tmuxReadAttempts)
 	if lastErr != nil {
-		detail += ": " + lastErr.Error()
+		detail += ": " + describeTmuxError(lastErr)
 	}
 	return PaneInspection{State: PaneInspectionUnavailable, Detail: detail}
 }
@@ -354,6 +354,50 @@ func isExactPaneID(id string) bool {
 
 // paneLookupDefinitelyGone recognizes only tmux's explicit no-target errors.
 // Socket/server failures and generic exit errors are deliberately excluded.
+// tmuxErrorDetailLimit bounds the stderr text carried into an operator-facing detail. tmux
+// messages are short; anything longer is a runaway and does not belong in a CI log or a pane
+// report.
+const tmuxErrorDetailLimit = 200
+
+// describeTmuxError renders an exec failure with the tmux stderr that explains it.
+//
+// #577 r10, and this is a DIAGNOSTIC fix, not a classification fix. The wake lanes reported
+//
+//	tmux pane %2 inspection unavailable after 3 attempts: exit status 1
+//
+// on all three lanes. "exit status 1" is the whole of err.Error() for an *exec.ExitError; the text
+// that says WHICH failure occurred -- "can't find pane", "no server running on <socket>", a
+// permission denial, a transient control-socket error -- lives on ExitError.Stderr and was
+// DISCARDED here.
+//
+// Both classifiers already read that stderr to decide (IsPermissionDenied, paneLookupDefinitelyGone).
+// Only the human-facing detail did not, so an operator, a CI log and a reviewer could all see THAT
+// classification fell through to Unavailable and never see what it fell through ON. That gap is
+// why r10's actual cause could only be hypothesised from the artifact, and why the fix for it has
+// to land and be observed BEFORE any marker is narrowed -- otherwise the next fix is a guess whose
+// confirmation is indistinguishable from a broad wrong fix that also turns the lanes green.
+//
+// SANITIZED, because this string reaches operator output: whitespace collapsed to a single line so
+// it cannot break structured reports, and length-bounded so a runaway cannot flood a log.
+func describeTmuxError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if stderr := strings.TrimSpace(string(ee.Stderr)); stderr != "" {
+			msg += ": " + stderr
+		}
+	}
+	// Collapse ALL whitespace runs, including newlines and tabs, into single spaces.
+	msg = strings.Join(strings.Fields(msg), " ")
+	if len(msg) > tmuxErrorDetailLimit {
+		msg = msg[:tmuxErrorDetailLimit] + "…(truncated)"
+	}
+	return msg
+}
+
 func paneLookupDefinitelyGone(err error) bool {
 	if err == nil {
 		return false
