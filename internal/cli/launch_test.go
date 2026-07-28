@@ -788,6 +788,24 @@ func TestRunLaunchDefaultProfileKeepsSessionfulChildShape(t *testing.T) {
 	}
 }
 
+func TestRunLaunchAMQ0498PinsDefaultProfileExactRoot(t *testing.T) {
+	setupFakeAMQWithVersion(t, "0.49.8")
+	root := os.Getenv("AMQ_FAKE_ROOT")
+	stdout, stderr, err := captureOutput(t, func() error {
+		return runLaunch([]string{"--dry-run", "--no-bootstrap", "--session", "issue-96", "custom-agent"})
+	})
+	if err != nil {
+		t.Fatalf("runLaunch: %v\nstderr:\n%s", err, stderr)
+	}
+	want := "amq coop exec --root " + root + " --me custom-agent --require-wake env -- -u AM_SESSION custom-agent"
+	if !strings.Contains(stdout, want) {
+		t.Fatalf("0.49.8+ default-profile launch did not pin exact root:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "--session issue-96") {
+		t.Fatalf("0.49.8+ launch retained ambiguous session shorthand:\n%s", stdout)
+	}
+}
+
 func TestRunLaunchNamedProfileResumeAndDynamicPathsUseExactRootChildShim(t *testing.T) {
 	setupFakeAMQWithVersion(t, doctorMinAMQVersion)
 	project := t.TempDir()
