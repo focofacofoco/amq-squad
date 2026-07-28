@@ -80,9 +80,9 @@ acceptance boundary. Canonical release detail remains in `docs/vX.Y.Z-release-no
   become the pane's own process instead of typed input, previews consult the
   predicate admission enforces, and launch identity is stamped at capture so
   incomplete records stop reading as mismatches.
-- Raise the AMQ floor to 0.49.0 as the sole supported series, collapse the CI
-  matrices onto it, and let the skills leverage the CLI instead of re-deriving
-  it in prose.
+- Adopt AMQ 0.49.x as the supported series with 0.49.0 as the minimum supported
+  release and compatibility tested through 0.49.1, collapse the CI matrices onto
+  it, and let the skills leverage the CLI instead of re-deriving it in prose.
 - Definition of done: every implementation slice is reviewed at an exact commit,
   the full compatibility/CI matrix passes, safety-critical guards carry mutation
   evidence with zero survivors, and merge/tag/release remain separate verified

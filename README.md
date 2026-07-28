@@ -67,9 +67,10 @@ automatic resume for paused native `/goal` runs:
 - **Launch id stamped at capture (#572).** Incomplete launch records are
   distinguished from genuine mismatches, so an identity refusal stops
   obscuring an earlier partial-launch failure.
-- **AMQ 0.49.0 is the sole supported series (#557, #533).** The floor is
-  raised, the CI matrices collapse, and the 0.47–0.49 trace/doctor additions
-  can be relied on. Releases older than 0.49.0 are rejected.
+- **AMQ 0.49.x is the supported series, minimum 0.49.0 (#557, #533).** The
+  floor is raised and compatibility is tested through 0.49.1, the CI matrices
+  collapse, and the 0.47–0.49 trace/doctor additions can be relied on. Releases
+  older than 0.49.0 are rejected.
 - **Skills leverage the CLI (#534).** The authoritative skills were rewritten
   to reach for the binary instead of re-deriving it in prose, identity moved to
   frontmatter, `docs/skills.md` became per-skill references, and a
