@@ -365,8 +365,9 @@ list.</li>
 0.49.8 made bare verbs refuse when a repo-local <code>.amqrc</code>
 conflicts with the env-pinned root, and made exact-root writes demand
 <code>meta/config.json</code> that session roots never carried. Session
-roots are now self-sufficient and every amq-squad-issued invocation and
-printed command pins <code>--root</code>.</li>
+roots are now self-sufficient, and affected coop, dispatch and
+wake-sidecar invocations plus generated bootstrap/routing commands use
+the resolved exact root.</li>
 </ul>
 <p><strong>Breaking:</strong> AMQ 0.49.9 is the minimum supported
 release; the 0.49.0 through 0.49.8 range is no longer supported and

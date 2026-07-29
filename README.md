@@ -56,8 +56,9 @@ amq-squad against upstream AMQ 0.49.8 and 0.49.9:
 - **Session-root authority under AMQ 0.49.8+ (#588).** 0.49.8 made bare verbs
   refuse when a repo-local `.amqrc` conflicts with the env-pinned root, and
   made exact-root writes demand `meta/config.json` that session roots never
-  carried. Session roots are now self-sufficient and every amq-squad-issued
-  invocation and printed command pins `--root`.
+  carried. Session roots are now self-sufficient, and affected coop, dispatch
+  and wake-sidecar invocations plus generated bootstrap/routing commands use
+  the resolved exact root.
 
 **Breaking:** AMQ 0.49.9 is the minimum supported release; the 0.49.0 through
 0.49.8 range is no longer supported and releases below the floor are rejected
