@@ -770,7 +770,7 @@ func TestLeadRegisterWakeInjectModeNoneIsZeroInput(t *testing.T) {
 	if len(got) != 1 || got[0].WakeInjectMode != "none" || got[0].WakeInjectCmd != "" || got[0].WakeInjectVia != "" || len(got[0].WakeInjectArgs) != 0 {
 		t.Fatalf("zero-input wake options = %+v", got)
 	}
-	rec, err := launch.Read(filepath.Join(base, "agents", "cto"))
+	rec, err := launch.Read(filepath.Join(base, "issue-96", "agents", "cto"))
 	if err != nil || rec.WakeInjectMode != "none" || rec.WakeInjectCmd != "" {
 		t.Fatalf("zero-input wake record = %+v, %v", rec, err)
 	}
@@ -782,7 +782,7 @@ func TestLeadRegisterWakeInjectModeNoneIsZeroInput(t *testing.T) {
 	if len(got) != 2 || got[1].WakeInjectMode != "none" || got[1].WakeInjectCmd != "" {
 		t.Fatalf("repair must inherit none mode: %+v", got)
 	}
-	rec, err = launch.Read(filepath.Join(base, "agents", "cto"))
+	rec, err = launch.Read(filepath.Join(base, "issue-96", "agents", "cto"))
 	if err != nil || rec.WakeInjectMode != "none" || rec.WakeInjectCmd != "" {
 		t.Fatalf("repair reset zero-input record = %+v, %v", rec, err)
 	}
@@ -791,11 +791,11 @@ func TestLeadRegisterWakeInjectModeNoneIsZeroInput(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("lead repair explicit raw: %v", err)
 	}
-	wantRoot := base
+	wantRoot := filepath.Join(base, "issue-96")
 	if len(got) != 3 || got[2].Root != wantRoot || got[2].WakeInjectMode != "raw" || got[2].WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("explicit raw must override inherited none: %+v", got)
 	}
-	rec, err = launch.Read(filepath.Join(base, "agents", "cto"))
+	rec, err = launch.Read(filepath.Join(base, "issue-96", "agents", "cto"))
 	if err != nil || rec.Root != wantRoot || rec.WakeInjectMode != "raw" || rec.WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("explicit raw record = %+v, %v", rec, err)
 	}
@@ -827,11 +827,11 @@ func TestLeadRegisterDefaultsManagedBinaryWakeModeToRaw(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("lead register default raw: %v", err)
 	}
-	wantRoot := base
+	wantRoot := filepath.Join(base, "issue-96")
 	if len(got) != 1 || got[0].Root != wantRoot || got[0].WakeInjectMode != "raw" || got[0].WakeInjectCmd != wakeDrainInject(wantRoot) {
 		t.Fatalf("managed external lead wake options = %+v", got)
 	}
-	rec, err := launch.Read(filepath.Join(base, "agents", "cto"))
+	rec, err := launch.Read(filepath.Join(base, "issue-96", "agents", "cto"))
 	if err != nil || rec.Binary != "codex" || rec.WakeInjectMode != "raw" {
 		t.Fatalf("managed external lead record = %+v, %v", rec, err)
 	}
