@@ -43,7 +43,11 @@ func TestRealAMQRootAuthorityCompatibility(t *testing.T) {
 		t.Fatalf("real AMQ version = %q, expected requested %q", version, expected)
 	}
 	t.Logf("real AMQ binary=%s version=%s requested=%s", binary, version, expected)
+	realAMQRootAuthorityCompatibilityContract(t, binary)
+}
 
+func realAMQRootAuthorityCompatibilityContract(t *testing.T, binary string) {
+	t.Helper()
 	project := t.TempDir()
 	base := filepath.Join(project, ".agent-mail")
 	session := "root-authority"
@@ -110,8 +114,11 @@ func TestRealAMQRootAuthorityCompatibility(t *testing.T) {
 	if refusedErr == nil {
 		t.Fatalf("configless --root + --me write unexpectedly succeeded:\n%s", refusedOut)
 	}
-	if lower := strings.ToLower(refusedOut); !strings.Contains(lower, "config") {
-		t.Fatalf("configless write refusal did not identify config authority:\n%s", refusedOut)
+	lowerRefused := strings.ToLower(refusedOut)
+	for _, want := range []string{"not initialized", "meta/config.json"} {
+		if !strings.Contains(lowerRefused, want) {
+			t.Fatalf("configless write refusal omitted attribution token %q:\n%s", want, refusedOut)
+		}
 	}
 
 	// Fresh launch prepares the exact config before coop exec. Prove that
