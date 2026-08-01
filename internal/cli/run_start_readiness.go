@@ -1369,9 +1369,10 @@ func validateAcceptedGoalBinding(binding acceptedGoalBinding) error {
 // namespace.
 //
 // pendingSeed reports that a --seed-from reference was supplied and the brief
-// it will produce has not been written yet. It is set by the read-only
-// proposal stage only; the materializing stages resolve after the brief exists
-// and must keep refusing a missing one.
+// it will produce has not been written yet. BOTH the read-only proposal and the
+// materializing preparation set it, because preparation also resolves the
+// binding before it writes the seeded brief. A stage with no seed keeps
+// refusing a missing brief.
 func resolveAcceptedGoalBinding(project, profile, session, goal, source, claimedDigest string, pendingSeed bool) (acceptedGoalBinding, error) {
 	profile = squadnamespace.NormalizeProfile(profile)
 	namespace := profile + "/" + session
@@ -1980,7 +1981,23 @@ func prepareRunArtifacts(project, profile, session, shape, stagedRaw, goal, goal
 	if shape != runwizard.LaunchShapeWorkingTeamTogether && shape != runwizard.LaunchShapeLeadOnlyStaged {
 		return runReadinessResult{}, fmt.Errorf("preparation requires explicit --launch-shape working-team-together or lead-only-staged")
 	}
-	binding, err := resolveAcceptedGoalBinding(project, profile, session, goal, goalSource, goalDigest, false)
+	// #597 guard 3: account for the seed promised in THIS transaction.
+	//
+	// The brief is written further down, inside the rollback-protected region,
+	// and this resolution happens before that region is armed. An earlier
+	// revision claimed materialization resolves after the brief exists; the
+	// execution order says otherwise, which is why --prepare-plan started
+	// succeeding while the matching --prepare still refused.
+	//
+	// Of the two available repairs this is the one that preserves the
+	// transaction. Reordering the brief write ahead of this call would move a
+	// write OUTSIDE the rollback-protected region, so a later failure would
+	// leave the brief behind -- trading a wrong answer for a durable side
+	// effect on failure. Telling the resolver a seed is pending changes no
+	// write ordering at all, and the binding is identical either way because
+	// the synthesized text depends on the namespace and brief PATH, never on
+	// the brief's bytes.
+	binding, err := resolveAcceptedGoalBinding(project, profile, session, goal, goalSource, goalDigest, strings.TrimSpace(seed) != "")
 	if err != nil {
 		return runReadinessResult{}, err
 	}

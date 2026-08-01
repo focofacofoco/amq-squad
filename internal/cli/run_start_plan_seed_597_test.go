@@ -100,3 +100,96 @@ func TestPlanStageExplicitGoalStillWorks(t *testing.T) {
 		t.Fatalf("--prepare-plan with an explicit --goal must work: %v", err)
 	}
 }
+
+// runPrepareStage drives the MATERIALIZING stage on the same namespace.
+func runPrepareStage(t *testing.T, project, seedRef, goal string) (string, error) {
+	t.Helper()
+	args := []string{
+		"--project", project, "--profile", team.DefaultProfile, "--session", "tonight",
+		"--roles", "cto", "--binary", "cto=codex", "--lead", "cto",
+		"--launch-shape", runwizard.LaunchShapeWorkingTeamTogether,
+		"--visibility", "detached", "--prepare",
+	}
+	if seedRef != "" {
+		args = append(args, "--seed-from", seedRef)
+	}
+	if goal != "" {
+		args = append(args, "--goal", goal)
+	}
+	out, _, err := captureOutput(t, func() error { return runRunStart(args, "test") })
+	return out, err
+}
+
+// TestSeededPlanAndPrepareConvergeEndToEnd is the guard 3 end-to-end proof.
+//
+// The first guard 3 attempt relaxed the PROPOSAL only. Preparation resolves the
+// same binding BEFORE it writes the seeded brief, so --prepare-plan started
+// succeeding while the matching --prepare still refused: the relaxation moved
+// the failure later instead of removing it, and no test called prepare, so
+// nothing caught it.
+//
+// A relaxation is not done when the refusal stops firing; it is done when the
+// operator's whole workflow succeeds. This drives plan THEN prepare on one
+// fresh namespace and asserts the final state, including the equality the
+// design rests on: the accepted binding after prepare must equal the
+// plan-stage binding, or plan and prepare silently disagree.
+func TestSeededPlanAndPrepareConvergeEndToEnd(t *testing.T) {
+	project, seedRef := seedPlanStageFixture(t)
+
+	planOut, err := runPlanStage(t, project, seedRef, "")
+	if err != nil {
+		t.Fatalf("plan stage refused: %v", err)
+	}
+	planDigest := extractGoalBindingDigest(t, planOut)
+
+	if _, err := runPrepareStage(t, project, seedRef, ""); err != nil {
+		t.Fatalf("prepare refused after the plan stage accepted the same inputs; the relaxation moved the failure instead of removing it: %v", err)
+	}
+
+	// The brief the binding named must now exist and carry the seeded content.
+	briefPath := briefPathForProfile(project, team.DefaultProfile, "tonight")
+	data, readErr := os.ReadFile(briefPath)
+	if readErr != nil {
+		t.Fatalf("prepare must create the seeded brief at %s: %v", briefPath, readErr)
+	}
+	if !strings.Contains(string(data), "Real seeded brief content") {
+		t.Errorf("brief does not carry the seeded content:\n%s", data)
+	}
+
+	// THE EQUALITY THE DESIGN RESTS ON.
+	manifest, err := readPreparedRunManifest(project, team.DefaultProfile, "tonight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.GoalDigest != planDigest {
+		t.Errorf("accepted goal digest after prepare (%s) differs from the plan stage (%s); plan and prepare must bind the SAME goal", manifest.GoalDigest, planDigest)
+	}
+	if strings.TrimSpace(manifest.GoalText) == "" {
+		t.Error("accepted goal text is empty after prepare")
+	}
+}
+
+// TestPrepareWithNoSeedAndNoGoalStaysRefused keeps the materializing refusal.
+// Relaxing the seeded path must not open an unseeded one.
+func TestPrepareWithNoSeedAndNoGoalStaysRefused(t *testing.T) {
+	project, _ := seedPlanStageFixture(t)
+	if _, err := runPrepareStage(t, project, "", ""); err == nil {
+		t.Fatal("prepare with no brief, no --seed-from and no --goal must still be refused")
+	}
+}
+
+func extractGoalBindingDigest(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "goal_binding") {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if strings.HasPrefix(field, "digest=") {
+				return strings.TrimPrefix(field, "digest=")
+			}
+		}
+	}
+	t.Fatalf("no goal_binding digest in plan output:\n%s", out)
+	return ""
+}
