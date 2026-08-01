@@ -171,16 +171,16 @@ func TestDoctorBootstrapGraceIsInfoAndOverdueIsWarn(t *testing.T) {
 	// No launch reservation: the historical mapping, unchanged. A mismatched or
 	// malformed acknowledgement is ambiguous without evidence that a launch was
 	// actually attempted, so it stays a warning.
-	if got := doctorBootstrapStatus(bootstrapack.Result{State: "pending", Required: true}, false); got != doctorOK {
+	if got := doctorBootstrapStatus(bootstrapack.Result{State: "pending", Required: true}, false, time.Now()); got != doctorOK {
 		t.Fatalf("pending=%s", got)
 	}
 	for _, state := range []string{"unverified", "mismatch", "malformed"} {
-		if got := doctorBootstrapStatus(bootstrapack.Result{State: state, Required: true}, false); got != doctorWarn {
+		if got := doctorBootstrapStatus(bootstrapack.Result{State: state, Required: true}, false, time.Now()); got != doctorWarn {
 			t.Fatalf("%s=%s", state, got)
 		}
 	}
 	for _, state := range []string{"verified", "not_required", "legacy_unknown"} {
-		if got := doctorBootstrapStatus(bootstrapack.Result{State: state}, false); got != doctorOK {
+		if got := doctorBootstrapStatus(bootstrapack.Result{State: state}, false, time.Now()); got != doctorOK {
 			t.Fatalf("%s=%s", state, got)
 		}
 	}
@@ -193,18 +193,18 @@ func TestDoctorBootstrapGraceIsInfoAndOverdueIsWarn(t *testing.T) {
 // is too quiet for the one signal that explains a bricked namespace.
 func TestDoctorBootstrapReservedLaunchEscalatesMismatchToFail(t *testing.T) {
 	for _, state := range []string{"mismatch", "malformed"} {
-		if got := doctorBootstrapStatus(bootstrapack.Result{State: state, Required: true}, true); got != doctorFail {
+		if got := doctorBootstrapStatus(bootstrapack.Result{State: state, Required: true}, true, time.Now()); got != doctorFail {
 			t.Errorf("reserved launch with %s acknowledgement = %s, want fail", state, got)
 		}
 	}
 	// unverified stays a warning even with a reservation: a launch can be
 	// reserved and the agent legitimately still on its way to acknowledging.
-	if got := doctorBootstrapStatus(bootstrapack.Result{State: "unverified", Required: true}, true); got != doctorWarn {
+	if got := doctorBootstrapStatus(bootstrapack.Result{State: "unverified", Required: true}, true, time.Now()); got != doctorWarn {
 		t.Errorf("reserved launch with unverified acknowledgement = %s, want warn", got)
 	}
 	// A healthy agent must not be failed just because its launch was reserved.
 	for _, state := range []string{"verified", "not_required", "legacy_unknown", "pending"} {
-		if got := doctorBootstrapStatus(bootstrapack.Result{State: state}, true); got != doctorOK {
+		if got := doctorBootstrapStatus(bootstrapack.Result{State: state}, true, time.Now()); got != doctorOK {
 			t.Errorf("reserved launch with %s = %s, want ok", state, got)
 		}
 	}

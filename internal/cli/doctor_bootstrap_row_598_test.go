@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/omriariav/amq-squad/v2/internal/bootstrapack"
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
@@ -204,5 +206,54 @@ func TestDoctorBootstrapRowStaysSilentForAMemberOutsideTheAcceptedRoster(t *test
 	row := bootstrapRowFor(t, doctorCheckBootstrap(d), role)
 	if row.Status != doctorOK {
 		t.Fatalf("a member outside the accepted initial roster must not be failed by another member's reservation; got %s: %s", row.Status, row.Detail)
+	}
+}
+
+// TestDoctorBootstrapReservedRelaunchInsideGraceIsNotFailed is Reviewer A's
+// false-positive, reproduced and closed.
+//
+// bootstrapack.Evaluate consults the grace period ONLY when the marker is
+// missing. A marker that exists but belongs to a PREVIOUS launch returns
+// "mismatch" immediately, and ordinary relaunch never removes the old marker:
+// launch.go touches bootstrapack state nowhere, and the only removals live in
+// the staged-launch rollback path. So a healthy agent that was just relaunched
+// has a stale marker, a fresh expectation, and a reservation.
+//
+// Without the grace gate, doctor reported FAIL for a member that was starting
+// normally and simply had not re-acknowledged yet. That is exactly the
+// "failed while having done nothing wrong" case the predicate is supposed to
+// exclude.
+func TestDoctorBootstrapReservedRelaunchInsideGraceIsNotFailed(t *testing.T) {
+	issued := time.Now().UTC()
+	mismatch := bootstrapack.Result{
+		State:    "mismatch",
+		Required: true,
+		IssuedAt: &issued,
+		Detail:   "bootstrap acknowledgement does not match the current launch identity",
+	}
+
+	// Inside the window: still starting, must not be failed even with a
+	// reservation.
+	if got := doctorBootstrapStatus(mismatch, true, issued.Add(bootstrapack.GracePeriod/2)); got != doctorWarn {
+		t.Errorf("reserved relaunch INSIDE the ack grace period = %s, want warn (the agent is still starting)", got)
+	}
+	// Boundary: exactly at expiry is outside the window.
+	if got := doctorBootstrapStatus(mismatch, true, issued.Add(bootstrapack.GracePeriod)); got != doctorFail {
+		t.Errorf("reserved mismatch AT grace expiry = %s, want fail", got)
+	}
+	// Past the window: the launch genuinely did not complete.
+	if got := doctorBootstrapStatus(mismatch, true, issued.Add(2*bootstrapack.GracePeriod)); got != doctorFail {
+		t.Errorf("reserved mismatch AFTER the grace period = %s, want fail", got)
+	}
+	// No reservation: unchanged historical behavior in and out of the window.
+	for _, at := range []time.Time{issued.Add(bootstrapack.GracePeriod / 2), issued.Add(2 * bootstrapack.GracePeriod)} {
+		if got := doctorBootstrapStatus(mismatch, false, at); got != doctorWarn {
+			t.Errorf("unreserved mismatch = %s, want warn", got)
+		}
+	}
+	// A missing issue time must not become an indefinite amnesty.
+	noIssue := bootstrapack.Result{State: "mismatch", Required: true}
+	if got := doctorBootstrapStatus(noIssue, true, issued); got != doctorFail {
+		t.Errorf("reserved mismatch with no issue time = %s, want fail (cannot prove it is inside the window)", got)
 	}
 }
