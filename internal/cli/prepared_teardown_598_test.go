@@ -212,8 +212,11 @@ func TestPreparedTeardownRefusesSymlinkedPreparedParentEscapingTheProject(t *tes
 	if err == nil {
 		t.Fatalf("teardown accepted a prepared parent that resolves outside the project; target=%+v", target)
 	}
-	if !strings.Contains(err.Error(), "outside the project") {
-		t.Errorf("refusal must name the escape, got: %v", err)
+	// The refusal reason tightened with blocker 3: escaping the project is now
+	// a special case of failing the canonical-namespace identity check, so that
+	// is the message. Still a refusal, on a strictly stronger rule.
+	if !strings.Contains(err.Error(), "canonical prepared namespace") {
+		t.Errorf("refusal must name the canonical-namespace requirement, got: %v", err)
 	}
 	if target.PreparedHas || target.GenerationsHas {
 		t.Errorf("escaping paths must never be marked removable: %+v", target)
@@ -259,5 +262,93 @@ func TestPathWithinResolvedRootRejectsSiblingPrefix(t *testing.T) {
 		if got := pathWithinResolvedRoot(root, path); got != want {
 			t.Errorf("pathWithinResolvedRoot(%q, %q) = %v, want %v", root, path, got, want)
 		}
+	}
+}
+
+// TestPreparedTeardownRefusesInProjectPreparedRedirects is Reviewer A's blocker
+// 3, both variants, reproduced and closed.
+//
+// The previous containment proved only that a redirected prepared directory
+// stayed somewhere inside the project. That is ancestry, and the invariant this
+// function needs is identity: the directory IS this profile's prepared
+// namespace, or teardown does not touch it. Redirecting at the project root or
+// at any unrelated in-project directory passed the old check and made
+// same-named artifacts belonging to something else removable.
+func TestPreparedTeardownRefusesInProjectPreparedRedirects(t *testing.T) {
+	for name, redirect := range map[string]func(project string) string{
+		// The project root itself. pathWithinResolvedRoot allows equality, so
+		// this variant passed the old check most explicitly of all.
+		"project root": func(project string) string { return project },
+		// Any unrelated in-project directory.
+		"unrelated in-project dir": func(project string) string {
+			dir := filepath.Join(project, "unrelated")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			project := t.TempDir()
+			profile, session := team.DefaultProfile, "victim"
+			victimDir := redirect(project)
+
+			// State that belongs to something else and must survive.
+			victimManifest := filepath.Join(victimDir, session+".json")
+			victimGenerations := filepath.Join(victimDir, session+".generations")
+			if err := os.WriteFile(victimManifest, []byte(`{"schema":3}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(victimGenerations, "gen0001"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			preparedParent := filepath.Dir(preparedRunPath(project, profile, session))
+			if err := os.MkdirAll(filepath.Dir(preparedParent), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victimDir, preparedParent); err != nil {
+				t.Skipf("symlinks unavailable on this platform: %v", err)
+			}
+
+			var target rmTarget
+			err := resolvePreparedRunTeardown(&target, "rm", project, profile, session)
+			if err == nil {
+				t.Fatalf("teardown accepted an in-project prepared redirect; target=%+v", target)
+			}
+			if !strings.Contains(err.Error(), "canonical prepared namespace") {
+				t.Errorf("refusal must name the canonical-namespace requirement, got: %v", err)
+			}
+			if target.PreparedHas || target.GenerationsHas {
+				t.Errorf("redirected paths must never be marked removable: %+v", target)
+			}
+			if _, statErr := os.Stat(victimManifest); statErr != nil {
+				t.Errorf("unrelated in-project manifest was destroyed: %v", statErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(victimGenerations, "gen0001")); statErr != nil {
+				t.Errorf("unrelated in-project generation state was destroyed: %v", statErr)
+			}
+		})
+	}
+}
+
+// TestPreparedTeardownAcceptsTheCanonicalPreparedDirectory is the companion
+// property, proved directly rather than inferred from the refusals above: the
+// tightened rule must still accept ordinary, unredirected prepared state, or it
+// would have broken teardown for every real namespace.
+func TestPreparedTeardownAcceptsTheCanonicalPreparedDirectory(t *testing.T) {
+	project := t.TempDir()
+	profile, session := team.DefaultProfile, "ordinary"
+	manifest, generations := seedPreparedTeardownFixture(t, project, profile, session)
+
+	var target rmTarget
+	if err := resolvePreparedRunTeardown(&target, "rm", project, profile, session); err != nil {
+		t.Fatalf("canonical prepared state must be accepted: %v", err)
+	}
+	if !target.PreparedHas || !target.GenerationsHas {
+		t.Fatalf("canonical prepared state must be marked removable: %+v", target)
+	}
+	if target.Prepared != manifest || target.Generations != generations {
+		t.Errorf("target paths = %q,%q want %q,%q", target.Prepared, target.Generations, manifest, generations)
 	}
 }

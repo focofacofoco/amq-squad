@@ -808,8 +808,26 @@ func resolvePreparedRunTeardown(target *rmTarget, verb, project, profile, sessio
 	case err != nil:
 		return fmt.Errorf("refusing to %s: cannot resolve prepared directory %q: %w", verb, preparedDir, err)
 	}
-	if !pathWithinResolvedRoot(resolvedProject, resolvedPrepared) {
-		return fmt.Errorf("refusing to %s: prepared directory %q resolves to %q, which is outside the project at %q; refusing to remove state that does not belong to this project", verb, preparedDir, resolvedPrepared, resolvedProject)
+	// The prepared directory must resolve to its CANONICAL location, not merely
+	// to somewhere inside the project.
+	//
+	// "Inside the project" was the second wrong question here. A reviewer
+	// redirected .amq-squad/prepared/<profile> at the project ROOT and at an
+	// unrelated in-project directory; both stayed within the project and both
+	// made same-named victim.json / victim.generations belonging to something
+	// else removable. Containment by ancestry cannot express the actual
+	// invariant, which is identity: this directory IS the prepared namespace
+	// for this profile, or teardown does not touch it.
+	//
+	// Equality against the canonical path rejects every redirect in one rule
+	// rather than enumerating bad destinations, and it means a symlinked
+	// prepared directory is refused even when the target looks harmless. That
+	// is deliberate: the operator can move real state into place, and a
+	// destructive verb should not be the thing that follows an indirection it
+	// cannot justify.
+	canonicalPrepared := filepath.Join(resolvedProject, team.DirName, "prepared", squadnamespace.NormalizeProfile(profile))
+	if resolvedPrepared != filepath.Clean(canonicalPrepared) {
+		return fmt.Errorf("refusing to %s: prepared directory %q resolves to %q, which is not the canonical prepared namespace %q; refusing to remove state that is not this namespace's prepared state", verb, preparedDir, resolvedPrepared, filepath.Clean(canonicalPrepared))
 	}
 	for label, path := range map[string]string{
 		"prepared manifest":         manifest,
