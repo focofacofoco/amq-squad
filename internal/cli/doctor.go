@@ -1130,9 +1130,19 @@ func doctorCheckBootstrap(d doctorExecution) []doctorCheck {
 		return []doctorCheck{{Name: "bootstrap", Status: doctorOK, Detail: "workstream unresolved; skipped"}}
 	}
 	now := d.Probe.Now()
+	// #598: a launch reservation is durable proof that a launch was attempted
+	// for this namespace. Resolved once, outside the member loop, and used to
+	// decide whether a missing launch record is honest silence or a swallowed
+	// failure.
+	attempt, attempted := findPreparedLaunchAttempt(d.ProjectDir, profile, workstream)
+	acceptedRoster := preparedInitialRosterRoles(d.ProjectDir, profile, workstream, attempt.Generation)
 	out := make([]doctorCheck, 0, len(t.Members))
 	for _, m := range orderedTeamMembers(t.Members) {
 		handle := memberHandle(m)
+		// Escalation requires BOTH a reserved launch and membership of the
+		// accepted initial roster. A member outside that roster was never part
+		// of the accepted launch, so the reservation says nothing about it.
+		launchWasReserved := attempted && acceptedRoster[m.Role]
 		env, err := resolveAMQEnvForTeamProfile(m.EffectiveCWD(t.Project), profile, workstream, handle)
 		if err != nil {
 			out = append(out, doctorCheck{Name: "bootstrap/" + m.Role, Status: doctorOK, Detail: "AMQ root unresolved; skipped"})
@@ -1141,18 +1151,57 @@ func doctorCheckBootstrap(d doctorExecution) []doctorCheck {
 		agentDir := filepath.Join(absoluteAMQRoot(m.EffectiveCWD(t.Project), env.Root), "agents", handle)
 		rec, err := launch.Read(agentDir)
 		if err != nil {
+			if launchWasReserved {
+				// The row an operator needed during the fresh-namespace brick.
+				// It names the evidence and the exact path to inspect, because
+				// a remedy the CLI cannot perform is not a remedy (#598 RC4).
+				out = append(out, doctorCheck{
+					Name:   "bootstrap/" + m.Role,
+					Status: doctorFail,
+					Detail: fmt.Sprintf("launch reserved for %s in generation %s (%s) but the launch record is %s at %s: the agent did not complete bootstrap; inspect the pane error or relaunch the namespace",
+						m.Role, attempt.Generation, attempt.Path, bootstrapRecordAbsence(agentDir), bootstrapLaunchRecordPath(agentDir)),
+				})
+				continue
+			}
+			if launch.HasRecord(agentDir) {
+				// No reservation, so this is not a swallowed launch failure,
+				// but a record that exists and cannot be parsed is still not
+				// something to report as ok.
+				out = append(out, doctorCheck{
+					Name:   "bootstrap/" + m.Role,
+					Status: doctorWarn,
+					Detail: "launch record present but unreadable at " + bootstrapLaunchRecordPath(agentDir) + ": " + err.Error(),
+				})
+				continue
+			}
 			out = append(out, doctorCheck{Name: "bootstrap/" + m.Role, Status: doctorOK, Detail: "no launch record; skipped"})
 			continue
 		}
 		result := bootstrapack.Evaluate(rec.BootstrapExpectation, bootstrapack.Identity{Handle: rec.Handle, Role: rec.Role, Profile: rec.TeamProfile, Session: rec.Session, Root: rec.Root}, agentDir, now)
-		status := doctorBootstrapStatus(result)
+		status := doctorBootstrapStatus(result, launchWasReserved)
 		out = append(out, doctorCheck{Name: "bootstrap/" + m.Role, Status: status, Detail: result.State + ": " + result.Detail})
 	}
 	return out
 }
 
-func doctorBootstrapStatus(result bootstrapack.Result) doctorStatus {
-	if result.State == "unverified" || result.State == "mismatch" || result.State == "malformed" {
+// doctorBootstrapStatus maps a bootstrap acknowledgement result to a doctor
+// status.
+//
+// launchWasReserved lifts the historical WARN cap (#598). A mismatched or
+// malformed acknowledgement is ambiguous on its own: it can mean the agent is
+// still starting. Once a launch was positively reserved for this member it is
+// not ambiguous, it is a launch that did not complete, and a warning is too
+// quiet for the one signal that would have explained a bricked namespace.
+// `unverified` stays a warning either way: a launch can be reserved and the
+// agent legitimately still on its way to acknowledging.
+func doctorBootstrapStatus(result bootstrapack.Result, launchWasReserved bool) doctorStatus {
+	switch result.State {
+	case "mismatch", "malformed":
+		if launchWasReserved {
+			return doctorFail
+		}
+		return doctorWarn
+	case "unverified":
 		return doctorWarn
 	}
 	return doctorOK
