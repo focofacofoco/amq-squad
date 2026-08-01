@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/omriariav/amq-squad/v2/internal/team"
+	runwizard "github.com/omriariav/amq-squad/v2/internal/wizard"
 )
 
 // #597 guard 4: --effort was unusable with --from-profile.
@@ -16,9 +19,23 @@ import (
 
 func seedEffortSourceProfile(t *testing.T, project string) {
 	t.Helper()
+	// "challenger" is a custom role, so preparation requires it staged under
+	// .amq-squad/roles/ before it will accept the roster.
+	rolesDir := filepath.Join(project, ".amq-squad", "roles")
+	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doc := "---\nid: challenger\nlabel: challenger\n---\n\n# Role: challenger\n\nChallenge the plan.\n"
+	if err := os.WriteFile(filepath.Join(rolesDir, "challenger.md"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := team.WriteProfile(project, "source-squad", team.Team{
 		Orchestrated: true,
 		Lead:         "cto",
+		// Two mutation-capable members in one checkout, recorded on the SOURCE
+		// so the clone inherits it. The run-start flag only reaches a profile
+		// created via `new team`, which the --from-profile path does not use.
+		SharedCwdException: "597 guard 4 regression fixture",
 		Members: []team.Member{
 			{Role: "cto", Binary: "codex", Handle: "cto", Session: "earlier"},
 			{Role: "challenger", Binary: "claude", Handle: "challenger", Session: "earlier"},
@@ -97,53 +114,54 @@ func TestRunStartEffortMissingSourceProfileDefersToItsOwnRefusal(t *testing.T) {
 }
 
 // TestRunStartEffortIsActuallyAppliedToTheClonedRoster is the blocker
-// regression, and it exists because the first version of this fix was a no-op.
+// regression, and it goes through the OPERATOR ENTRY POINT deliberately.
 //
-// Relaxing preflight made the command ACCEPT --effort with --from-profile and
-// nothing applied it: the proposal cloned without effort, the materialized
-// clone was persisted unchanged, and upArgs forwards --effort only when a team
-// already exists, which a fresh clone does not. The command stopped refusing
-// and started lying, which is strictly worse than the refusal it replaced.
+// Two things it has to survive that earlier attempts did not. It must assert
+// the PRESENCE OF THE EFFECT rather than the absence of a refusal, because the
+// first version of this fix was a silent no-op that a refusal-absence test
+// passed. And it must call only stable signatures, because the fix changes
+// runStartCloneRosterProfile's arity: a test calling that helper directly
+// cannot compile at either parent, so it can prove nothing about them without
+// being hand-edited per commit, which is not evidence.
 //
-// The original test asserted the ABSENCE OF A REFUSAL and passed against that
-// broken state. This one asserts the PRESENCE OF THE EFFECT, so it fails at the
-// base commit for the refusal AND fails at the no-op commit for the missing
-// effort. Distinguishing base from HEAD was not enough; it has to distinguish
-// base, the no-op, and the fix.
+// runRunStart's signature is stable across all three states, so this exact
+// checked-in test compiles and runs at 08d03da, at 883df06, and here.
 func TestRunStartEffortIsActuallyAppliedToTheClonedRoster(t *testing.T) {
 	project := t.TempDir()
 	seedEffortSourceProfile(t, project)
 
-	if err := runStartCloneRosterProfile(project, "target-squad", "source-squad", "tonight", "", "", "cto=xhigh"); err != nil {
-		t.Fatalf("clone with effort: %v", err)
+	_, _, err := captureOutput(t, func() error {
+		return runRunStart([]string{
+			"--project", project, "--profile", "target-squad", "--session", "tonight",
+			"--from-profile", "source-squad", "--lead", "cto",
+			"--effort", "cto=xhigh",
+			"--launch-shape", runwizard.LaunchShapeWorkingTeamTogether,
+			"--goal", "Execute the guard 4 effort fixture",
+			"--visibility", "detached", "--prepare",
+		}, "test")
+	})
+	if err != nil {
+		t.Fatalf("run start --from-profile --effort --prepare: %v", err)
 	}
 
 	cloned, err := team.ReadProfile(project, "target-squad")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cto *team.Member
-	for i := range cloned.Members {
-		if cloned.Members[i].Role == "cto" {
-			cto = &cloned.Members[i]
-		}
-	}
-	if cto == nil {
-		t.Fatalf("cloned roster lost the cto member: %+v", cloned.Members)
-	}
-	// The effect: the requested effort reached the cloned member's native args.
-	native := strings.Join(append(append([]string{}, cto.CodexArgs...), cto.ClaudeArgs...), " ")
-	if !strings.Contains(native, "xhigh") {
-		t.Errorf("--effort cto=xhigh was accepted but never applied to the clone; native args = %q", native)
-	}
-	// Members not named keep their identity.
+	native := map[string]string{}
 	for _, m := range cloned.Members {
-		if m.Role == "challenger" && strings.Contains(strings.Join(append(append([]string{}, m.CodexArgs...), m.ClaudeArgs...), " "), "xhigh") {
-			t.Errorf("effort leaked onto an unnamed member: %+v", m)
-		}
+		native[m.Role] = strings.Join(append(append([]string{}, m.CodexArgs...), m.ClaudeArgs...), " ")
+	}
+	// THE EFFECT: the requested effort reached the cloned member's native args.
+	if !strings.Contains(native["cto"], "xhigh") {
+		t.Errorf("--effort cto=xhigh was accepted but never applied to the clone; cto native args = %q", native["cto"])
+	}
+	// And did not leak onto a member it did not name.
+	if strings.Contains(native["challenger"], "xhigh") {
+		t.Errorf("effort leaked onto an unnamed member; challenger native args = %q", native["challenger"])
 	}
 
-	// THE NO-REWRITE CONDITION: --from-profile must not mutate its source.
+	// NO-REWRITE: --from-profile must not mutate what it clones from.
 	source, err := team.ReadProfile(project, "source-squad")
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +169,7 @@ func TestRunStartEffortIsActuallyAppliedToTheClonedRoster(t *testing.T) {
 	for _, m := range source.Members {
 		joined := strings.Join(append(append([]string{}, m.CodexArgs...), m.ClaudeArgs...), " ")
 		if strings.Contains(joined, "xhigh") {
-			t.Errorf("cloning mutated the SOURCE profile member %q: %q", m.Role, joined)
+			t.Errorf("cloning mutated the SOURCE member %q: %q", m.Role, joined)
 		}
 		if m.Session != "earlier" {
 			t.Errorf("cloning re-pinned the SOURCE member %q to %q", m.Role, m.Session)
