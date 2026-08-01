@@ -1231,6 +1231,15 @@ func withinBootstrapAckGrace(result bootstrapack.Result, now time.Time) bool {
 	if result.IssuedAt == nil || result.IssuedAt.IsZero() {
 		return false
 	}
+	// A FUTURE issue time is the same indefinite-amnesty class as a missing
+	// one. A bad clock at launch, or a hand-edited record, would otherwise hold
+	// a genuinely dead agent at WARN for as long as that timestamp stays ahead
+	// of now. The window only means anything measured forward from a real
+	// launch, so an expectation claiming to be issued later than now cannot
+	// prove it is inside it.
+	if result.IssuedAt.After(now) {
+		return false
+	}
 	return now.Before(result.IssuedAt.Add(bootstrapack.GracePeriod))
 }
 

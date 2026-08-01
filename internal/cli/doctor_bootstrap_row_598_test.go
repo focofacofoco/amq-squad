@@ -256,4 +256,14 @@ func TestDoctorBootstrapReservedRelaunchInsideGraceIsNotFailed(t *testing.T) {
 	if got := doctorBootstrapStatus(noIssue, true, issued); got != doctorFail {
 		t.Errorf("reserved mismatch with no issue time = %s, want fail (cannot prove it is inside the window)", got)
 	}
+	// Nor must a FUTURE one. Found by Reviewer B on the third pass over this
+	// function: a bad clock at launch or a hand-edited record would otherwise
+	// hold a dead agent at WARN for as long as the timestamp stays ahead. Same
+	// class as the missing-timestamp case directly above, so it fails closed
+	// the same way.
+	future := issued.Add(24 * time.Hour)
+	futureIssue := bootstrapack.Result{State: "mismatch", Required: true, IssuedAt: &future}
+	if got := doctorBootstrapStatus(futureIssue, true, issued); got != doctorFail {
+		t.Errorf("reserved mismatch with a FUTURE issue time = %s, want fail (a future stamp must not extend the window)", got)
+	}
 }
