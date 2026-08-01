@@ -210,9 +210,14 @@ func TestPlanStageRefusesAnUnresolvableSeed(t *testing.T) {
 		"no scheme at all": "just-a-string",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := runPlanStage(t, project, ref, ""); err == nil {
+			_, err := runPlanStage(t, project, ref, "")
+			if err == nil {
 				t.Fatalf("--prepare-plan must refuse an unresolvable --seed-from %q instead of producing a ready plan", ref)
 			}
+			// PIN THE GUARD. Asserting only err != nil would pass on an
+			// unrelated environment, roster, or missing-brief refusal, so it
+			// would not prove the surviving guard is the one claimed.
+			assertSeedResolutionRefusal(t, err, ref)
 		})
 	}
 }
@@ -221,11 +226,34 @@ func TestPlanStageRefusesAnUnresolvableSeed(t *testing.T) {
 // no plan stage first, to the identical standard.
 func TestPrepareRefusesAnUnresolvableSeedBeforeBinding(t *testing.T) {
 	project, _ := seedPlanStageFixture(t)
-	if _, err := runPrepareStage(t, project, "file:/definitely/not/here/brief.md", ""); err == nil {
+	const ref = "file:/definitely/not/here/brief.md"
+	_, err := runPrepareStage(t, project, ref, "")
+	if err == nil {
 		t.Fatal("--prepare must refuse an unresolvable --seed-from")
 	}
+	assertSeedResolutionRefusal(t, err, ref)
 	// And it must not have written a brief on the way to refusing.
 	if _, statErr := os.Stat(briefPathForProfile(project, team.DefaultProfile, "tonight")); !os.IsNotExist(statErr) {
 		t.Errorf("a refused prepare must leave no brief behind (stat err %v)", statErr)
+	}
+}
+
+// assertSeedResolutionRefusal pins WHICH guard refused.
+//
+// A bare err != nil proves only that something objected, and several unrelated
+// refusals (environment, roster, missing brief) reach the same call. The claim
+// under test is specifically that the seed reference failed to resolve, so the
+// message must name that and the offending reference.
+func assertSeedResolutionRefusal(t *testing.T, err error, ref string) {
+	t.Helper()
+	if !strings.Contains(err.Error(), "--seed-from cannot be resolved") {
+		t.Errorf("refusal does not name the seed-resolution guard; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), ref) {
+		t.Errorf("refusal does not name the offending reference %q; got: %v", ref, err)
+	}
+	// It must NOT be the missing-brief refusal wearing a different hat.
+	if strings.Contains(err.Error(), "accepted brief goal binding") {
+		t.Errorf("refusal came from the missing-brief guard, not seed resolution; got: %v", err)
 	}
 }
