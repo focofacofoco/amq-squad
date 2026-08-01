@@ -391,12 +391,25 @@ func executeRmReportDeclined(e rmExecution) (bool, error) {
 	baseRoot = filepath.Clean(baseRoot)
 
 	root := filepath.Join(baseRoot, session)
-	// SAFETY 2 (highest-risk property): the target MUST resolve to a direct
-	// child of the base root. A validated session name already forbids
-	// separators, but we re-derive and compare independently so a future change
-	// to validation can never silently re-open an escape. Deleting session X
-	// must be provably incapable of touching session Y or anything outside
-	// <baseRoot>/<session>/.
+	// SAFETY 2: the target must be a direct LEXICAL child of the base root.
+	//
+	// Read what this actually provides, because the previous comment here
+	// claimed more than the code delivers and that overclaim is itself the
+	// defect class this release is about. Dir(Join(baseRoot, session)) IS
+	// baseRoot whenever session contains no separator, which
+	// validateWorkstreamName already guarantees, so both clauses below are
+	// vacuous. They are a cheap restatement of validation, NOT an independent
+	// check, and they would not catch a future change that let a separator
+	// through in a form Join collapses.
+	//
+	// They also prove nothing about SYMLINKS. If baseRoot or an intermediate
+	// component resolves outside the project, the RemoveAll and Rename below
+	// follow it, and the blast radius here is the whole AMQ root: every agent
+	// mailbox for the session. That hole is tracked in #606 and is NOT fixed
+	// here; see resolvePreparedRunTeardown in this file for the resolved-path
+	// containment it needs, applied to the prepared tree.
+	//
+	// Comment corrected only. Behavior is unchanged.
 	if filepath.Dir(root) != baseRoot || filepath.Base(root) != session {
 		return false, fmt.Errorf("refusing to %s: resolved path %q is not a direct child of base root %q", verb, root, baseRoot)
 	}
