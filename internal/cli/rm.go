@@ -286,6 +286,25 @@ type rmTarget struct {
 	Brief      string // brief path; "" when none could be resolved
 	BriefHas   bool
 	Agents     int // count of agent mailboxes under <root>/agents
+	// Prepared and Generations are the accepted-preparation state for this
+	// namespace (#598). Teardown used to leave both behind while printing
+	// "session removed", so the next launch loaded a stale accepted preview,
+	// compared it against a brief that no longer existed, and drifted
+	// permanently. That is what turned a failed launch into a bricked
+	// namespace, so removing them is part of removing the session.
+	Prepared       string // .amq-squad/prepared/<profile>/<session>.json
+	PreparedHas    bool
+	Generations    string // .amq-squad/prepared/<profile>/<session>.generations
+	GenerationsHas bool
+}
+
+// hasPreparedState reports whether any accepted-preparation artifact survives
+// for this namespace. Teardown must treat these as removable state in their own
+// right: after a failed launch the AMQ root and brief can already be gone while
+// the prepared manifest remains, and that orphan alone is enough to brick every
+// subsequent launch.
+func (t rmTarget) hasPreparedState() bool {
+	return t.PreparedHas || t.GenerationsHas
 }
 
 func executeRm(e rmExecution) error {
@@ -399,10 +418,18 @@ func executeRmReportDeclined(e rmExecution) (bool, error) {
 			target.BriefHas = true
 		}
 	}
+	if err := resolvePreparedRunTeardown(&target, verb, e.ProjectDir, profile, session); err != nil {
+		return false, err
+	}
 
 	// SAFETY 5: nothing to remove is a clean error, never a panic.
-	if !target.RootExists && !target.BriefHas {
-		return false, fmt.Errorf("%s: session %q has no AMQ root or brief under %s; nothing to remove", verb, session, baseRoot)
+	//
+	// Prepared state counts (#598). An orphaned prepared manifest with no root
+	// and no brief is exactly the bricked state operators land in, and the old
+	// check refused it as "nothing to remove" -- a refusal that pointed at
+	// nothing, from the one verb able to clear it.
+	if !target.RootExists && !target.BriefHas && !target.hasPreparedState() {
+		return false, fmt.Errorf("%s: session %q has no AMQ root, brief, or prepared launch state under %s; nothing to remove", verb, session, baseRoot)
 	}
 
 	// SAFETY 3: refuse a running session unless --force. Reuse the repo's
@@ -719,6 +746,50 @@ func countAgentMailboxes(root string) int {
 	return n
 }
 
+// resolvePreparedRunTeardown fills in the prepared-manifest paths for a
+// teardown target and proves each one is confined to this exact
+// profile/session before teardown is allowed to touch it.
+//
+// The containment check mirrors SAFETY 2 on the AMQ root rather than trusting
+// name validation alone: removing session X must be provably incapable of
+// touching session Y's accepted preparation, and the prepared tree is shared
+// by every session in the profile, so a single bad join here would be a
+// cross-session data-loss bug rather than a local one.
+func resolvePreparedRunTeardown(target *rmTarget, verb, project, profile, session string) error {
+	manifest := preparedRunPath(project, profile, session)
+	generations := preparedRunGenerationsPath(project, profile, session)
+	preparedDir := filepath.Dir(manifest)
+	for label, path := range map[string]string{
+		"prepared manifest":         manifest,
+		"prepared generation state": generations,
+	} {
+		if filepath.Dir(path) != preparedDir {
+			return fmt.Errorf("refusing to %s: resolved %s path %q is not a direct child of %q", verb, label, path, preparedDir)
+		}
+	}
+	if filepath.Base(manifest) != session+".json" {
+		return fmt.Errorf("refusing to %s: resolved prepared manifest %q does not belong to session %q", verb, manifest, session)
+	}
+	if filepath.Base(generations) != session+".generations" {
+		return fmt.Errorf("refusing to %s: resolved prepared generation state %q does not belong to session %q", verb, generations, session)
+	}
+	target.Prepared = manifest
+	target.Generations = generations
+	if fi, err := os.Stat(manifest); err == nil {
+		if fi.IsDir() {
+			return fmt.Errorf("refusing to %s: %q exists but is a directory", verb, manifest)
+		}
+		target.PreparedHas = true
+	}
+	if fi, err := os.Stat(generations); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("refusing to %s: %q exists but is not a directory", verb, generations)
+		}
+		target.GenerationsHas = true
+	}
+	return nil
+}
+
 func renderRmPreview(out io.Writer, mode rmMode, t rmTarget) {
 	if mode == rmModeArchive {
 		fmt.Fprintf(out, "# amq-squad archive — preview\n")
@@ -740,6 +811,14 @@ func renderRmPreview(out io.Writer, mode rmMode, t rmTarget) {
 			fmt.Fprintf(out, "  %s  %s\n", action, t.Brief)
 			fmt.Fprintf(out, "      -> %s\n", filepath.Join(dest, t.Session+".md"))
 		}
+		if t.PreparedHas {
+			fmt.Fprintf(out, "  %s  %s\n", action, t.Prepared)
+			fmt.Fprintf(out, "      -> %s\n", filepath.Join(dest, filepath.Base(t.Prepared)))
+		}
+		if t.GenerationsHas {
+			fmt.Fprintf(out, "  %s  %s\n", action, t.Generations)
+			fmt.Fprintf(out, "      -> %s\n", filepath.Join(dest, filepath.Base(t.Generations)))
+		}
 		return
 	}
 	if t.RootExists {
@@ -747,6 +826,12 @@ func renderRmPreview(out io.Writer, mode rmMode, t rmTarget) {
 	}
 	if t.BriefHas {
 		fmt.Fprintf(out, "  %s  %s\n", action, t.Brief)
+	}
+	if t.PreparedHas {
+		fmt.Fprintf(out, "  %s  %s\n", action, t.Prepared)
+	}
+	if t.GenerationsHas {
+		fmt.Fprintf(out, "  %s  %s\n", action, t.Generations)
 	}
 }
 
@@ -780,6 +865,21 @@ func deleteSession(out io.Writer, t rmTarget) error {
 		}
 		fmt.Fprintf(out, "removed %s\n", t.Brief)
 	}
+	// #598: the accepted preparation is part of the session. Leaving it behind
+	// while printing "session removed" is what made a failed launch
+	// unrecoverable instead of merely annoying.
+	if t.PreparedHas {
+		if err := os.Remove(t.Prepared); err != nil {
+			return fmt.Errorf("remove prepared manifest %q: %w", t.Prepared, err)
+		}
+		fmt.Fprintf(out, "removed %s\n", t.Prepared)
+	}
+	if t.GenerationsHas {
+		if err := os.RemoveAll(t.Generations); err != nil {
+			return fmt.Errorf("remove prepared generation state %q: %w", t.Generations, err)
+		}
+		fmt.Fprintf(out, "removed %s\n", t.Generations)
+	}
 	fmt.Fprintf(out, "rm: session %s removed.\n", t.Session)
 	return nil
 }
@@ -809,6 +909,30 @@ func archiveSession(out io.Writer, t rmTarget) error {
 			return fmt.Errorf("archive brief %q: %w", t.Brief, err)
 		}
 		fmt.Fprintf(out, "moved %s -> %s\n", t.Brief, briefDest)
+	}
+	// #598: archive moves the same prepared state rm deletes. Leaving it in
+	// place would archive a session while keeping the accepted preview that
+	// bricks the next launch under the same name -- the identical defect, just
+	// reached by the other verb.
+	for _, item := range []struct {
+		has   bool
+		src   string
+		label string
+	}{
+		{t.PreparedHas, t.Prepared, "prepared manifest"},
+		{t.GenerationsHas, t.Generations, "prepared generation state"},
+	} {
+		if !item.has {
+			continue
+		}
+		if err := os.MkdirAll(dest, 0o755); err != nil {
+			return fmt.Errorf("create archive dir: %w", err)
+		}
+		itemDest := filepath.Join(dest, filepath.Base(item.src))
+		if err := os.Rename(item.src, itemDest); err != nil {
+			return fmt.Errorf("archive %s %q: %w", item.label, item.src, err)
+		}
+		fmt.Fprintf(out, "moved %s -> %s\n", item.src, itemDest)
 	}
 	fmt.Fprintf(out, "archive: session %s moved to %s.\n", t.Session, dest)
 	return nil
