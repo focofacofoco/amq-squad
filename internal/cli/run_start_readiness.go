@@ -1997,6 +1997,12 @@ func prepareRunArtifacts(project, profile, session, shape, stagedRaw, goal, goal
 	// write ordering at all, and the binding is identical either way because
 	// the synthesized text depends on the namespace and brief PATH, never on
 	// the brief's bytes.
+	// Same proof the proposal applies, so a direct --prepare (no plan stage
+	// first) is held to the identical standard rather than binding against a
+	// seed that will fail to resolve a few lines later.
+	if seedErr := pendingSeedIsUsable(seed); seedErr != nil {
+		return runReadinessResult{}, fmt.Errorf("--seed-from cannot be resolved: %w", seedErr)
+	}
 	binding, err := resolveAcceptedGoalBinding(project, profile, session, goal, goalSource, goalDigest, strings.TrimSpace(seed) != "")
 	if err != nil {
 		return runReadinessResult{}, err
@@ -2177,6 +2183,23 @@ func parseRoleAssignments(raw string) map[string]string {
 		}
 	}
 	return values
+}
+
+// pendingSeedIsUsable reports whether a --seed-from reference actually
+// resolves, and is the difference between evidence and a string.
+//
+// #597 guard 3 first derived "a seed is pending" from the FLAG BEING NONEMPTY.
+// Any garbage then bypassed the missing-brief refusal and produced a ready
+// plan, while the later prepare resolved the reference for real and failed --
+// so plan and prepare diverged again, just for a different input class.
+// Resolving the reference is read-only, so the proposal can afford the same
+// proof the materializing stage relies on.
+func pendingSeedIsUsable(seed string) error {
+	if strings.TrimSpace(seed) == "" {
+		return nil
+	}
+	_, err := resolveSeed(seed)
+	return err
 }
 
 // preparedGoalBindingSourceError refuses a goal binding that has no usable

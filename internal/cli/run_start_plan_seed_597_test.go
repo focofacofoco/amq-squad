@@ -193,3 +193,39 @@ func extractGoalBindingDigest(t *testing.T, out string) string {
 	t.Fatalf("no goal_binding digest in plan output:\n%s", out)
 	return ""
 }
+
+// TestPlanStageRefusesAnUnresolvableSeed is the second guard 3 blocker.
+//
+// The first repair derived "a seed is pending" from the FLAG BEING NONEMPTY,
+// so any garbage bypassed the missing-brief refusal and produced a ready plan
+// while the later prepare resolved the reference for real and failed. Plan and
+// prepare diverged again, just for a different input class. Flag presence is a
+// string; resolution is evidence.
+func TestPlanStageRefusesAnUnresolvableSeed(t *testing.T) {
+	project, _ := seedPlanStageFixture(t)
+
+	for name, ref := range map[string]string{
+		"missing file":     "file:/definitely/not/here/brief.md",
+		"unknown scheme":   "nonsense:whatever",
+		"no scheme at all": "just-a-string",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := runPlanStage(t, project, ref, ""); err == nil {
+				t.Fatalf("--prepare-plan must refuse an unresolvable --seed-from %q instead of producing a ready plan", ref)
+			}
+		})
+	}
+}
+
+// TestPrepareRefusesAnUnresolvableSeedBeforeBinding holds a DIRECT prepare, with
+// no plan stage first, to the identical standard.
+func TestPrepareRefusesAnUnresolvableSeedBeforeBinding(t *testing.T) {
+	project, _ := seedPlanStageFixture(t)
+	if _, err := runPrepareStage(t, project, "file:/definitely/not/here/brief.md", ""); err == nil {
+		t.Fatal("--prepare must refuse an unresolvable --seed-from")
+	}
+	// And it must not have written a brief on the way to refusing.
+	if _, statErr := os.Stat(briefPathForProfile(project, team.DefaultProfile, "tonight")); !os.IsNotExist(statErr) {
+		t.Errorf("a refused prepare must leave no brief behind (stat err %v)", statErr)
+	}
+}
