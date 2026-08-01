@@ -170,3 +170,94 @@ func TestRmPreviewNamesPreparedStateBeforeRemoving(t *testing.T) {
 		t.Errorf("preview must not delete anything, but the generation state is gone: %v", statErr)
 	}
 }
+
+// TestPreparedTeardownRefusesSymlinkedPreparedParentEscapingTheProject is
+// Reviewer A's blocker 2, reproduced and closed.
+//
+// The original containment compared filepath.Dir(path) against
+// filepath.Dir(manifest) -- the same value by construction -- so it was
+// tautological and proved nothing. Making .amq-squad/prepared/<profile> a
+// symlink to an external directory left the lexical paths looking
+// project-local while the real files sat outside, and deleteSession would have
+// RemoveAll'd state belonging to another project entirely.
+//
+// This is the destructive-cross-boundary direction, so the assertion is not
+// merely "returns an error": the victim files must still exist afterwards.
+func TestPreparedTeardownRefusesSymlinkedPreparedParentEscapingTheProject(t *testing.T) {
+	project := t.TempDir()
+	external := t.TempDir()
+	profile, session := team.DefaultProfile, "victim"
+
+	// The external state that must survive.
+	victimManifest := filepath.Join(external, session+".json")
+	victimGenerations := filepath.Join(external, session+".generations")
+	if err := os.WriteFile(victimManifest, []byte(`{"schema":3}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(victimGenerations, "gen0001"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// .amq-squad/prepared/<profile> -> external
+	preparedParent := filepath.Dir(preparedRunPath(project, profile, session))
+	if err := os.MkdirAll(filepath.Dir(preparedParent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, preparedParent); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	var target rmTarget
+	err := resolvePreparedRunTeardown(&target, "rm", project, profile, session)
+	if err == nil {
+		t.Fatalf("teardown accepted a prepared parent that resolves outside the project; target=%+v", target)
+	}
+	if !strings.Contains(err.Error(), "outside the project") {
+		t.Errorf("refusal must name the escape, got: %v", err)
+	}
+	if target.PreparedHas || target.GenerationsHas {
+		t.Errorf("escaping paths must never be marked removable: %+v", target)
+	}
+
+	// The point of the whole check: the external state is untouched.
+	if _, statErr := os.Stat(victimManifest); statErr != nil {
+		t.Errorf("external manifest was destroyed: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(victimGenerations, "gen0001")); statErr != nil {
+		t.Errorf("external generation state was destroyed: %v", statErr)
+	}
+}
+
+// TestPreparedTeardownRefusesWhenContainmentCannotBeResolved pins the
+// fail-closed direction. A teardown that cannot PROVE what it is about to
+// delete must not delete it, which matches this verb's existing conservative
+// posture everywhere else.
+func TestPreparedTeardownRefusesWhenContainmentCannotBeResolved(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "does-not-exist")
+	var target rmTarget
+	err := resolvePreparedRunTeardown(&target, "rm", project, team.DefaultProfile, "s")
+	if err == nil {
+		t.Fatalf("an unresolvable project must refuse, got target=%+v", target)
+	}
+	if !strings.Contains(err.Error(), "cannot resolve project directory") {
+		t.Errorf("refusal must name what could not be resolved, got: %v", err)
+	}
+}
+
+// TestPathWithinResolvedRootRejectsSiblingPrefix guards the separator rule. A
+// plain string prefix would accept "/tmp/project-evil" as inside "/tmp/project".
+func TestPathWithinResolvedRootRejectsSiblingPrefix(t *testing.T) {
+	root := filepath.Join("/tmp", "project")
+	for path, want := range map[string]bool{
+		root:                                  true,
+		filepath.Join(root, "child"):          true,
+		filepath.Join(root, "a", "b"):         true,
+		filepath.Join("/tmp", "project-evil"): false,
+		filepath.Join("/tmp", "other"):        false,
+		filepath.Join("/tmp"):                 false,
+	} {
+		if got := pathWithinResolvedRoot(root, path); got != want {
+			t.Errorf("pathWithinResolvedRoot(%q, %q) = %v, want %v", root, path, got, want)
+		}
+	}
+}

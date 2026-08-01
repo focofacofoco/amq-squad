@@ -759,19 +759,59 @@ func resolvePreparedRunTeardown(target *rmTarget, verb, project, profile, sessio
 	manifest := preparedRunPath(project, profile, session)
 	generations := preparedRunGenerationsPath(project, profile, session)
 	preparedDir := filepath.Dir(manifest)
+
+	// Lexical shape first. These are a cheap gate, NOT the containment proof.
+	//
+	// The previous version of this function stopped here and compared
+	// filepath.Dir(path) against filepath.Dir(manifest), which is the same
+	// value by construction, so the check was tautological and proved nothing.
+	// A reviewer built the case that breaks it: make
+	// .amq-squad/prepared/<profile> a symlink to an external directory and the
+	// lexical paths still look project-local while the real files are outside.
+	// deleteSession would then RemoveAll state that does not belong to this
+	// project. Containment is therefore proven on RESOLVED paths below.
+	if filepath.Base(manifest) != session+".json" {
+		return fmt.Errorf("refusing to %s: prepared manifest %q does not belong to session %q", verb, manifest, session)
+	}
+	if filepath.Base(generations) != session+".generations" {
+		return fmt.Errorf("refusing to %s: prepared generation state %q does not belong to session %q", verb, generations, session)
+	}
+
+	// Resolved containment. Every failure direction refuses, matching this
+	// verb's existing conservative posture: a teardown that cannot PROVE what
+	// it is about to delete must not delete it.
+	resolvedProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		return fmt.Errorf("refusing to %s: cannot resolve project directory %q: %w", verb, project, err)
+	}
+	resolvedPrepared, err := filepath.EvalSymlinks(preparedDir)
+	switch {
+	case os.IsNotExist(err):
+		// No prepared tree at all. Nothing to contain and nothing to remove;
+		// the stat probes below will simply find neither artifact.
+		target.Prepared = manifest
+		target.Generations = generations
+		return nil
+	case err != nil:
+		return fmt.Errorf("refusing to %s: cannot resolve prepared directory %q: %w", verb, preparedDir, err)
+	}
+	if !pathWithinResolvedRoot(resolvedProject, resolvedPrepared) {
+		return fmt.Errorf("refusing to %s: prepared directory %q resolves to %q, which is outside the project at %q; refusing to remove state that does not belong to this project", verb, preparedDir, resolvedPrepared, resolvedProject)
+	}
 	for label, path := range map[string]string{
 		"prepared manifest":         manifest,
 		"prepared generation state": generations,
 	} {
-		if filepath.Dir(path) != preparedDir {
-			return fmt.Errorf("refusing to %s: resolved %s path %q is not a direct child of %q", verb, label, path, preparedDir)
+		resolved, resolveErr := filepath.EvalSymlinks(path)
+		if os.IsNotExist(resolveErr) {
+			continue // absent artifacts are handled by the stat probes below
 		}
-	}
-	if filepath.Base(manifest) != session+".json" {
-		return fmt.Errorf("refusing to %s: resolved prepared manifest %q does not belong to session %q", verb, manifest, session)
-	}
-	if filepath.Base(generations) != session+".generations" {
-		return fmt.Errorf("refusing to %s: resolved prepared generation state %q does not belong to session %q", verb, generations, session)
+		if resolveErr != nil {
+			return fmt.Errorf("refusing to %s: cannot resolve %s %q: %w", verb, label, path, resolveErr)
+		}
+		if !pathWithinResolvedRoot(resolvedPrepared, resolved) {
+			return fmt.Errorf("refusing to %s: %s %q resolves to %q, which escapes the prepared directory %q", verb, label, path, resolved, resolvedPrepared)
+		}
 	}
 	target.Prepared = manifest
 	target.Generations = generations
@@ -936,4 +976,22 @@ func archiveSession(out io.Writer, t rmTarget) error {
 	}
 	fmt.Fprintf(out, "archive: session %s moved to %s.\n", t.Session, dest)
 	return nil
+}
+
+// pathWithinResolvedRoot reports whether an ALREADY-RESOLVED path is the
+// resolved root or lies beneath it.
+//
+// Both arguments must have been through filepath.EvalSymlinks. Passing lexical
+// paths here would reintroduce exactly the defect this exists to prevent, which
+// is why the parameter names say resolved.
+//
+// The separator suffix matters: a plain strings.HasPrefix would accept
+// "/tmp/project-evil" as being inside "/tmp/project".
+func pathWithinResolvedRoot(resolvedRoot, resolvedPath string) bool {
+	resolvedRoot = filepath.Clean(resolvedRoot)
+	resolvedPath = filepath.Clean(resolvedPath)
+	if resolvedPath == resolvedRoot {
+		return true
+	}
+	return strings.HasPrefix(resolvedPath, resolvedRoot+string(os.PathSeparator))
 }
