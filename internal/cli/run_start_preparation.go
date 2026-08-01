@@ -235,7 +235,7 @@ func buildRunPreparationProposal(in runPreparationProposalInput) (runPreparation
 			return proposal, fmt.Errorf("staged role %q overlaps the initial roster", staged)
 		}
 	}
-	binding, err := resolveAcceptedGoalBinding(in.Project, in.Profile, in.Session, in.Goal, in.GoalSource, in.GoalDigest)
+	binding, err := resolveAcceptedGoalBinding(in.Project, in.Profile, in.Session, in.Goal, in.GoalSource, in.GoalDigest, strings.TrimSpace(in.Seed) != "")
 	if err != nil {
 		return proposal, err
 	}
