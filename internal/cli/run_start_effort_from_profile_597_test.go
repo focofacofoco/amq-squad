@@ -95,3 +95,66 @@ func TestRunStartEffortMissingSourceProfileDefersToItsOwnRefusal(t *testing.T) {
 		t.Errorf("a missing source profile must not surface as an effort error: %s", detail)
 	}
 }
+
+// TestRunStartEffortIsActuallyAppliedToTheClonedRoster is the blocker
+// regression, and it exists because the first version of this fix was a no-op.
+//
+// Relaxing preflight made the command ACCEPT --effort with --from-profile and
+// nothing applied it: the proposal cloned without effort, the materialized
+// clone was persisted unchanged, and upArgs forwards --effort only when a team
+// already exists, which a fresh clone does not. The command stopped refusing
+// and started lying, which is strictly worse than the refusal it replaced.
+//
+// The original test asserted the ABSENCE OF A REFUSAL and passed against that
+// broken state. This one asserts the PRESENCE OF THE EFFECT, so it fails at the
+// base commit for the refusal AND fails at the no-op commit for the missing
+// effort. Distinguishing base from HEAD was not enough; it has to distinguish
+// base, the no-op, and the fix.
+func TestRunStartEffortIsActuallyAppliedToTheClonedRoster(t *testing.T) {
+	project := t.TempDir()
+	seedEffortSourceProfile(t, project)
+
+	if err := runStartCloneRosterProfile(project, "target-squad", "source-squad", "tonight", "", "", "cto=xhigh"); err != nil {
+		t.Fatalf("clone with effort: %v", err)
+	}
+
+	cloned, err := team.ReadProfile(project, "target-squad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cto *team.Member
+	for i := range cloned.Members {
+		if cloned.Members[i].Role == "cto" {
+			cto = &cloned.Members[i]
+		}
+	}
+	if cto == nil {
+		t.Fatalf("cloned roster lost the cto member: %+v", cloned.Members)
+	}
+	// The effect: the requested effort reached the cloned member's native args.
+	native := strings.Join(append(append([]string{}, cto.CodexArgs...), cto.ClaudeArgs...), " ")
+	if !strings.Contains(native, "xhigh") {
+		t.Errorf("--effort cto=xhigh was accepted but never applied to the clone; native args = %q", native)
+	}
+	// Members not named keep their identity.
+	for _, m := range cloned.Members {
+		if m.Role == "challenger" && strings.Contains(strings.Join(append(append([]string{}, m.CodexArgs...), m.ClaudeArgs...), " "), "xhigh") {
+			t.Errorf("effort leaked onto an unnamed member: %+v", m)
+		}
+	}
+
+	// THE NO-REWRITE CONDITION: --from-profile must not mutate its source.
+	source, err := team.ReadProfile(project, "source-squad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range source.Members {
+		joined := strings.Join(append(append([]string{}, m.CodexArgs...), m.ClaudeArgs...), " ")
+		if strings.Contains(joined, "xhigh") {
+			t.Errorf("cloning mutated the SOURCE profile member %q: %q", m.Role, joined)
+		}
+		if m.Session != "earlier" {
+			t.Errorf("cloning re-pinned the SOURCE member %q to %q", m.Role, m.Session)
+		}
+	}
+}

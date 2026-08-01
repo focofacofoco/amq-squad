@@ -42,7 +42,10 @@ func validateEffortOverrideKeys(overrides map[string]string, selected map[string
 		return nil
 	}
 	sort.Strings(unknown)
-	return fmt.Errorf("--effort names role(s) not selected by --roles: %s", strings.Join(unknown, ", "))
+	// Source-neutral wording (#597 guard 4). Under --from-profile the selected
+	// roster comes from the clone and no --roles flag was ever passed, so
+	// naming --roles sent the operator to a flag they had not used.
+	return fmt.Errorf("--effort names role(s) not in the selected roster: %s", strings.Join(unknown, ", "))
 }
 
 func effortArgsForBinary(binary, effort string) ([]string, error) {
