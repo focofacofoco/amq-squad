@@ -136,6 +136,23 @@ func TestReceiptCorruptionKeepsStablePrefixAndAddsRecovery(t *testing.T) {
 	}
 }
 
+func TestReceiptMergeCorruptionSurfacesSharedRecovery(t *testing.T) {
+	current := baseReceipt613()
+	current.MessageID = "2026-08-02T15-00-00Z_current"
+	incoming := baseReceipt613()
+	incoming.MessageID = "2026-08-02T15-00-01Z_incoming"
+	_, err := mergeDeliveryReceipt(current, incoming)
+	if err == nil {
+		t.Fatal("conflicting receipt message ids unexpectedly merged")
+	}
+	if !strings.HasPrefix(err.Error(), "receipt_corrupt: attempt "+incoming.AttemptID+" maps to conflicting message ids") {
+		t.Fatalf("production merge lost stable receipt prefix/detail: %v", err)
+	}
+	if !strings.Contains(err.Error(), "; remedy: "+receiptCorruptRecovery) {
+		t.Fatalf("production merge did not surface the shared receipt recovery: %v", err)
+	}
+}
+
 // The receipt_corrupt prefix is consumed outside this package. Every producer
 // must go through receiptCorruptf so new refusal paths cannot lose either the
 // stable prefix or the shared recovery suffix.
