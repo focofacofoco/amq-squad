@@ -92,8 +92,8 @@ func TestRunStartEffortStillRefusesRolesInNeitherSource(t *testing.T) {
 	if detail == "" {
 		t.Fatal("an --effort key naming a role in neither --roles nor the cloned roster must still be refused")
 	}
-	if !strings.Contains(detail, "ctoo") {
-		t.Errorf("refusal must name the unknown role, got: %s", detail)
+	if !strings.Contains(detail, "ctoo") || !strings.Contains(detail, "--from-profile") {
+		t.Errorf("refusal must name the unknown role AND the real selection source, got: %s", detail)
 	}
 
 	// And the pre-existing --roles path is untouched.

@@ -350,7 +350,11 @@ func validateRunStartFreshEffort(project, rolesRaw, fromProfile, binaryRaw, effo
 		}
 	}
 	if !specialSelection {
-		if err := validateEffortOverrideKeys(efforts, selected); err != nil {
+		source := "--roles"
+		if strings.TrimSpace(fromProfile) != "" {
+			source = "the roster cloned from --from-profile"
+		}
+		if err := validateEffortOverrideKeys(efforts, selected, source); err != nil {
 			return err
 		}
 	}
