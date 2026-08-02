@@ -18,7 +18,7 @@ import "fmt"
 // needs the identical accepted render.
 //
 // Persisting the accepted preview per role is the real fix and it belongs with
-// the other preparation-surface work in #597, because it has to be declared in
+// the other preparation-surface work in #609, because it has to be declared in
 // the preparation proposal's MutationPaths and covered by the transaction's
 // rollback. What is fixed HERE is the lie: the row now states everything that
 // is actually known, and names a remedy the CLI can actually perform.
@@ -27,10 +27,10 @@ import "fmt"
 //
 // It deliberately does NOT promise a diff. Re-running preparation is an action
 // that exists today and does resolve the drift; the field-level comparison
-// arrives with the persisted preview in #597. A remedy that overstates what the
+// arrives with the persisted preview in #609. A remedy that overstates what the
 // tool can do is the defect this row is being fixed for, so it must not be
 // reintroduced in the fix text itself.
-const preparedBootstrapDriftFix = "re-run preparation for this exact namespace and accept it again (`amq-squad run start ... --prepare`); a field-level accepted-vs-generated diff is not available yet because the accepted preview is not persisted (#597)"
+const preparedBootstrapDriftFix = "re-run preparation for this exact namespace and accept it again (`amq-squad run start ... --prepare`); a field-level accepted-vs-generated diff is not available yet because the accepted preview is not persisted (#609)"
 
 // preparedBootstrapDriftEvidence states everything known about a bootstrap
 // digest mismatch at the moment it is detected.

@@ -44,7 +44,7 @@ func TestPreparedBootstrapDriftFixPromisesOnlyWhatExists(t *testing.T) {
 	}
 	// It must be explicit that the diff is not available, and say where it is
 	// coming from, so the gap is tracked rather than merely unmentioned.
-	for _, want := range []string{"not available", "#597"} {
+	for _, want := range []string{"not available", "#609"} {
 		if !strings.Contains(preparedBootstrapDriftFix, want) {
 			t.Errorf("fix text does not disclose the missing diff capability (%q missing): %s", want, preparedBootstrapDriftFix)
 		}
