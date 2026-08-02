@@ -42,8 +42,8 @@ var memberDiffFields = []struct {
 	{"model", func(m team.Member) string { return m.Model }},
 	{"cwd", func(m team.Member) string { return m.CWD }},
 	{"actor_mode", func(m team.Member) string { return m.ActorMode }},
-	{"claude_args", func(m team.Member) string { return strings.Join(m.ClaudeArgs, " ") }},
-	{"codex_args", func(m team.Member) string { return strings.Join(m.CodexArgs, " ") }},
+	{"claude_args", func(m team.Member) string { return displayMemberArgs(m.ClaudeArgs) }},
+	{"codex_args", func(m team.Member) string { return displayMemberArgs(m.CodexArgs) }},
 }
 
 // memberFieldChanges returns only the fields that actually differ. An update
@@ -63,6 +63,29 @@ func memberFieldChanges(before, after team.Member) []memberFieldChange {
 		})
 	}
 	return changes
+}
+
+// displayMemberArgs renders native argv so that token boundaries are visible.
+//
+// A plain strings.Join is ambiguous in a way that silently loses edits: the
+// two-token ["--settings", "/a b/x.json"] and the three-token
+// ["--settings", "/a", "b/x.json"] join to the identical string, so replacing
+// one with the other compares equal and the field disappears from the diff
+// entirely. The operator sees "no field would change" for a real change, with
+// exit 0 and well-formed output — the same silent-wrong-answer class as
+// capturing the before-member too late.
+//
+// Quoting each token per shell rules keeps genuinely different argv genuinely
+// different, and has the side benefit that the rendered value is pasteable.
+func displayMemberArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
 }
 
 func displayMemberFieldValue(v string) string {

@@ -195,3 +195,32 @@ func TestMemberFieldChangesUnsetRendering(t *testing.T) {
 		t.Errorf("cleared field rendered as %q, want %q", changes[0].After, memberFieldUnset)
 	}
 }
+
+// TestMemberArgsDiffPreservesArgvBoundaries covers the ambiguity a peer probe
+// surfaced: joining argv with spaces makes a one-token arg containing a space
+// indistinguishable from two separate tokens. Before this fix the two members
+// below compared EQUAL, so a real edit produced an empty diff and the preview
+// told the operator nothing would change.
+func TestMemberArgsDiffPreservesArgvBoundaries(t *testing.T) {
+	before := team.Member{Role: "qa", Binary: "claude", ClaudeArgs: []string{"--settings", "/a b/x.json"}}
+	after := team.Member{Role: "qa", Binary: "claude", ClaudeArgs: []string{"--settings", "/a", "b/x.json"}}
+	changes := memberFieldChanges(before, after)
+	if len(changes) != 1 {
+		t.Fatalf("argv boundary change produced %d changes, want 1: %+v", len(changes), changes)
+	}
+	if changes[0].Before == changes[0].After {
+		t.Fatalf("argv boundary change rendered identically on both sides: %+v", changes[0])
+	}
+	if !strings.Contains(changes[0].Before, "'/a b/x.json'") {
+		t.Errorf("space-bearing token was not quoted, so its boundary is invisible: %q", changes[0].Before)
+	}
+}
+
+// TestMemberArgsDiffStillReportsNoChangeForIdenticalArgv is the other half:
+// quoting must not make equal argv look different.
+func TestMemberArgsDiffStillReportsNoChangeForIdenticalArgv(t *testing.T) {
+	m := team.Member{Role: "qa", Binary: "codex", CodexArgs: []string{"-c", "model_reasoning_effort=high"}}
+	if changes := memberFieldChanges(m, m); len(changes) != 0 {
+		t.Fatalf("identical argv reported as changed: %+v", changes)
+	}
+}
