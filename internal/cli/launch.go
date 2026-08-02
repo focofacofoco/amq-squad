@@ -1457,12 +1457,16 @@ func launchBootstrapPrompt(rec launch.Record, agentDir, teamHome string, prepare
 	if project == "" {
 		project = strings.TrimSpace(rec.CWD)
 	}
+	roster, err := acceptedRenderRoster(prepared)
+	if err != nil {
+		return "", err
+	}
 	return preparedBootstrap(
 		project,
 		squadnamespace.NormalizeProfile(rec.TeamProfile),
 		rec.Session,
 		prepared.Binding,
-		acceptedRenderRoster(prepared),
+		roster,
 		prepared.Member,
 		acceptedRunContext{
 			Version:  prepared.Manifest.Environment.BinaryVersion,
@@ -1511,19 +1515,30 @@ func stagedRenderIsForked(prepared *preparedLaunchRecordContext, role string) bo
 // explicitly accepted (proved by
 // TestPreparedRunMixedSessionRosterIsExactAcrossDefaultAndNamedProfiles).
 //
-// Note what that means for error handling: this function no longer has a failure
-// mode to propagate or swallow. The earlier version returned an error, which was
-// an improvement over silently returning the un-narrowed roster, but the better
-// answer was to stop asking a question that could fail. A total function beats a
-// correct error path.
-func acceptedRenderRoster(prepared *preparedLaunchRecordContext) team.Team {
+// The remaining error is deliberately narrow and means something different from
+// the one it replaced. A staged role missing from the narrowed Team is NORMAL
+// (it belongs to another session). An INITIAL role missing is corruption: the
+// accepted manifest names a member the launch context cannot supply, so the
+// render could not reproduce the accepted digest even if it tried. That refuses
+// loudly rather than rendering a quietly short roster, because a silently
+// missing peer produces a prompt that looks fine and routes to nobody.
+func acceptedRenderRoster(prepared *preparedLaunchRecordContext) (team.Team, error) {
 	roster := prepared.Team
+	present := make(map[string]bool, len(roster.Members))
 	initial := make([]team.Member, 0, len(roster.Members))
 	for _, member := range roster.Members {
 		if containsRole(prepared.Manifest.InitialRoster, member.Role) {
+			present[member.Role] = true
 			initial = append(initial, member)
 		}
 	}
+	for _, role := range prepared.Manifest.InitialRoster {
+		if !present[role] {
+			return team.Team{}, fmt.Errorf(
+				"accepted initial roster names role %q, absent from the prepared launch context;"+
+					" the accepted preview cannot be reproduced", role)
+		}
+	}
 	roster.Members = initial
-	return roster
+	return roster, nil
 }

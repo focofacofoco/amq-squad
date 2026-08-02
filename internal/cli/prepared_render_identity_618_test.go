@@ -701,7 +701,10 @@ func TestCrossSessionStagedRoleDoesNotBlockInitialRender(t *testing.T) {
 		},
 	}
 
-	roster := acceptedRenderRoster(prepared)
+	roster, err := acceptedRenderRoster(prepared)
+	if err != nil {
+		t.Fatalf("cross-session staged role must not block an initial render: %v", err)
+	}
 
 	if got := len(roster.Members); got != 1 {
 		t.Fatalf("accepted render roster has %d members, want exactly the accepted initial roster [cto]", got)
@@ -716,5 +719,32 @@ func TestCrossSessionStagedRoleDoesNotBlockInitialRender(t *testing.T) {
 		if member.Role == "qa" {
 			t.Fatalf("staged role qa leaked into the initial render roster")
 		}
+	}
+}
+
+// TestAcceptedInitialRoleMissingFromContextRefuses pins the OTHER half of the
+// distinction. A staged role absent from the narrowed Team is normal -- it
+// belongs to another session. An INITIAL role absent is corruption: the accepted
+// manifest names a member the launch context cannot supply, so the accepted
+// digest could not be reproduced even in principle. Refusing loudly beats
+// rendering a quietly short roster, because a prompt missing a peer looks
+// perfectly well-formed and routes to nobody.
+func TestAcceptedInitialRoleMissingFromContextRefuses(t *testing.T) {
+	prepared := &preparedLaunchRecordContext{
+		Manifest: preparedRunManifest{
+			InitialRoster: []string{"cto", "senior-dev"},
+			StagedRoster:  []string{"qa"},
+		},
+		Team: team.Team{
+			Lead: "cto",
+			Members: []team.Member{
+				{Role: "cto", Handle: "cto", Binary: "claude", Session: "focus"},
+			},
+		},
+	}
+	if _, err := acceptedRenderRoster(prepared); err == nil {
+		t.Fatal("an accepted initial role absent from the launch context must refuse, not render short")
+	} else if !strings.Contains(err.Error(), "senior-dev") {
+		t.Fatalf("refusal must name the missing role, got: %v", err)
 	}
 }
