@@ -941,8 +941,9 @@ func markDeliverySendResult(receipt *deliveryReceiptData, out []byte, sendErr er
 // request before attempting a write. Anything else — a timeout, a signal, an
 // unparseable failure mid-commit — stays ambiguous, because it is.
 //
-// The exit-code-with-text-fallback shape mirrors isCollectWatchTimeout, which
-// already classifies an AMQ outcome this way.
+// Exit-code classification mirrors isCollectWatchTimeout, MINUS its text
+// fallback — which that predicate can afford and this one cannot, for the
+// reason given below.
 func amqRefusedSendFailClosed(err error) bool {
 	if err == nil {
 		return false

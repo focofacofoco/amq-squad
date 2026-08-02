@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,13 +52,27 @@ func TestFailClosedSendProducesDefiniteFailedReceipt(t *testing.T) {
 				AttemptID: "attempt-589",
 				Consumers: []deliveryConsumerState{{Consumer: "cto", State: deliveryStateAmbiguousUnknown}},
 			}
-			markDeliverySendResult(receipt, []byte("refusing send: root is not the pinned base root\n"), exitCodeErr(t, tc.code))
+			sendErr := exitCodeErr(t, tc.code)
+			markDeliverySendResult(receipt, []byte("refusing send: root is not the pinned base root\n"), sendErr)
 
+			// The COMPLETE projection is asserted, not just the headline state.
+			// A half-updated receipt — definite aggregate state with consumers
+			// still reading ambiguous, or a missing evidence source — is its own
+			// misleading artifact, which is the defect class #589 is about.
 			if receipt.DeliveryState != deliveryStateFailed {
 				t.Fatalf("DeliveryState = %q, want %q — a refused send has a definite outcome", receipt.DeliveryState, deliveryStateFailed)
 			}
+			if receipt.Status != deliveryStateFailed {
+				t.Errorf("Status = %q, want %q", receipt.Status, deliveryStateFailed)
+			}
+			if receipt.EvidenceSource != "amq_refused_send" {
+				t.Errorf("EvidenceSource = %q, want %q", receipt.EvidenceSource, "amq_refused_send")
+			}
+			if receipt.Detail != sendErr.Error() {
+				t.Errorf("Detail = %q, want the send error %q", receipt.Detail, sendErr.Error())
+			}
 			if receipt.FailedAt == nil {
-				t.Error("FailedAt is nil; a definite failure must carry its timestamp")
+				t.Fatal("FailedAt is nil; a definite failure must carry its timestamp")
 			}
 			if receipt.MessageID != "" {
 				t.Errorf("MessageID = %q, want empty", receipt.MessageID)
@@ -65,6 +80,17 @@ func TestFailClosedSendProducesDefiniteFailedReceipt(t *testing.T) {
 			for _, consumer := range receipt.Consumers {
 				if consumer.State != deliveryStateFailed {
 					t.Errorf("consumer %s state = %q, want %q", consumer.Consumer, consumer.State, deliveryStateFailed)
+				}
+				if consumer.Stage != deliveryStateFailed {
+					t.Errorf("consumer %s stage = %q, want %q", consumer.Consumer, consumer.Stage, deliveryStateFailed)
+				}
+				if consumer.FailedAt == nil {
+					t.Fatalf("consumer %s FailedAt is nil", consumer.Consumer)
+				}
+				// Aggregate and per-consumer timestamps must be the SAME instant,
+				// so a reader cannot infer an ordering that never happened.
+				if !consumer.FailedAt.Equal(*receipt.FailedAt) {
+					t.Errorf("consumer %s FailedAt = %s, want the aggregate %s", consumer.Consumer, consumer.FailedAt, receipt.FailedAt)
 				}
 			}
 		})
@@ -164,5 +190,150 @@ func TestSuccessfulSendUnaffected(t *testing.T) {
 	}
 	if receipt.MessageID == "" {
 		t.Error("MessageID was not parsed from a successful send")
+	}
+}
+
+// TestPositiveEvidenceOutranksRefusalExit is the precedence guard. The
+// classifier lives behind committed-evidence validation and message-id parsing,
+// and it must STAY there: if a future AMQ path ever returned 2 or 5 after
+// exposing a stable id or a committed path, reordering the classifier ahead of
+// that evidence would report a delivered message as definitely failed. That is
+// the duplicate-send hazard arriving from the opposite direction.
+//
+// TestSuccessfulSendUnaffected cannot catch this — it passes a nil error, so a
+// reordering would keep it green.
+func TestPositiveEvidenceOutranksRefusalExit(t *testing.T) {
+	for _, code := range []int{amqExitRefused, amqExitUsageRejected} {
+		t.Run(fmt.Sprintf("parseable id survives exit %d", code), func(t *testing.T) {
+			receipt := &deliveryReceiptData{
+				AttemptID: "attempt-589",
+				Consumers: []deliveryConsumerState{{Consumer: "cto"}},
+			}
+			markDeliverySendResult(receipt,
+				[]byte("Sent 2026-08-02T00-00-00.000Z_pid1_abcdef to cto\n"),
+				exitCodeErr(t, code))
+
+			if receipt.MessageID != "2026-08-02T00-00-00.000Z_pid1_abcdef" {
+				t.Fatalf("MessageID = %q; a parsed id must not be discarded because of the exit code", receipt.MessageID)
+			}
+			if receipt.DeliveryState != deliveryStateDeliveredNotDrained {
+				t.Fatalf("DeliveryState = %q, want %q — a message with a stable id was NOT refused", receipt.DeliveryState, deliveryStateDeliveredNotDrained)
+			}
+			if receipt.FailedAt != nil {
+				t.Error("FailedAt was set for a send that produced a stable message id")
+			}
+		})
+	}
+}
+
+// TestCommittedEvidenceOutranksRefusalExit is the same precedence guard for the
+// committed-delivery path, which sits even earlier. A message whose commit AMQ
+// has already reported must never be downgraded to a definite failure.
+func TestCommittedEvidenceOutranksRefusalExit(t *testing.T) {
+	for _, code := range []int{amqExitRefused, amqExitUsageRejected} {
+		t.Run(fmt.Sprintf("committed evidence survives exit %d", code), func(t *testing.T) {
+			const msgID = "2026-08-02T00-00-00.000Z_pid1_abcdef"
+			root := t.TempDir()
+			receipt := &deliveryReceiptData{
+				AttemptID:  "attempt-589",
+				Root:       root,
+				Recipient:  "cto",
+				Recipients: []string{"cto"},
+				Target:     deliveryReceiptTarget{Handle: "cto"},
+				Consumers:  []deliveryConsumerState{{Consumer: "cto"}},
+			}
+			finalPath := filepath.Join(root, "agents", "cto", "inbox", "new", msgID+".md")
+			committed := fmt.Sprintf("message %s has a committed delivery; committed at %s, but durability is indeterminate: fsync failed", msgID, finalPath)
+
+			// Wrap a REAL *exec.ExitError so the refusal signal and the committed
+			// signal are in genuine conflict. Without a typed exit in the chain the
+			// test would prove nothing about precedence.
+			sendErr := fmt.Errorf("%s: %w", committed, exitCodeErr(t, code))
+			markDeliverySendResult(receipt, nil, sendErr)
+
+			if receipt.DeliveryState != deliveryStateCommittedIndeterminate {
+				t.Fatalf("DeliveryState = %q, want %q — committed evidence must outrank the exit code", receipt.DeliveryState, deliveryStateCommittedIndeterminate)
+			}
+			if receipt.MessageID != msgID {
+				t.Errorf("MessageID = %q, want %q", receipt.MessageID, msgID)
+			}
+			if receipt.FailedAt != nil {
+				t.Error("FailedAt was set for a committed delivery")
+			}
+		})
+	}
+}
+
+// TestOwnedDurableSendPersistsDefiniteFailure closes the gap the peer review
+// named: every test above calls markDeliverySendResult directly, so all of them
+// could pass while the durable boundary or persistence wiring regressed. This
+// one drives runOwnedDurableSend — the single amq-squad-owned send boundary —
+// with a production-shaped wrapped *exec.ExitError, then reads the receipt back
+// FROM DISK.
+func TestOwnedDurableSendPersistsDefiniteFailure(t *testing.T) {
+	project := t.TempDir()
+	root := filepath.Join(project, ".agent-mail", "v2-27-0")
+
+	previousRun := runAMQCommand
+	t.Cleanup(func() { runAMQCommand = previousRun })
+	runAMQCommand = func(amqCommandRequest) ([]byte, error) {
+		// Shaped like the real failure: AMQ's refusal text on the output, and a
+		// wrapped *exec.ExitError carrying the refusal code.
+		return []byte("refusing send: root is not the pinned base root\n"),
+			fmt.Errorf("amq send: %w", exitCodeErr(t, amqExitRefused))
+	}
+
+	_, receipt, err := runOwnedDurableSend(
+		durableSendOptions{ProjectDir: project, Profile: "squad", Session: "v2-27-0", Kind: "amq_send"},
+		amqCommandRequest{Dir: project, Arg: []string{
+			"send", "--root", root, "--me", "amq-dev-1", "--to", "cto",
+			"--thread", "p2p/amq-dev-1__cto", "--kind", "status", "--subject", "s", "--body", "b",
+		}},
+	)
+	if err == nil {
+		t.Fatal("runOwnedDurableSend returned nil error for a refused send")
+	}
+	if receipt == nil {
+		t.Fatal("runOwnedDurableSend returned no receipt")
+	}
+	if !receipt.AMQInvoked {
+		t.Error("AMQInvoked = false; AMQ was invoked and refused, which is different from never invoking it")
+	}
+	if receipt.DeliveryState != deliveryStateFailed {
+		t.Fatalf("in-memory DeliveryState = %q, want %q", receipt.DeliveryState, deliveryStateFailed)
+	}
+
+	// The persisted artifact is what an operator reads during forensics, and is
+	// the thing #589 was actually about.
+	path := filepath.Join(deliveryReceiptDir(project, "squad", "v2-27-0"), receipt.AttemptID+".json")
+	persisted, readErr := readDeliveryReceipt(path)
+	if readErr != nil {
+		t.Fatalf("reading persisted receipt at %s: %v", path, readErr)
+	}
+	if persisted.DeliveryState != deliveryStateFailed {
+		t.Fatalf("persisted DeliveryState = %q, want %q", persisted.DeliveryState, deliveryStateFailed)
+	}
+	if persisted.Status != deliveryStateFailed {
+		t.Errorf("persisted Status = %q, want %q", persisted.Status, deliveryStateFailed)
+	}
+	if persisted.EvidenceSource != "amq_refused_send" {
+		t.Errorf("persisted EvidenceSource = %q, want %q", persisted.EvidenceSource, "amq_refused_send")
+	}
+	if persisted.MessageID != "" {
+		t.Errorf("persisted MessageID = %q, want empty", persisted.MessageID)
+	}
+	if persisted.FailedAt == nil {
+		t.Fatal("persisted FailedAt is nil")
+	}
+	if !persisted.AMQInvoked {
+		t.Error("persisted AMQInvoked = false")
+	}
+	for _, consumer := range persisted.Consumers {
+		if consumer.State != deliveryStateFailed {
+			t.Errorf("persisted consumer %s state = %q, want %q", consumer.Consumer, consumer.State, deliveryStateFailed)
+		}
+		if consumer.FailedAt == nil {
+			t.Errorf("persisted consumer %s FailedAt is nil", consumer.Consumer)
+		}
 	}
 }
