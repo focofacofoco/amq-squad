@@ -224,3 +224,75 @@ func TestMemberArgsDiffStillReportsNoChangeForIdenticalArgv(t *testing.T) {
 		t.Fatalf("identical argv reported as changed: %+v", changes)
 	}
 }
+
+// TestMemberUpdateDryRunEndToEndArgvBoundaries drives the argv-boundary case
+// through the real command with real flag parsing, which is what the peer
+// review asked for. parseAgentArgs is quote-aware, so `-c 'a b'` is two tokens
+// and `-c a b` is three: the operator can produce this collision with ordinary
+// quoting, without doing anything unusual.
+func TestMemberUpdateDryRunEndToEndArgvBoundaries(t *testing.T) {
+	seedTeam(t, team.Team{
+		Members: []team.Member{
+			{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-616a", CodexArgs: []string{"-c", "a b"}},
+		},
+	})
+	stdout, _, err := captureOutput(t, func() error {
+		return runTeamMember([]string{"update", "cto", "--codex-args", "-c a b", "--dry-run"})
+	})
+	if err != nil {
+		t.Fatalf("member update --dry-run: %v", err)
+	}
+	if strings.Contains(stdout, "already in the requested state") {
+		t.Fatalf("splitting one argv token into two was reported as no change:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "codex_args") {
+		t.Errorf("argv change did not surface as codex_args:\n%s", stdout)
+	}
+}
+
+// TestMemberUpdateDryRunJSONDistinguishesArgvBoundaries: the review required
+// the JSON envelope to distinguish the edit too. A script gating on `changes`
+// would otherwise see an empty array and conclude the update was a no-op.
+func TestMemberUpdateDryRunJSONDistinguishesArgvBoundaries(t *testing.T) {
+	seedTeam(t, team.Team{
+		Members: []team.Member{
+			{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-616b", CodexArgs: []string{"-c", "a b"}},
+		},
+	})
+	stdout, _, err := captureOutput(t, func() error {
+		return runTeamMember([]string{"update", "cto", "--codex-args", "-c a b", "--dry-run", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("member update --dry-run --json: %v", err)
+	}
+	var envelope struct {
+		Data struct {
+			Changes []memberFieldChange `json:"changes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v\n%s", err, stdout)
+	}
+	if len(envelope.Data.Changes) != 1 {
+		t.Fatalf("JSON changes = %+v, want the argv edit to appear", envelope.Data.Changes)
+	}
+	got := envelope.Data.Changes[0]
+	if got.Before == got.After {
+		t.Errorf("JSON renders both sides identically, so a script cannot see the edit: %+v", got)
+	}
+}
+
+// TestMemberArgsDiffHandlesEmptyTokens covers the other half of the review's
+// "spaces/empty tokens" requirement. An empty argv token is invisible under a
+// plain join and must not silently vanish.
+func TestMemberArgsDiffHandlesEmptyTokens(t *testing.T) {
+	before := team.Member{Role: "qa", Binary: "codex", CodexArgs: []string{"-c", ""}}
+	after := team.Member{Role: "qa", Binary: "codex", CodexArgs: []string{"-c"}}
+	changes := memberFieldChanges(before, after)
+	if len(changes) != 1 {
+		t.Fatalf("dropping an empty token produced %d changes, want 1: %+v", len(changes), changes)
+	}
+	if changes[0].Before == changes[0].After {
+		t.Fatalf("empty token is invisible on both sides: %+v", changes[0])
+	}
+}
