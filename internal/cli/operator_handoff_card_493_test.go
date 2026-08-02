@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/omriariav/amq-squad/v2/internal/launch"
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
@@ -54,8 +57,8 @@ func TestLiveLaunchPrintsOperatorHandoffCard(t *testing.T) {
 		"YOU ARE THE OPERATOR FOR THIS SESSION",
 		"Handle   user",
 		"the lead pane (role cto)",
-		"amq-squad operator answer --session issue-493 --gate <topic> --approved|--denied",
-		"amq-squad status --session issue-493",
+		"--gate release --approved",
+		"--session issue-493",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("launch stdout missing %q; full output:\n%s", want, stdout)
@@ -122,8 +125,8 @@ func TestLiveLaunchCardWarnsWhenNotificationsOff(t *testing.T) {
 	}
 	for _, want := range []string{
 		"ALERTS   OFF — NOTHING WILL INTERRUPT YOU.",
-		"amq-squad next --session issue-493n",
-		"amq-squad monitor --session issue-493n",
+		"amq-squad next --project",
+		"amq-squad monitor --project",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("notifications-off launch missing %q; stdout:\n%s", want, stdout)
@@ -210,21 +213,153 @@ func TestOperatorHandoffCardWhenOperatorGatesDisabled(t *testing.T) {
 	}
 }
 
-// TestOperatorHandoffCommandsScopeToProfileAndSession keeps the printed
-// commands copy-pasteable. A non-default profile must appear, and the default
-// profile must not be spelled out (matching the adjacent launch "next:" line).
-func TestOperatorHandoffCommandsScopeToProfileAndSession(t *testing.T) {
-	next, monitor, answer, status := operatorHandoffCommands("squad-v2-27-0", "v2-27-0")
-	for _, got := range []string{next, monitor, answer, status} {
-		if !strings.Contains(got, "--profile squad-v2-27-0") {
-			t.Errorf("%q missing --profile", got)
-		}
-		if !strings.Contains(got, "--session v2-27-0") {
-			t.Errorf("%q missing --session", got)
+// TestOperatorHandoffScopeCarriesProjectProfileSession keeps the printed
+// commands runnable from wherever the operator's shell actually is. --project
+// is not optional: `up --project DIR` chdirs the launching process and restores
+// it, so the operator's shell never moved into the project.
+func TestOperatorHandoffScopeCarriesProjectProfileSession(t *testing.T) {
+	scope := operatorHandoffScope("/repo/team", "squad-v2-27-0", "v2-27-0")
+	for _, want := range []string{"--project /repo/team", "--profile squad-v2-27-0", "--session v2-27-0"} {
+		if !strings.Contains(scope, want) {
+			t.Errorf("scope %q missing %q", scope, want)
 		}
 	}
-	defaultNext, _, _, _ := operatorHandoffCommands(team.DefaultProfile, "v2-27-0")
-	if strings.Contains(defaultNext, "--profile") {
-		t.Errorf("default profile should stay implicit, got %q", defaultNext)
+	if strings.Contains(operatorHandoffScope("/repo/team", team.DefaultProfile, "s"), "--profile") {
+		t.Error("default profile should stay implicit")
+	}
+}
+
+// TestOperatorHandoffCommandsAreShellSafe is the fix for the reviewer's second
+// blocker. The card presents these under "What to run", so every displayed
+// command must survive being pasted into a shell. The previous form,
+// `--gate <topic> --approved|--denied [--reason TEXT]`, is usage notation: in a
+// shell `<topic>` redirects stdin, `|` starts a pipeline, and the brackets are
+// glob syntax. A hurried paste would fail or do something unintended.
+func TestOperatorHandoffCommandsAreShellSafe(t *testing.T) {
+	card := newOperatorHandoffCard(handoffCardTeam("s", operatorEnabled(team.OperatorInteractionLeadPane, nil)), "p", "s")
+	commands := map[string]string{
+		"next":    card.NextCommand,
+		"monitor": card.MonitorCommand,
+		"approve": card.ApproveCommand,
+		"deny":    card.DenyCommand,
+		"status":  card.StatusCommand,
+	}
+	for name, cmd := range commands {
+		for _, meta := range []string{"<", ">", "|", "[", "]"} {
+			if strings.Contains(cmd, meta) {
+				t.Errorf("%s command contains shell metacharacter %q and is not safe to paste: %s", name, meta, cmd)
+			}
+		}
+	}
+	if !strings.Contains(card.ApproveCommand, "--approved") || strings.Contains(card.ApproveCommand, "--denied") {
+		t.Errorf("approve command is not an unambiguous approval: %s", card.ApproveCommand)
+	}
+	if !strings.Contains(card.DenyCommand, "--denied") || strings.Contains(card.DenyCommand, "--approved") {
+		t.Errorf("deny command is not an unambiguous denial: %s", card.DenyCommand)
+	}
+}
+
+// TestRenderedCardHasNoUsageNotation guards the whole rendered "What to run"
+// block, not just the fields, so a future edit cannot reintroduce placeholder
+// syntax into a line the card tells the operator to run.
+func TestRenderedCardHasNoUsageNotation(t *testing.T) {
+	var sb strings.Builder
+	writeOperatorHandoffCard(&sb, newOperatorHandoffCard(handoffCardTeam("s", operatorEnabled(team.OperatorInteractionLeadPane, nil)), "p", "s"))
+	for _, line := range strings.Split(sb.String(), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "amq-squad ") {
+			continue
+		}
+		for _, meta := range []string{"<", ">", "|", "[", "]"} {
+			if strings.Contains(trimmed, meta) {
+				t.Errorf("displayed command line carries %q: %s", meta, trimmed)
+			}
+		}
+	}
+}
+
+// TestResumeExecPrintsOperatorHandoffCard is the fix for the reviewer's first
+// blocker. `resume --exec` is a launch route that never passes through
+// executeTeamLaunch, so wiring the card there covered `up` and left resume
+// silent — while the PR claimed every launch path ends with the card. An
+// operator resuming a session is in exactly the position the card exists for.
+func TestResumeExecPrintsOperatorHandoffCard(t *testing.T) {
+	dir := t.TempDir()
+	base := setupFakeAMQSessionRoots(t)
+	resumeChdir(t, dir)
+	if err := team.Write(dir, team.Team{
+		Workstream: "issue-493r", Orchestrated: true, Lead: "cto", ExecutionMode: executionModeProjectLead,
+		Operator: operatorEnabled(team.OperatorInteractionLeadPane, nil),
+		Members: []team.Member{
+			{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-493r"},
+			{Role: "qa", Binary: "codex", Handle: "qa", Session: "issue-493r"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"cto", "qa"} {
+		writeMemberLaunchRecord(t, base, "issue-493r", role, launch.Record{
+			CWD: dir, Binary: "codex", Role: role, Handle: role, Session: "issue-493r", StartedAt: time.Now(),
+		})
+	}
+	oldRun, oldVerify, oldReady := runTmuxLaunchPlanForResume, verifyResumeExecLaunchRecordsNow, verifyResumeLeadReadyNow
+	runTmuxLaunchPlanForResume = func(tmuxLaunchPlan) error { return nil }
+	verifyResumeLeadReadyNow = func(resumeExecLaunchCheck) error { return nil }
+	verifyResumeExecLaunchRecordsNow = func(checks []resumeExecLaunchCheck, _ map[string]resumeExecLaunchSnapshot) []resumeExecLaunchResult {
+		out := make([]resumeExecLaunchResult, 0, len(checks))
+		for _, check := range checks {
+			out = append(out, resumeExecLaunchResult{Check: check, State: resumeExecLaunchStateLaunched})
+		}
+		return out
+	}
+	t.Cleanup(func() {
+		runTmuxLaunchPlanForResume, verifyResumeExecLaunchRecordsNow, verifyResumeLeadReadyNow = oldRun, oldVerify, oldReady
+	})
+
+	stdout, stderr, err := captureOutput(t, func() error {
+		return runResume([]string{"--exec", "--stagger", "0"})
+	})
+	if err != nil {
+		t.Fatalf("resume --exec: %v\nstderr:\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "YOU ARE THE OPERATOR FOR THIS SESSION") {
+		t.Fatalf("resume --exec did not print the handoff card; stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "--session issue-493r") {
+		t.Errorf("resume card is not scoped to the resumed session; stdout:\n%s", stdout)
+	}
+}
+
+// TestLaunchCardProjectFlagSurvivesRemoteProject is the fix for the reviewer's
+// third blocker, driven end to end. `up --project DIR` runs from a DIFFERENT
+// cwd, and runInProject restores that cwd before the operator's shell sees the
+// card. Every printed command must therefore name the project explicitly.
+func TestLaunchCardProjectFlagSurvivesRemoteProject(t *testing.T) {
+	useFakeBackend(t)
+	setupFakeAMQSessionRoots(t)
+	project := seedTeam(t, handoffCardTeam("issue-493p", operatorEnabled(team.OperatorInteractionLeadPane, nil)))
+	// Move the operator's shell somewhere that is NOT the project, which is the
+	// whole point of --project.
+	elsewhere := t.TempDir()
+	chdir(t, elsewhere)
+
+	stdout, _, err := captureOutput(t, func() error {
+		return runUp([]string{"--project", project, "--terminal", "fake", "--session", "issue-493p", "--no-bootstrap"})
+	})
+	if err != nil {
+		t.Fatalf("up --project: %v", err)
+	}
+	if !strings.Contains(stdout, "YOU ARE THE OPERATOR FOR THIS SESSION") {
+		t.Fatalf("remote-project launch printed no card; stdout:\n%s", stdout)
+	}
+	// The card prints the project as the launcher resolved it. On macOS the
+	// temp dir arrives via a /var -> /private/var symlink, so compare canonical
+	// paths rather than spellings — the #618 lesson, applied to a test.
+	wantProject, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "--project "+shellQuote(wantProject)) {
+		t.Errorf("card commands omit the resolved --project %q; from cwd %q they would resolve against the wrong team.\nstdout:\n%s", wantProject, elsewhere, stdout)
 	}
 }

@@ -47,10 +47,12 @@ type operatorHandoffCard struct {
 	SinkTypes            []string
 	PollRequired         bool
 
-	NextCommand    string
-	MonitorCommand string
-	AnswerCommand  string
-	StatusCommand  string
+	NextCommand     string
+	MonitorCommand  string
+	ApproveCommand  string
+	DenyCommand     string
+	StatusCommand   string
+	ExampleGateName string
 
 	DisabledReason string
 }
@@ -61,16 +63,18 @@ type operatorHandoffCard struct {
 // roster that actually launched.
 func newOperatorHandoffCard(t team.Team, profile, session string) operatorHandoffCard {
 	d := operatorDeliveryForTeam(t)
-	next, monitor, answer, status := operatorHandoffCommands(profile, session)
+	scope := operatorHandoffScope(t.Project, profile, session)
 	card := operatorHandoffCard{
-		Enabled:        d.Enabled,
-		Handle:         d.Handle,
-		Profile:        strings.TrimSpace(profile),
-		Session:        strings.TrimSpace(session),
-		NextCommand:    next,
-		MonitorCommand: monitor,
-		AnswerCommand:  answer,
-		StatusCommand:  status,
+		Enabled:         d.Enabled,
+		Handle:          d.Handle,
+		Profile:         strings.TrimSpace(profile),
+		Session:         strings.TrimSpace(session),
+		NextCommand:     "amq-squad next" + scope,
+		MonitorCommand:  "amq-squad monitor" + scope,
+		ApproveCommand:  "amq-squad operator answer" + scope + " --gate " + operatorHandoffExampleGate + " --approved --reason " + shellQuote("looks right"),
+		DenyCommand:     "amq-squad operator answer" + scope + " --gate " + operatorHandoffExampleGate + " --denied --reason " + shellQuote("not yet"),
+		StatusCommand:   "amq-squad status" + scope,
+		ExampleGateName: operatorHandoffExampleGate,
 	}
 	if !d.Enabled {
 		card.DisabledReason = d.Reason
@@ -84,21 +88,32 @@ func newOperatorHandoffCard(t team.Team, profile, session string) operatorHandof
 	return card
 }
 
-// operatorHandoffCommands builds the four scoped commands the card prints.
-// They carry --profile/--session but deliberately not --project: the card is
-// printed into the terminal the operator launched from, whose cwd is already
-// the project, and the adjacent "next:" launch notice scopes itself the same
-// way. Keeping both consistent matters more than portability to another cwd.
-func operatorHandoffCommands(profile, session string) (next, monitor, answer, status string) {
-	scope := commandProfileArg(profile)
+// operatorHandoffExampleGate is the placeholder gate topic in the printed
+// answer commands. It is a bare word, not <topic>: the card presents these
+// under "What to run", and angle brackets are shell redirection. A reader who
+// copies the line must get a command that runs, even if they then have to swap
+// the topic for a real one.
+const operatorHandoffExampleGate = "release"
+
+// operatorHandoffScope builds the namespace flags shared by every command the
+// card prints.
+//
+// --project is included and resolved. An earlier version omitted it on the
+// assumption that the operator's shell is already sitting in the project, which
+// is false for `up --project DIR`: runInProject chdirs the launching PROCESS and
+// restores the old directory on return, so the operator's shell never moved.
+// Without --project those commands would silently resolve against whatever
+// directory the operator happened to be in.
+func operatorHandoffScope(project, profile, session string) string {
+	scope := ""
+	if p := strings.TrimSpace(project); p != "" {
+		scope += " --project " + shellQuote(p)
+	}
+	scope += commandProfileArg(profile)
 	if s := strings.TrimSpace(session); s != "" {
 		scope += " --session " + shellQuote(s)
 	}
-	next = "amq-squad next" + scope
-	monitor = "amq-squad monitor" + scope
-	answer = "amq-squad operator answer" + scope + " --gate <topic> --approved|--denied [--reason TEXT]"
-	status = "amq-squad status" + scope
-	return next, monitor, answer, status
+	return scope
 }
 
 // operatorConsoleSurface names where this operator's attention is supposed to
@@ -186,7 +201,9 @@ func writeOperatorHandoffCard(w io.Writer, c operatorHandoffCard) {
 	fmt.Fprintf(w, " What to run:\n")
 	fmt.Fprintf(w, "   # what needs you right now\n   %s\n", c.NextCommand)
 	fmt.Fprintf(w, "   # block until something needs you\n   %s\n", c.MonitorCommand)
-	fmt.Fprintf(w, "   # answer a gate\n   %s\n", c.AnswerCommand)
+	fmt.Fprintf(w, "   # answer a gate — swap %s for the topic named in the gate message\n", c.ExampleGateName)
+	fmt.Fprintf(w, "   %s\n", c.ApproveCommand)
+	fmt.Fprintf(w, "   %s\n", c.DenyCommand)
 	fmt.Fprintf(w, "   # the board\n   %s\n", c.StatusCommand)
 	fmt.Fprintf(w, "%s\n\n", operatorHandoffCardRule)
 }
