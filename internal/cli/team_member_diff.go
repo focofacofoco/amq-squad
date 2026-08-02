@@ -36,12 +36,12 @@ var memberDiffFields = []struct {
 	name  string
 	value func(team.Member) string
 }{
-	{"binary", func(m team.Member) string { return m.Binary }},
-	{"handle", func(m team.Member) string { return m.Handle }},
-	{"session", func(m team.Member) string { return m.Session }},
-	{"model", func(m team.Member) string { return m.Model }},
-	{"cwd", func(m team.Member) string { return m.CWD }},
-	{"actor_mode", func(m team.Member) string { return m.ActorMode }},
+	{"binary", func(m team.Member) string { return displayMemberScalar(m.Binary) }},
+	{"handle", func(m team.Member) string { return displayMemberScalar(m.Handle) }},
+	{"session", func(m team.Member) string { return displayMemberScalar(m.Session) }},
+	{"model", func(m team.Member) string { return displayMemberScalar(m.Model) }},
+	{"cwd", func(m team.Member) string { return displayMemberScalar(m.CWD) }},
+	{"actor_mode", func(m team.Member) string { return displayMemberScalar(m.ActorMode) }},
 	{"claude_args", func(m team.Member) string { return displayMemberArgs(m.ClaudeArgs) }},
 	{"codex_args", func(m team.Member) string { return displayMemberArgs(m.CodexArgs) }},
 }
@@ -86,6 +86,26 @@ func displayMemberArgs(args []string) string {
 		quoted = append(quoted, shellQuote(arg))
 	}
 	return strings.Join(quoted, " ")
+}
+
+// displayMemberScalar renders a single-valued field so that no set value can
+// ever render as the unset sentinel.
+//
+// Returning set values verbatim was not injective: memberFieldUnset is the
+// literal "(unset)", so a genuine edit from model="" to model="(unset)" rendered
+// Before and After identically. The preview reported one change and hid what it
+// was — the same silent-wrong-answer class as collapsing argv boundaries, one
+// field over.
+//
+// shellQuote supplies the injectivity for free and matches how argv is already
+// rendered: ordinary values stay bare (gpt-5), and anything containing shell
+// metacharacters — parentheses included — comes back quoted, so a literal
+// "(unset)" displays as '(unset)' and cannot be confused with the sentinel.
+func displayMemberScalar(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return ""
+	}
+	return shellQuote(v)
 }
 
 func displayMemberFieldValue(v string) string {

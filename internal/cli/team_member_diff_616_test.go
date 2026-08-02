@@ -296,3 +296,68 @@ func TestMemberArgsDiffHandlesEmptyTokens(t *testing.T) {
 		t.Fatalf("empty token is invisible on both sides: %+v", changes[0])
 	}
 }
+
+// TestMemberUpdateDryRunUnsetSentinelIsInjective covers the collision a peer
+// probe surfaced: memberFieldUnset is the literal "(unset)", so before this fix
+// a genuine edit from model="" to model="(unset)" rendered Before and After
+// identically. The preview reported one change while hiding what changed — the
+// same silent-wrong-answer class as the argv collapse, one field over.
+func TestMemberUpdateDryRunUnsetSentinelIsInjective(t *testing.T) {
+	seedTeam(t, team.Team{
+		Members: []team.Member{
+			{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-616c"},
+		},
+	})
+	stdout, _, err := captureOutput(t, func() error {
+		return runTeamMember([]string{"update", "cto", "--model", memberFieldUnset, "--dry-run"})
+	})
+	if err != nil {
+		t.Fatalf("member update --dry-run: %v", err)
+	}
+	if strings.Contains(stdout, "already in the requested state") {
+		t.Fatalf("setting model to the literal %q was reported as no change:\n%s", memberFieldUnset, stdout)
+	}
+	// The set value must be visibly distinct from the unset sentinel, and the
+	// real value must survive into the output.
+	if !strings.Contains(stdout, "'"+memberFieldUnset+"'") {
+		t.Errorf("literal %q was not rendered distinctly from the unset sentinel:\n%s", memberFieldUnset, stdout)
+	}
+}
+
+// TestMemberUpdateDryRunJSONUnsetSentinelIsInjective is the same collision in
+// the envelope. A script comparing before and after would otherwise see two
+// equal strings and conclude nothing changed.
+func TestMemberUpdateDryRunJSONUnsetSentinelIsInjective(t *testing.T) {
+	seedTeam(t, team.Team{
+		Members: []team.Member{
+			{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-616d"},
+		},
+	})
+	stdout, _, err := captureOutput(t, func() error {
+		return runTeamMember([]string{"update", "cto", "--model", memberFieldUnset, "--dry-run", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("member update --dry-run --json: %v", err)
+	}
+	var envelope struct {
+		Data struct {
+			Changes []memberFieldChange `json:"changes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
+		t.Fatalf("unmarshal envelope: %v\n%s", err, stdout)
+	}
+	if len(envelope.Data.Changes) != 1 {
+		t.Fatalf("changes = %+v, want the model edit to appear", envelope.Data.Changes)
+	}
+	got := envelope.Data.Changes[0]
+	if got.Before == got.After {
+		t.Fatalf("JSON renders both sides identically, so a script cannot see the edit: %+v", got)
+	}
+	if got.Before != memberFieldUnset {
+		t.Errorf("Before = %q, want the unset sentinel %q", got.Before, memberFieldUnset)
+	}
+	if !strings.Contains(got.After, memberFieldUnset) {
+		t.Errorf("After = %q, want it to preserve the actual value %q", got.After, memberFieldUnset)
+	}
+}
