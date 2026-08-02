@@ -85,6 +85,8 @@ func TestGenuinelyAmbiguousSendStaysAmbiguous(t *testing.T) {
 		{"unclassified nonzero exit", "", exitCodeErr(t, 1)},
 		{"crash mid-commit", "partial output", exitCodeErr(t, 137)},
 		{"plain wrapped failure", "", errors.New("amq send: connection reset")},
+		// Refusal WORDING without the typed error stays ambiguous by design.
+		{"refusal wording without typed error", "refusing send: bad root", errors.New("amq send: refusing send: bad root")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			receipt := &deliveryReceiptData{
@@ -102,29 +104,31 @@ func TestGenuinelyAmbiguousSendStaysAmbiguous(t *testing.T) {
 	}
 }
 
-// TestFailClosedClassifierRequiresPositiveEvidence pins the predicate directly,
-// including the wrapped-error fallback. The fallback requires AMQ's stable
-// refusal marker rather than loose failure words, so an ambiguous outcome that
-// merely mentions failing is never misread as definite.
+// TestFailClosedClassifierRequiresPositiveEvidence pins the predicate directly.
+// Only a typed *exec.ExitError may downgrade an unknown outcome to a definite
+// failure: refusal WORDING is not enough, because this predicate narrows
+// caution and a false definite failure is the duplicate-send hazard.
 func TestFailClosedClassifierRequiresPositiveEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		out  string
 		err  error
 		want bool
 	}{
-		{"nil error", "", nil, false},
-		{"refusal exit code", "", exitCodeErr(t, amqExitRefused), true},
-		{"usage exit code", "", exitCodeErr(t, amqExitUsageRejected), true},
-		{"refusal marker in wrapped error", "", fmt.Errorf("amq send: %s root is not pinned", amqRefusalMarker), true},
-		{"refusal marker in output", amqRefusalMarker + " bad root", errors.New("exit status 5"), true},
-		{"generic failure wording", "", errors.New("send failed: could not reach the queue"), false},
-		{"the word refusing without the marker", "", errors.New("server is refusing connections"), false},
-		{"unrelated nonzero exit", "", exitCodeErr(t, 1), false},
+		{"nil error", nil, false},
+		{"refusal exit code", exitCodeErr(t, amqExitRefused), true},
+		{"usage exit code", exitCodeErr(t, amqExitUsageRejected), true},
+		// Typed evidence only. These carry AMQ's refusal wording but lost the
+		// *exec.ExitError, so they must NOT downgrade to definite: a false
+		// definite failure is the duplicate-send hazard.
+		{"refusal wording in a wrapped error", errors.New("amq send: refusing send: root is not pinned"), false},
+		{"plain exit-status text", errors.New("exit status 5"), false},
+		{"generic failure wording", errors.New("send failed: could not reach the queue"), false},
+		{"unrelated nonzero exit", exitCodeErr(t, 1), false},
+		{"signal kill", exitCodeErr(t, 137), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := amqRefusedSendFailClosed([]byte(tc.out), tc.err); got != tc.want {
-				t.Errorf("amqRefusedSendFailClosed(%q, %v) = %t, want %t", tc.out, tc.err, got, tc.want)
+			if got := amqRefusedSendFailClosed(tc.err); got != tc.want {
+				t.Errorf("amqRefusedSendFailClosed(%v) = %t, want %t", tc.err, got, tc.want)
 			}
 		})
 	}

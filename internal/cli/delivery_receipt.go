@@ -885,15 +885,17 @@ func markDeliverySendResult(receipt *deliveryReceiptData, out []byte, sendErr er
 	receipt.MessageID = parseSentMessageID(string(out))
 	if receipt.MessageID == "" {
 		if sendErr != nil {
-			if amqRefusedSendFailClosed(out, sendErr) {
+			if amqRefusedSendFailClosed(sendErr) {
 				now := time.Now().UTC()
 				receipt.Status = deliveryStateFailed
 				receipt.DeliveryState = deliveryStateFailed
 				receipt.FailedAt = &now
 				receipt.Detail = sendErr.Error()
+				receipt.EvidenceSource = "amq_refused_send"
 				for i := range receipt.Consumers {
 					receipt.Consumers[i].State = deliveryStateFailed
 					receipt.Consumers[i].FailedAt = &now
+					receipt.Consumers[i].Stage = deliveryStateFailed
 				}
 				receipt.addStage(deliveryStateFailed, "AMQ refused the send fail-closed and wrote nothing; non-delivery is definite, so resolve the refusal cause rather than confirming delivery: "+sendErr.Error())
 				return
@@ -941,21 +943,26 @@ func markDeliverySendResult(receipt *deliveryReceiptData, out []byte, sendErr er
 //
 // The exit-code-with-text-fallback shape mirrors isCollectWatchTimeout, which
 // already classifies an AMQ outcome this way.
-func amqRefusedSendFailClosed(out []byte, err error) bool {
+func amqRefusedSendFailClosed(err error) bool {
 	if err == nil {
 		return false
 	}
+	// TYPED EVIDENCE ONLY. There is deliberately no error-text fallback here.
+	// Text matching is acceptable for widening caution, but this predicate
+	// NARROWS it — turning "unknown" into "definitely failed" — and a false
+	// definite failure is the duplicate-send hazard. A wrapped error that lost
+	// its *exec.ExitError therefore stays ambiguous, which is the safe answer
+	// rather than a missed optimization.
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		switch exitErr.ExitCode() {
-		case amqExitUsageRejected, amqExitRefused:
-			return true
-		}
+	if !errors.As(err, &exitErr) {
+		return false
 	}
-	// Fallback for wrapped errors that lost the ExitError. AMQ prefixes an
-	// outright refusal with a stable marker; require it rather than matching
-	// loose failure words, so an ambiguous outcome is never misread as definite.
-	return strings.Contains(strings.ToLower(string(out)+"\n"+err.Error()), amqRefusalMarker)
+	switch exitErr.ExitCode() {
+	case amqExitUsageRejected, amqExitRefused:
+		return true
+	default:
+		return false
+	}
 }
 
 const (
@@ -963,7 +970,6 @@ const (
 	// codes for requests rejected before any write.
 	amqExitUsageRejected = 2
 	amqExitRefused       = 5
-	amqRefusalMarker     = "refusing send:"
 )
 
 type committedDeliveryEvidence struct {
