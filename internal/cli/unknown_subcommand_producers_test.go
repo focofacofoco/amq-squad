@@ -111,7 +111,7 @@ func TestUnknownSubcommandProducersUseCanonicalHelper(t *testing.T) {
 			return true
 		})
 	}
-	if producerCalls != 29 {
-		t.Fatalf("canonical producer calls = %d, want 29; update the audited producer inventory intentionally", producerCalls)
+	if producerCalls != 30 {
+		t.Fatalf("canonical producer calls = %d, want 30; update the audited producer inventory intentionally", producerCalls)
 	}
 }
