@@ -151,6 +151,29 @@ func TestPaneCleanupRootAndBaseRootCanonicalExisting(t *testing.T) {
 		}
 	})
 
+	t.Run("prior generation recorded root as base root", func(t *testing.T) {
+		fx := newPaneCleanupFixture(t)
+		fx.req.Record.BaseRoot = fx.req.Record.Root
+		closeCalls := 0
+		prepared := PreparePaneCleanup(fx.req, cleanupDeps([]tmuxpane.PaneInspection{foundPane(fx.pane)}, nil, &closeCalls))
+		if !prepared.Ready {
+			t.Fatalf("historical BaseRoot == Root shape should prepare: %+v", prepared.Result)
+		}
+	})
+
+	t.Run("unrelated existing base root", func(t *testing.T) {
+		fx := newPaneCleanupFixture(t)
+		fx.req.Record.BaseRoot = t.TempDir()
+		closeCalls := 0
+		prepared := PreparePaneCleanup(fx.req, cleanupDeps([]tmuxpane.PaneInspection{foundPane(fx.pane)}, nil, &closeCalls))
+		if prepared.Ready || prepared.Result.Outcome != PaneCleanupPreservedIdentityUnconfirmed || closeCalls != 0 {
+			t.Fatalf("unrelated existing base root prepared=%t result=%+v close calls=%d", prepared.Ready, prepared.Result, closeCalls)
+		}
+		if len(prepared.Result.Mismatches) != 1 || prepared.Result.Mismatches[0].Field != "base_root" {
+			t.Fatalf("unrelated existing base root mismatches=%+v, want base_root only", prepared.Result.Mismatches)
+		}
+	})
+
 	for _, name := range []string{"missing root", "broken root symlink", "missing base root", "broken base symlink"} {
 		t.Run(name, func(t *testing.T) {
 			fx := newPaneCleanupFixture(t)
