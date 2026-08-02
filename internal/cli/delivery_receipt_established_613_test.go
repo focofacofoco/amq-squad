@@ -18,6 +18,18 @@ func baseReceipt613() deliveryReceiptData {
 		Kind:          "pane_send",
 		Sender:        "cto",
 		CreatedAt:     time.Date(2026, 8, 1, 18, 6, 56, 0, time.UTC),
+		// Every always-frozen field is populated here on purpose: a
+		// "mutate it to empty" case against an already-empty base would be
+		// empty-to-empty and pass vacuously, which is the failure mode the
+		// guard-on-the-guard exists to prevent in the first place.
+		Target:                   deliveryReceiptTarget{ProjectDir: "/p", Profile: "squad-v2-26-0", Session: "v2-26-0", Role: "amq-dev-1", Handle: "amq-dev-1"},
+		Root:                     "/p/.agent-mail/squad-v2-26-0/v2-26-0",
+		Path:                     "/p/.amq-squad/receipts/squad-v2-26-0/v2-26-0/a.json",
+		PreparedRunGeneration:    "gen-1",
+		PreparedRunLaunchAttempt: "attempt-1",
+		PreparedRunDigest:        "sha256:digest",
+		PreparedRunGoalNamespace: "squad-v2-26-0/v2-26-0",
+		PreparedRunGoalDigest:    "sha256:goal",
 	}
 }
 
@@ -101,6 +113,12 @@ func TestEstablishThenFreezeStillRefusesGenuineMutation(t *testing.T) {
 // later refactor, at which point corruption would merge silently. This asserts
 // the always-frozen set still refuses on any change INCLUDING from-empty, so the
 // two classes cannot be confused without a test failing.
+//
+// The table is COMPLETE, not representative: it names every field in the
+// always-frozen set. A representative subset would leave the unlisted fields
+// free to drift into establish-then-freeze unobserved, which is precisely the
+// drift this test claims to prevent. If a field is added to the always-frozen
+// set in the checks table, it must be added here too.
 func TestAlwaysFrozenFieldsRefuseEvenFromEmpty(t *testing.T) {
 	for _, tc := range []struct {
 		field  string
@@ -111,6 +129,14 @@ func TestAlwaysFrozenFieldsRefuseEvenFromEmpty(t *testing.T) {
 		{"kind", func(r deliveryReceiptData) deliveryReceiptData { r.Kind = ""; return r }},
 		{"sender", func(r deliveryReceiptData) deliveryReceiptData { r.Sender = ""; return r }},
 		{"created_at", func(r deliveryReceiptData) deliveryReceiptData { r.CreatedAt = time.Time{}; return r }},
+		{"target", func(r deliveryReceiptData) deliveryReceiptData { r.Target = deliveryReceiptTarget{}; return r }},
+		{"root", func(r deliveryReceiptData) deliveryReceiptData { r.Root = ""; return r }},
+		{"path", func(r deliveryReceiptData) deliveryReceiptData { r.Path = ""; return r }},
+		{"prepared_run_generation", func(r deliveryReceiptData) deliveryReceiptData { r.PreparedRunGeneration = ""; return r }},
+		{"prepared_run_launch_attempt", func(r deliveryReceiptData) deliveryReceiptData { r.PreparedRunLaunchAttempt = ""; return r }},
+		{"prepared_run_digest", func(r deliveryReceiptData) deliveryReceiptData { r.PreparedRunDigest = ""; return r }},
+		{"prepared_run_goal_namespace", func(r deliveryReceiptData) deliveryReceiptData { r.PreparedRunGoalNamespace = ""; return r }},
+		{"prepared_run_goal_digest", func(r deliveryReceiptData) deliveryReceiptData { r.PreparedRunGoalDigest = ""; return r }},
 	} {
 		t.Run(tc.field+"/to-empty", func(t *testing.T) {
 			if err := validateReceiptMergeIdentity(baseReceipt613(), tc.mutate(baseReceipt613())); err == nil {
@@ -119,4 +145,58 @@ func TestAlwaysFrozenFieldsRefuseEvenFromEmpty(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMergePreservesEstablishedFields is amq-dev-2's F1, turned into a
+// regression, and it tests the EFFECT rather than the predicate.
+//
+// The validator accepting establishment in both directions is only half a
+// contract. If the merge then writes the established value back to empty,
+// acceptance is LOSSY: the check says "this is establishment, not mutation" and
+// the merge un-establishes it. Establish-then-freeze has to mean frozen.
+//
+// This gap was unreachable before the validator was narrowed — strict equality
+// refused populated-vs-empty outright — so narrowing the check without widening
+// the carry-forward is what opened it. The two must move together, and this test
+// is what holds them together.
+//
+// Note deliberately what the other tests in this file CANNOT do: they call
+// validateReceiptMergeIdentity directly, so they prove refusal and acceptance
+// but never observe the merged receipt. A predicate test cannot catch a lossy
+// merge. That is why this one drives mergeDeliveryReceipt.
+func TestMergePreservesEstablishedFields(t *testing.T) {
+	established := func(r deliveryReceiptData) deliveryReceiptData {
+		r.Recipient = "amq-dev-1"
+		r.Recipients = []string{"amq-dev-1"}
+		r.Thread = "p2p/amq-dev-1__cto"
+		return r
+	}
+
+	t.Run("incoming-empty-keeps-established", func(t *testing.T) {
+		merged, err := mergeDeliveryReceipt(established(baseReceipt613()), baseReceipt613())
+		if err != nil {
+			t.Fatalf("merging an empty incoming over established values must not fail: %v", err)
+		}
+		if merged.Recipient != "amq-dev-1" {
+			t.Errorf("recipient was un-established by the merge: got %q", merged.Recipient)
+		}
+		if len(merged.Recipients) != 1 || merged.Recipients[0] != "amq-dev-1" {
+			t.Errorf("recipients was un-established by the merge: got %v", merged.Recipients)
+		}
+		if merged.Thread != "p2p/amq-dev-1__cto" {
+			t.Errorf("thread was un-established by the merge: got %q", merged.Thread)
+		}
+	})
+
+	t.Run("incoming-established-over-empty-current", func(t *testing.T) {
+		merged, err := mergeDeliveryReceipt(baseReceipt613(), established(baseReceipt613()))
+		if err != nil {
+			t.Fatalf("establishing values over an empty current must not fail: %v", err)
+		}
+		if merged.Recipient != "amq-dev-1" || merged.Thread != "p2p/amq-dev-1__cto" ||
+			len(merged.Recipients) != 1 {
+			t.Errorf("establishment in this direction must land: recipient=%q recipients=%v thread=%q",
+				merged.Recipient, merged.Recipients, merged.Thread)
+		}
+	})
 }

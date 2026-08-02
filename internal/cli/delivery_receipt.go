@@ -234,8 +234,26 @@ func mergeDeliveryReceipt(current, incoming deliveryReceiptData) (deliveryReceip
 		return deliveryReceiptData{}, fmt.Errorf("receipt_corrupt: attempt %s maps to conflicting reconciled message ids %s and %s", incoming.AttemptID, current.ReconciledMessageID, incoming.ReconciledMessageID)
 	}
 	merged.ReconciledMessageID = mergeSetOnce(current.ReconciledMessageID, incoming.ReconciledMessageID)
+	// ESTABLISH-THEN-FREEZE CARRY-FORWARD (#613). validateReceiptMergeIdentity
+	// accepts establishment in EITHER direction, because which side carries the
+	// derived value depends on read/write ordering. The merge must therefore
+	// preserve the established value when the incoming side is the empty one --
+	// otherwise acceptance is lossy: the validator says "fine, this is
+	// establishment", and the merge then writes the established value back to
+	// empty, which is the opposite of freezing it.
+	//
+	// Recipients already had this. recipient and thread did not, and before the
+	// validator was narrowed the gap was unreachable: strict equality refused
+	// populated-vs-empty outright. Narrowing the check without widening the
+	// carry-forward is what made it reachable, so the two must move together.
 	if len(merged.Recipients) == 0 {
 		merged.Recipients = append([]string(nil), current.Recipients...)
+	}
+	if merged.Recipient == "" {
+		merged.Recipient = current.Recipient
+	}
+	if merged.Thread == "" {
+		merged.Thread = current.Thread
 	}
 	consumerMap := map[string]deliveryConsumerState{}
 	for _, c := range current.Consumers {
