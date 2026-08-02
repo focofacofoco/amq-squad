@@ -1457,12 +1457,16 @@ func launchBootstrapPrompt(rec launch.Record, agentDir, teamHome string, prepare
 	if project == "" {
 		project = strings.TrimSpace(rec.CWD)
 	}
+	roster, err := acceptedRenderRoster(prepared, rec.Session)
+	if err != nil {
+		return "", err
+	}
 	return preparedBootstrap(
 		project,
 		squadnamespace.NormalizeProfile(rec.TeamProfile),
 		rec.Session,
 		prepared.Binding,
-		acceptedRenderRoster(prepared, rec.Session),
+		roster,
 		prepared.Member,
 		acceptedRunContext{
 			Version:  prepared.Manifest.Environment.BinaryVersion,
@@ -1507,13 +1511,20 @@ func stagedRenderIsForked(prepared *preparedLaunchRecordContext, role string) bo
 // Keep this in step with buildPreparedRunManifest; when they disagree the
 // symptom is a digest drift that reads like corruption rather than like a roster
 // disagreement, which is what made #618 expensive to find.
-func acceptedRenderRoster(prepared *preparedLaunchRecordContext, session string) team.Team {
+func acceptedRenderRoster(prepared *preparedLaunchRecordContext, session string) (team.Team, error) {
 	roster := prepared.Team
 	initial, _, err := partitionPreparedRunMembers(roster.Members, session, prepared.Manifest.StagedRoster)
 	if err != nil {
-		return roster
+		// Propagate rather than falling back to the un-narrowed roster. Returning
+		// `roster` here would silently render initial members against a roster
+		// still containing staged roles -- reproducing the exact divergence this
+		// function exists to prevent, and surfacing later as a digest-drift
+		// refusal that reads like corruption rather than like a roster
+		// disagreement. That failure mode is what made #618 expensive to find;
+		// a loud error at the point of failure is strictly better than a quiet
+		// wrong answer that fails closed somewhere else.
+		return team.Team{}, fmt.Errorf("partition accepted roster for %s: %w", session, err)
 	}
 	roster.Members = initial
-	return roster
+	return roster, nil
 }
-

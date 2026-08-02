@@ -12,33 +12,6 @@ import (
 	runwizard "github.com/omriariav/amq-squad/v2/internal/wizard"
 )
 
-// TestPrepareAndPaneRenderTheSameRoster is the #618 probe.
-//
-// THE DEFECT UNDER TEST. The bootstrap prompt's "Current team routing:" block is
-// produced by two different call sites that each choose the roster themselves,
-// with two different functions:
-//
-//	prepare-time  run_start_readiness.go:1148  bootstrapCurrentTeamForTeam(rec, tm)
-//	              where tm.Members was narrowed at :1571-1573 by
-//	              partitionPreparedRunMembers = filterMembersBySession MINUS staged roles
-//	pane-time     launch.go:699-700            bootstrapCurrentTeamWithRoster(rec, teamHome, true)
-//	              = team.ReadProfile + filterMembersBySession, staged roles NOT removed
-//
-// So with a non-empty staged roster the pane render contains members the prepare
-// render does not, the prompts differ, the digests differ, and every bootstrap
-// row drifts at once. That is #618's reported signature.
-//
-// WHY NOTHING IN THE EXISTING SUITE CATCHES THIS. Every current fixture renders
-// through preparedBootstrap on BOTH sides of its comparison, so it compares the
-// prepare path against itself. No test renders the pane path and the prepare
-// path and compares them. This test does exactly that, at the seam where they
-// diverge, so it does not have to reconstruct all of launch.go to be honest.
-//
-// A NOTE ON WHAT THIS IS NOT. An earlier version of this probe hid the prepared
-// manifest to flip bootstrapContextFor's exactSessionRoster. That was wrong:
-// all three prepared render paths overwrite CurrentTeam immediately after
-// calling bootstrapContextFor, so the os.Stat result never reaches the prompt
-// and that probe would have reported "insensitive" while proving nothing.
 // TestPrepareAndPaneRenderTheSameRoster is the #618 staged-roster regression.
 //
 // THE ORIGINAL DEFECT. The routing block was produced by two call sites that each

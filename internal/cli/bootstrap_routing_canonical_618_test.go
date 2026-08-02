@@ -8,39 +8,24 @@ import (
 	runwizard "github.com/omriariav/amq-squad/v2/internal/wizard"
 )
 
-// GUARD ON AN ADJACENT PROPERTY — NOT EVIDENCE FOR THIS PR'S FIX.
+// BEHAVIOURAL BISECT FOR THIS PR. Both tests here FAIL at this PR's parent and
+// PASS with the fix, reporting the real defect: every peer line reading
+// "send: unavailable (AMQ project identity is missing...)" in a squad where all
+// members share one checkout.
 //
-// Both tests in this file PASS at this PR's parent. They do not bisect anything
-// here and are not offered as evidence. They are kept because #622's fix DEPENDS
-// on the property they assert: rendering from accepted state is only correct if
-// the accepted state's routing block is itself correct, and that rests on the
-// path canonicalization #617/#621 landed. Nothing else asserts it.
+// They assert the routing PROPERTY rather than digest equality, deliberately.
+// Two identically-broken prompts would satisfy every digest-equality check in
+// this PR while shipping a squad that cannot coordinate, so equality is
+// necessary and not sufficient.
 //
-// A defensive samePath/sameLaunchTarget change originally shipped alongside
-// these. It was dropped: #621 canonicalizes the profile path and run start
-// restamps recorded member CWDs on ingestion, so both operands are already
-// canonical by the time the comparison runs and the defensive change had no
-// reachable failing state. Hardening with no failing test does not ship.
-//
-// TestAcceptedPromptNeverRendersUnroutablePeers asserts a property worth stating
-// independently of digest equality.
-//
-// The digest tests would catch a REGRESSION of this, but only as "the two
-// prompts differ". They would not catch both renders collapsing together, which
-// is a strictly worse outcome: agreeing prompts that both tell every agent its
-// peers are unreachable would pass a byte-equality test while shipping a squad
-// that cannot coordinate.
-//
-// The failure this pins is real and was live at f8b0911: samePath compared
-// rec.CWD (resolved via canonicalDir) against m.EffectiveCWD (raw from
-// team.json). Under a symlinked or differently-cased path those are two
-// spellings of one directory, the comparison failed, routeCommandFor took the
-// !sameCWD branch, project identity read as unknown, and EVERY peer line became
-// "send: unavailable (AMQ project identity is missing ...)".
-//
-// The fixture runs under t.TempDir(), which on macOS lives beneath the
-// /var -> /private/var symlink, so it exercises the resolved-vs-raw divergence
-// naturally rather than by contriving one.
+// HISTORY, because these comments previously said the opposite and a reader
+// deserves to know why. The canonicalization these tests cover was briefly
+// dropped from this PR on the strength of a bisect that measured the wrong tree
+// -- a git stash did not apply as assumed, so the run that "passed at the
+// parent" was almost certainly measuring the tree WITH the fix. A full-package
+// -race run failed both tests and reversed the decision; the fix is restored.
+// The lesson is worth more than the incident: a bisect conclusion is only as
+// good as the proof of which tree it measured.
 func TestAcceptedPromptNeverRendersUnroutablePeers(t *testing.T) {
 	dir := seedTeam(t, team.Team{
 		Orchestrated: true, Lead: "cto", ExecutionMode: executionModeProjectLead,
