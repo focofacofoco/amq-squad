@@ -124,8 +124,23 @@ func operatorConsoleSurface(t team.Team, d operatorDeliveryData) string {
 
 const operatorHandoffCardRule = "────────────────────────────────────────────────────────────────────"
 
+// operatorHandoffCardField renders one "Label   value" row. Every label shares
+// an 8-column field so continuation lines can align under the value with a
+// fixed 10-space indent; see operatorHandoffCardWrapIndent.
+func operatorHandoffCardField(w io.Writer, label, value string) {
+	fmt.Fprintf(w, " %-8s %s\n", label, value)
+}
+
+const operatorHandoffCardWrapIndent = "          "
+
 // writeOperatorHandoffCard renders the card. Callers must pass os.Stdout
 // directly rather than routing through quietNotice; see the type doc.
+//
+// Commands are never inlined after a label. They are long enough (a scoped
+// `operator answer` runs past 110 columns) that a label prefix guarantees an
+// ugly soft-wrap, and a soft-wrapped command is one a hurried operator
+// copy-pastes incorrectly. Each command gets its own full-width line under a
+// short comment instead.
 func writeOperatorHandoffCard(w io.Writer, c operatorHandoffCard) {
 	fmt.Fprintf(w, "\n%s\n", operatorHandoffCardRule)
 	if !c.Enabled {
@@ -134,17 +149,22 @@ func writeOperatorHandoffCard(w io.Writer, c operatorHandoffCard) {
 		if c.DisabledReason != "" {
 			fmt.Fprintf(w, " %s.\n", c.DisabledReason)
 		}
-		fmt.Fprintf(w, " No gate thread will be routed to a human for this session; the team\n")
-		fmt.Fprintf(w, " lead owns these decisions under the team rules.\n\n")
-		fmt.Fprintf(w, " Board    %s\n", c.StatusCommand)
+		fmt.Fprintf(w, " No gate thread will be routed to a human for this session; the\n")
+		fmt.Fprintf(w, " team lead owns these decisions under the team rules.\n\n")
+		fmt.Fprintf(w, " Check the board with:\n   %s\n", c.StatusCommand)
 		fmt.Fprintf(w, "%s\n\n", operatorHandoffCardRule)
 		return
 	}
 
 	fmt.Fprintf(w, " YOU ARE THE OPERATOR FOR THIS SESSION\n")
 	fmt.Fprintf(w, "%s\n", operatorHandoffCardRule)
-	fmt.Fprintf(w, " Handle   %s — messages addressed to %q are addressed to you.\n", c.Handle, c.Handle)
-	fmt.Fprintf(w, " Console  %s\n", c.Console)
+	operatorHandoffCardField(w, "Handle", fmt.Sprintf("%s — messages addressed to %q are for you.", c.Handle, c.Handle))
+	operatorHandoffCardField(w, "Console", c.Console)
+	operatorHandoffCardField(w, "Gates", fmt.Sprintf("durable gate/<topic> threads addressed to %q.", c.Handle))
+	fmt.Fprintf(w, "%sThey do not expire, and they do not resend.\n", operatorHandoffCardWrapIndent)
+	if c.Contract != "" {
+		fmt.Fprintf(w, "%sHow you answer: %s.\n", operatorHandoffCardWrapIndent, c.Contract)
+	}
 	fmt.Fprintln(w)
 
 	if c.NotificationsEnabled {
@@ -152,27 +172,22 @@ func writeOperatorHandoffCard(w io.Writer, c operatorHandoffCard) {
 		if len(c.SinkTypes) > 0 {
 			sinks = strings.Join(c.SinkTypes, ", ")
 		}
-		fmt.Fprintf(w, " ALERTS   ON via %s. The launch-host watcher will notify you.\n", sinks)
-		fmt.Fprintf(w, "          Health is reported by `amq-squad status`, not by this card.\n")
+		operatorHandoffCardField(w, "ALERTS", fmt.Sprintf("ON via %s.", sinks))
+		fmt.Fprintf(w, "%sThe launch-host watcher will notify you. Its health is\n", operatorHandoffCardWrapIndent)
+		fmt.Fprintf(w, "%sreported by `amq-squad status`, not by this card.\n", operatorHandoffCardWrapIndent)
 	} else {
-		fmt.Fprintf(w, " ALERTS   OFF — NOTHING WILL INTERRUPT YOU.\n")
-		fmt.Fprintf(w, "          No desktop, terminal, or sound alert is configured. If you\n")
-		fmt.Fprintf(w, "          walk away, the squad's questions wait silently until you\n")
-		fmt.Fprintf(w, "          come back and look. You have to poll:\n")
-		fmt.Fprintf(w, "            %s\n", c.NextCommand)
-		fmt.Fprintf(w, "            %s\n", c.MonitorCommand)
+		operatorHandoffCardField(w, "ALERTS", "OFF — NOTHING WILL INTERRUPT YOU.")
+		fmt.Fprintf(w, "%sNo alert of any kind is configured for this session. If you\n", operatorHandoffCardWrapIndent)
+		fmt.Fprintf(w, "%swalk away, the squad's questions wait silently until you come\n", operatorHandoffCardWrapIndent)
+		fmt.Fprintf(w, "%sback and look. Polling is on you.\n", operatorHandoffCardWrapIndent)
 	}
 	fmt.Fprintln(w)
 
-	fmt.Fprintf(w, " DECISIONS Gates arrive as durable gate/<topic> threads addressed to\n")
-	fmt.Fprintf(w, "          %q. They do not expire and they do not resend.\n", c.Handle)
-	if c.Contract != "" {
-		fmt.Fprintf(w, "          Contract: %s.\n", c.Contract)
-	}
-	fmt.Fprintf(w, "          Read:   %s\n", c.NextCommand)
-	fmt.Fprintf(w, "          Answer: %s\n", c.AnswerCommand)
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, " Board    %s\n", c.StatusCommand)
+	fmt.Fprintf(w, " What to run:\n")
+	fmt.Fprintf(w, "   # what needs you right now\n   %s\n", c.NextCommand)
+	fmt.Fprintf(w, "   # block until something needs you\n   %s\n", c.MonitorCommand)
+	fmt.Fprintf(w, "   # answer a gate\n   %s\n", c.AnswerCommand)
+	fmt.Fprintf(w, "   # the board\n   %s\n", c.StatusCommand)
 	fmt.Fprintf(w, "%s\n\n", operatorHandoffCardRule)
 }
 
