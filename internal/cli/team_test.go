@@ -362,10 +362,11 @@ func TestValidateTeamSymphonyRejectsSharedCodexCWD(t *testing.T) {
 	}
 }
 
-func TestEmitTeamCommandAppendsPerMemberArgsAfterTeamArgs(t *testing.T) {
+func TestEmitTeamCommandTransportsPerMemberArgsOnce(t *testing.T) {
 	// #111: member claude_args ride after the team-level binary_args so the
-	// member-specific value wins by position, and they appear BOTH in the
-	// persisted --claude-args= flag and the explicit child args after --.
+	// member-specific value wins by position. #510: the composed native args
+	// travel only through --claude-args; mirroring them after -- makes agent up
+	// merge the same singleton twice when tool-policy args split the prefix.
 	m := team.Member{
 		Role: "analyst", Binary: "claude", Handle: "analyst", Session: "s",
 		ClaudeArgs: []string{"--settings", ".claude/agent-overlays/analyst.json"},
@@ -378,19 +379,22 @@ func TestEmitTeamCommandAppendsPerMemberArgsAfterTeamArgs(t *testing.T) {
 	for _, want := range []string{
 		"agent up claude",
 		"--claude-args='--chrome --settings .claude/agent-overlays/analyst.json'",
-		"-- --permission-mode auto --chrome --settings .claude/agent-overlays/analyst.json",
+		"-- --permission-mode auto",
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("emitTeamCommand missing %q in: %s", want, cmd)
 		}
+	}
+	if strings.Count(cmd, "--chrome") != 1 || strings.Count(cmd, ".claude/agent-overlays/analyst.json") != 1 {
+		t.Fatalf("native args were rendered through more than one transport: %s", cmd)
 	}
 }
 
 func TestEmitTeamCommandComposesRecognizedSingletonOnce(t *testing.T) {
 	claude := team.Member{Role: "lead", Binary: "claude", Handle: "lead", ClaudeArgs: []string{"--effort", "max"}}
 	cmd := emitTeamCommand(emitTeamCommandInput{CWD: "/p", SquadBin: "amq-squad", TeamHome: "/p", Member: claude, Workstream: "s", TrustMode: trustModeSandboxed, BinaryArgs: map[string][]string{"claude": {"--effort", "low", "--effort", "high"}}})
-	if strings.Count(cmd, "--effort") != 2 { // once in --claude-args and once after the child -- boundary
-		t.Fatalf("expected one effective effort span in each mirrored argv surface: %s", cmd)
+	if strings.Count(cmd, "--effort") != 1 {
+		t.Fatalf("expected exactly one rendered effort span: %s", cmd)
 	}
 	if strings.Contains(cmd, "--effort low") || strings.Contains(cmd, "--effort high") || !strings.Contains(cmd, "--effort max") {
 		t.Fatalf("member precedence not applied: %s", cmd)
@@ -398,7 +402,7 @@ func TestEmitTeamCommandComposesRecognizedSingletonOnce(t *testing.T) {
 
 	codex := team.Member{Role: "worker", Binary: "codex", Handle: "worker", CodexArgs: []string{"-c", "model_reasoning_effort=max"}}
 	cmd = emitTeamCommand(emitTeamCommandInput{CWD: "/p", SquadBin: "amq-squad", TeamHome: "/p", Member: codex, Workstream: "s", TrustMode: trustModeSandboxed, BinaryArgs: map[string][]string{"codex": {"-c", "model_reasoning_effort=low", "-c", "model_reasoning_effort=high"}}})
-	if strings.Contains(cmd, "model_reasoning_effort=low") || strings.Contains(cmd, "model_reasoning_effort=high") || strings.Count(cmd, "model_reasoning_effort=max") != 2 {
+	if strings.Contains(cmd, "model_reasoning_effort=low") || strings.Contains(cmd, "model_reasoning_effort=high") || strings.Count(cmd, "model_reasoning_effort=max") != 1 {
 		t.Fatalf("codex config precedence not applied: %s", cmd)
 	}
 }
