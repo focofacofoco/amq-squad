@@ -125,6 +125,9 @@ func TestNextMissingTeamUsesSharedActionableError(t *testing.T) {
 }
 
 func TestReceiptCorruptionKeepsStablePrefixAndAddsRecovery(t *testing.T) {
+	if strings.ContainsRune(receiptCorruptRecovery, '%') {
+		t.Fatal("receipt recovery is spliced into a format string; % would become a formatting verb")
+	}
 	err := receiptCorruptf("committed-indeterminate evidence is incomplete for attempt %s", "attempt-1")
 	if !strings.HasPrefix(err.Error(), "receipt_corrupt: committed-indeterminate evidence is incomplete for attempt attempt-1") {
 		t.Fatalf("receipt error changed its stable parseable prefix/detail: %v", err)
@@ -154,8 +157,11 @@ func TestReceiptMergeCorruptionSurfacesSharedRecovery(t *testing.T) {
 }
 
 // The receipt_corrupt prefix is consumed outside this package. Every producer
-// must go through receiptCorruptf so new refusal paths cannot lose either the
-// stable prefix or the shared recovery suffix.
+// in internal/cli (the complete producer set today) must go through
+// receiptCorruptf so new refusal paths cannot lose either the stable prefix or
+// the shared recovery suffix. This audit is deliberately package-local and
+// non-recursive; a producer introduced in another package needs a matching
+// package audit rather than being silently assumed covered here.
 func TestNoRawReceiptCorruptErrorProducers(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
