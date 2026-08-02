@@ -315,11 +315,14 @@ func TestEmitTeamCommandAddsConfiguredBinaryArgs(t *testing.T) {
 	for _, want := range []string{
 		"agent up codex",
 		"--codex-args='--enable goals'",
-		"-- --dangerously-bypass-approvals-and-sandbox --enable goals",
+		"-- --dangerously-bypass-approvals-and-sandbox",
 	} {
 		if !strings.Contains(cmd, want) {
 			t.Errorf("emitTeamCommand missing %q in: %s", want, cmd)
 		}
+	}
+	if got := strings.Count(cmd, "--enable goals"); got != 1 {
+		t.Errorf("configured native arg rendered %d times, want exactly once: %s", got, cmd)
 	}
 }
 
@@ -631,7 +634,7 @@ func TestRunTeamShowMergesStoredAndRunBinaryArgs(t *testing.T) {
 		"# binary args: codex: --enable goals --profile fast",
 		"agent up codex",
 		"--codex-args='--enable goals --profile fast'",
-		"-- --dangerously-bypass-approvals-and-sandbox --enable goals --profile fast",
+		"-- --dangerously-bypass-approvals-and-sandbox",
 	} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("team show output missing %q in:\n%s", want, stdout)
