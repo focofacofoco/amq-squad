@@ -694,11 +694,7 @@ Examples:
 	}
 	rec.BootstrapExpectation = &expectation
 	if bootstrapAppended {
-		bootstrapContext := bootstrapContextFor(rec, agentDir, *teamHome)
-		if preparedLaunchContext != nil {
-			bootstrapContext.CurrentTeam, bootstrapContext.Warnings = bootstrapCurrentTeamWithRoster(rec, *teamHome, true)
-		}
-		prompt, err := buildBootstrapPrompt(bootstrapContext)
+		prompt, err := launchBootstrapPrompt(rec, agentDir, *teamHome, preparedLaunchContext)
 		if err != nil {
 			return err
 		}
@@ -1422,3 +1418,102 @@ func splitDashDash(args []string) ([]string, []string) {
 	}
 	return args, nil
 }
+
+// launchBootstrapPrompt renders the pane's bootstrap prompt.
+//
+// #618. A PREPARED launch renders through preparedBootstrap -- the SAME function
+// that produced the digest preparation accepted -- so the pane prompt and the
+// accepted preview are byte-identical by construction rather than by two call
+// sites agreeing to stay in step.
+//
+// They did not stay in step, and that is the bug. The old code here built the
+// context with bootstrapContextFor and overrode exactly ONE thing
+// (CurrentTeam+Warnings), while preparedBootstrap overrode FIVE (adding
+// Execution, ActorExecution, PlannerLead, MutationCapable) and derived rec.CWD
+// and rec.Root from ACCEPTED state instead of from the live process. So four
+// context fields plus two rendered record fields reached the pane prompt from
+// live state that preparation never saw:
+//
+//	accepted   rec.CWD = canonicalDir(member.EffectiveCWD(...))   resolved
+//	pane       rec.CWD = os.Getwd() (launch.go:339)               the operator's spelling
+//
+// Equalizing the COMPARISONS (samePath, #618 fix (a)) cannot reconcile prompts
+// that PRINT different bytes, because rendering and comparison are different
+// surfaces. The only durable fix is one renderer with one input set: the render
+// becomes a function of what was accepted, and live process state contributes
+// nothing to the prompt text.
+//
+// An UNPREPARED launch has no accepted state to render from and keeps the
+// original path unchanged. bootstrapContextFor's live-state reads are correct
+// there -- there is no accepted preview for them to contradict.
+func launchBootstrapPrompt(rec launch.Record, agentDir, teamHome string, prepared *preparedLaunchRecordContext) (string, error) {
+	if prepared == nil || stagedRenderIsForked(prepared, rec.Role) {
+		return buildBootstrapPrompt(bootstrapContextFor(rec, agentDir, teamHome))
+	}
+	project := strings.TrimSpace(rec.TeamHome)
+	if project == "" {
+		project = strings.TrimSpace(teamHome)
+	}
+	if project == "" {
+		project = strings.TrimSpace(rec.CWD)
+	}
+	return preparedBootstrap(
+		project,
+		squadnamespace.NormalizeProfile(rec.TeamProfile),
+		rec.Session,
+		prepared.Binding,
+		acceptedRenderRoster(prepared, rec.Session),
+		prepared.Member,
+		acceptedRunContext{
+			Version:  prepared.Manifest.Environment.BinaryVersion,
+			Topology: prepared.Manifest.Topology,
+		},
+	)
+}
+
+// stagedRenderIsForked marks the one case this fix deliberately does NOT change.
+//
+// #618's fix renders prepared launches from accepted state so the pane prompt
+// reproduces the accepted digest by construction. That is proven for INITIAL
+// roster members and is what the 2026-08-02 field hit exercised.
+//
+// STAGED members are excluded and keep the original bootstrapContextFor path.
+// Rendering them from accepted state alone does not currently reproduce their
+// accepted digest: the accepted preview pins a staged member's ActorMode to
+// review, the profile on disk carries no ActorMode (which resolves to
+// implementation), and the old path only agreed with the digest because it
+// projected the staged CLAIM -- runtime admission state that cannot exist at
+// preparation time and therefore must not be what a digest-checked body depends
+// on. Reconciling that is a design question about what the accepted preview
+// means for staged spawns, not a roster-selection bug, and it is forked rather
+// than guessed at under a release deadline.
+//
+// Excluding them is not a half-fix: it leaves the staged path EXACTLY as it
+// shipped, so this change cannot regress it.
+func stagedRenderIsForked(prepared *preparedLaunchRecordContext, role string) bool {
+	return containsRole(prepared.Manifest.StagedRoster, role)
+}
+
+// acceptedRenderRoster returns the roster the ACCEPTED digest for an INITIAL
+// member was computed with: partitionPreparedRunMembers, i.e. the session filter
+// MINUS staged roles (buildPreparedRunManifest).
+//
+// preparedLaunchRecordContext.Team does not already match that. Its initial
+// branch carries a merely session-filtered roster with staged roles still in it,
+// so passing it straight through would render initial members against a roster
+// containing members preparation excluded -- the original #618 divergence
+// reappearing one layer in.
+//
+// Keep this in step with buildPreparedRunManifest; when they disagree the
+// symptom is a digest drift that reads like corruption rather than like a roster
+// disagreement, which is what made #618 expensive to find.
+func acceptedRenderRoster(prepared *preparedLaunchRecordContext, session string) team.Team {
+	roster := prepared.Team
+	initial, _, err := partitionPreparedRunMembers(roster.Members, session, prepared.Manifest.StagedRoster)
+	if err != nil {
+		return roster
+	}
+	roster.Members = initial
+	return roster
+}
+
