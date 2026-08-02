@@ -1457,16 +1457,12 @@ func launchBootstrapPrompt(rec launch.Record, agentDir, teamHome string, prepare
 	if project == "" {
 		project = strings.TrimSpace(rec.CWD)
 	}
-	roster, err := acceptedRenderRoster(prepared, rec.Session)
-	if err != nil {
-		return "", err
-	}
 	return preparedBootstrap(
 		project,
 		squadnamespace.NormalizeProfile(rec.TeamProfile),
 		rec.Session,
 		prepared.Binding,
-		roster,
+		acceptedRenderRoster(prepared),
 		prepared.Member,
 		acceptedRunContext{
 			Version:  prepared.Manifest.Environment.BinaryVersion,
@@ -1499,32 +1495,35 @@ func stagedRenderIsForked(prepared *preparedLaunchRecordContext, role string) bo
 }
 
 // acceptedRenderRoster returns the roster the ACCEPTED digest for an INITIAL
-// member was computed with: partitionPreparedRunMembers, i.e. the session filter
-// MINUS staged roles (buildPreparedRunManifest).
+// member was computed with.
 //
-// preparedLaunchRecordContext.Team does not already match that. Its initial
-// branch carries a merely session-filtered roster with staged roles still in it,
-// so passing it straight through would render initial members against a roster
-// containing members preparation excluded -- the original #618 divergence
-// reappearing one layer in.
+// It REPRODUCES manifest.InitialRoster rather than re-deriving it. Preparation
+// already recorded exactly which roles it rendered as initial
+// (buildPreparedRunManifest), so reading that record is both simpler and
+// strictly more faithful than re-running the partition and hoping it lands on
+// the same answer from different inputs.
 //
-// Keep this in step with buildPreparedRunManifest; when they disagree the
-// symptom is a digest drift that reads like corruption rather than like a roster
-// disagreement, which is what made #618 expensive to find.
-func acceptedRenderRoster(prepared *preparedLaunchRecordContext, session string) (team.Team, error) {
+// Re-deriving was wrong, not merely redundant. partitionPreparedRunMembers
+// requires every role in the staged roster to be present in the members slice it
+// is handed, and preparedLaunchRecordContext.Team is already session-filtered --
+// so a staged role pinned to ANOTHER session is in manifest.StagedRoster but
+// absent from those members, and the partition refused a launch preparation had
+// explicitly accepted (proved by
+// TestPreparedRunMixedSessionRosterIsExactAcrossDefaultAndNamedProfiles).
+//
+// Note what that means for error handling: this function no longer has a failure
+// mode to propagate or swallow. The earlier version returned an error, which was
+// an improvement over silently returning the un-narrowed roster, but the better
+// answer was to stop asking a question that could fail. A total function beats a
+// correct error path.
+func acceptedRenderRoster(prepared *preparedLaunchRecordContext) team.Team {
 	roster := prepared.Team
-	initial, _, err := partitionPreparedRunMembers(roster.Members, session, prepared.Manifest.StagedRoster)
-	if err != nil {
-		// Propagate rather than falling back to the un-narrowed roster. Returning
-		// `roster` here would silently render initial members against a roster
-		// still containing staged roles -- reproducing the exact divergence this
-		// function exists to prevent, and surfacing later as a digest-drift
-		// refusal that reads like corruption rather than like a roster
-		// disagreement. That failure mode is what made #618 expensive to find;
-		// a loud error at the point of failure is strictly better than a quiet
-		// wrong answer that fails closed somewhere else.
-		return team.Team{}, fmt.Errorf("partition accepted roster for %s: %w", session, err)
+	initial := make([]team.Member, 0, len(roster.Members))
+	for _, member := range roster.Members {
+		if containsRole(prepared.Manifest.InitialRoster, member.Role) {
+			initial = append(initial, member)
+		}
 	}
 	roster.Members = initial
-	return roster, nil
+	return roster
 }

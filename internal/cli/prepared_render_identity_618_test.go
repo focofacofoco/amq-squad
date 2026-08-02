@@ -662,3 +662,59 @@ func stagedRolesForShape618(shape string) string {
 	}
 	return "qa"
 }
+
+// TestCrossSessionStagedRoleDoesNotBlockInitialRender is amq-dev-2's review
+// finding, turned into a regression.
+//
+// A profile may legitimately pin a staged role to a DIFFERENT session than the
+// one being launched; preparation accepts that shape deliberately (see
+// TestPreparedRunMixedSessionRosterIsExactAcrossDefaultAndNamedProfiles), and
+// preparedContextForLaunchRecord then hands the render a roster containing only
+// the ACTIVE session's members.
+//
+// An earlier version of acceptedRenderRoster re-derived the initial roster by
+// re-running partitionPreparedRunMembers over that already-filtered slice while
+// supplying the complete manifest.StagedRoster. The helper requires every staged
+// role to be present in the members it is given, so the cross-session staged
+// role -- correctly absent -- made it refuse, and a valid prepared launch failed
+// with "staged role %q has no complete profile member definition".
+//
+// Worth recording precisely because the intermediate state was WORSE than the
+// original: before that, the error was swallowed and the un-narrowed roster
+// returned (wrong roster, launch proceeds); propagating it turned a silent wrong
+// answer into a refused launch. The real fix was to stop re-deriving and read
+// manifest.InitialRoster, which preparation already recorded.
+func TestCrossSessionStagedRoleDoesNotBlockInitialRender(t *testing.T) {
+	const activeSession = "focus"
+	prepared := &preparedLaunchRecordContext{
+		Manifest: preparedRunManifest{
+			InitialRoster: []string{"cto"},
+			StagedRoster:  []string{"qa"},
+		},
+		// As preparedContextForLaunchRecord builds it: the cross-session staged
+		// member is already gone.
+		Team: team.Team{
+			Lead: "cto",
+			Members: []team.Member{
+				{Role: "cto", Handle: "cto", Binary: "claude", Session: activeSession},
+			},
+		},
+	}
+
+	roster := acceptedRenderRoster(prepared)
+
+	if got := len(roster.Members); got != 1 {
+		t.Fatalf("accepted render roster has %d members, want exactly the accepted initial roster [cto]", got)
+	}
+	if roster.Members[0].Role != "cto" {
+		t.Fatalf("accepted render roster = %q, want cto", roster.Members[0].Role)
+	}
+
+	// And the staged role must not be reintroduced: reproducing InitialRoster
+	// means the render sees what preparation accepted, no more and no less.
+	for _, member := range roster.Members {
+		if member.Role == "qa" {
+			t.Fatalf("staged role qa leaked into the initial render roster")
+		}
+	}
+}
