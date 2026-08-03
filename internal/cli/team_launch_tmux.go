@@ -824,7 +824,9 @@ func tmuxLaunchResult(panes []teamLaunchPane, paneIDs []string) (teamLaunchResul
 		if err != nil {
 			return teamLaunchResult{}, fmt.Errorf("tmux launch result for role %s: %w", pane.Role, err)
 		}
-		result.Panes = append(result.Panes, teamLaunchResultPane{Role: pane.Role, PaneID: paneID, WindowID: windowID})
+		result.Panes = append(result.Panes, teamLaunchResultPane{
+			Role: pane.Role, PaneID: paneID, WindowID: windowID, ChildCommand: pane.Command,
+		})
 	}
 	return result, nil
 }

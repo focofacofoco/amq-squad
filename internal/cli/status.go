@@ -390,8 +390,8 @@ func executeStatus(s statusExecution) error {
 	if s.JSON {
 		ns := squadnamespace.Resolve(t.Project, s.Profile, workstream)
 		conflict := namespaceConflictForProfileSession(t.Project, s.Profile, workstream)
-		exactStopScope := exactStopNamespaceScope{
-			Verb:            "stop",
+		exactDownScope := exactDownNamespaceScope{
+			Verb:            "down",
 			ProjectDir:      t.Project,
 			Profile:         s.Profile,
 			Session:         workstream,
@@ -404,10 +404,10 @@ func executeStatus(s statusExecution) error {
 		for i := range rows {
 			rows[i].Namespace = ns
 			decorateTerminalRuntimeCapabilities(&rows[i])
-			rows[i].Actions = disableNamespaceConflictActions(policyAwareMemberActionsForRow(t, s.Profile, workstream, rows[i]), conflict, exactStopScope)
+			rows[i].Actions = disableNamespaceConflictActions(policyAwareMemberActionsForRow(t, s.Profile, workstream, rows[i]), conflict, exactDownScope)
 		}
 		ctx := newSessionStatusContext(t, s.Profile, workstream, firstLiveTmuxSession(rows))
-		ctx.Actions = disableNamespaceConflictActions(ctx.Actions, conflict, exactStopScope)
+		ctx.Actions = disableNamespaceConflictActions(ctx.Actions, conflict, exactDownScope)
 		binding := goalBindingForStatus(ns, ctx, rows)
 		operatorView := statusOperatorForTeam(t, ns)
 		applyGoalBindingOpenBlockers(&operatorView, binding)

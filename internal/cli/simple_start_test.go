@@ -610,7 +610,18 @@ func TestSimpleStartRestoreComposesRecordedConversationWithoutBootstrap(t *testi
 	if len(plan.LaunchOptions.ComposedPanes) != 1 {
 		t.Fatalf("composed panes = %+v", plan.LaunchOptions.ComposedPanes)
 	}
-	command := plan.LaunchOptions.ComposedPanes[0].Command
+	backend, ok := teamLaunchBackends["tmux"].(*fakeBackend)
+	if !ok {
+		t.Fatalf("tmux test backend = %T, want fakeBackend", teamLaunchBackends["tmux"])
+	}
+	result, err := backend.LaunchWithResult(plan.SpawnTeam, plan.LaunchOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Panes) != 1 {
+		t.Fatalf("result panes = %+v", result.Panes)
+	}
+	command := result.Panes[0].ChildCommand
 	for _, want := range []string{"--conversation conv-ac14", "--no-bootstrap"} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("restore command %q missing %q", command, want)
@@ -619,9 +630,42 @@ func TestSimpleStartRestoreComposesRecordedConversationWithoutBootstrap(t *testi
 	if strings.Contains(command, "Read .amq-squad/team-rules.md") {
 		t.Fatalf("restore command replayed bootstrap: %s", command)
 	}
-	plan.LaunchOptions.ComposedPanes[0].Command = strings.ReplaceAll(command, " --conversation conv-ac14", "")
-	if err := validateSimpleStartRestoreCommands(plan); err == nil || !strings.Contains(err.Error(), "omits recorded conversation") {
+	if err := validateSimpleStartRestoreResultCommands(plan, result); err != nil {
+		t.Fatalf("valid result command rejected: %v", err)
+	}
+	result.Panes[0].ChildCommand = strings.ReplaceAll(command, " --conversation conv-ac14", "")
+	if err := validateSimpleStartRestoreResultCommands(plan, result); err == nil || !strings.Contains(err.Error(), "dispatched child command omits recorded conversation") {
 		t.Fatalf("missing-conversation validation = %v", err)
+	}
+}
+
+func TestRunStartRejectsRestoreResultThatDropsRecordedConversation(t *testing.T) {
+	f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex"})
+	agentDir := f.seedRecord(t, "dev", "dev", 4402, "%19", false, true)
+	rec, err := launch.Read(agentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Conversation = "conv-dropped"
+	if err := launch.Write(agentDir, rec); err != nil {
+		t.Fatal(err)
+	}
+	f.deps.Launch = func(_ team.Team, opts teamLaunchOptions) (teamLaunchResult, error) {
+		if len(opts.ComposedPanes) != 1 {
+			t.Fatalf("composed panes = %+v", opts.ComposedPanes)
+		}
+		command := strings.ReplaceAll(opts.ComposedPanes[0].Command, " --conversation conv-dropped", "")
+		return teamLaunchResult{Panes: []teamLaunchResultPane{{
+			Role: "dev", PaneID: "%20", WindowID: "@2", ChildCommand: command,
+		}}}, nil
+	}
+	var out bytes.Buffer
+	err = runStartWithDependencies(f.args("--yes"), f.deps, strings.NewReader(""), &out)
+	if err == nil || !strings.Contains(err.Error(), "dispatched child command omits recorded conversation") {
+		t.Fatalf("dropped-conversation start error = %v", err)
+	}
+	if strings.Contains(out.String(), "started ") {
+		t.Fatalf("failed restore reported started:\n%s", out.String())
 	}
 }
 

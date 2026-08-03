@@ -247,28 +247,29 @@ func spawnSessionNotifierProcess(project, profile, session, root, token string) 
 	return execNotificationWatcherProcess{p: cmd.Process}, nil
 }
 
-func stopSessionNotifier(project, profile, session string) error {
+func stopSessionNotifier(project, profile, session string) (bool, error) {
 	path := sessionNotifierRuntimePath(project, profile, session)
 	rec, err := readSessionNotifierRecord(path)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if strings.TrimSpace(rec.OwnerToken) == "" {
-		return nil
+	wasExpected := rec.Expected || strings.TrimSpace(rec.OwnerToken) != ""
+	if !wasExpected {
+		return false, nil
 	}
-	if sessionNotifierProcessMatches(rec) {
+	if strings.TrimSpace(rec.OwnerToken) != "" && sessionNotifierProcessMatches(rec) {
 		if err := notificationWatcherSignal(rec.PID, syscall.SIGTERM); err != nil {
-			return fmt.Errorf("stop session notifier pid %d: %w", rec.PID, err)
+			return wasExpected, fmt.Errorf("stop session notifier pid %d: %w", rec.PID, err)
 		}
 		deadline := sessionNotifierNow().Add(2 * time.Second)
 		for sessionNotifierPIDAlive(rec.PID) && sessionNotifierNow().Before(deadline) {
 			sessionNotifierSleep(20 * time.Millisecond)
 		}
 		if sessionNotifierPIDAlive(rec.PID) {
-			return fmt.Errorf("session notifier pid %d did not exit", rec.PID)
+			return wasExpected, fmt.Errorf("session notifier pid %d did not exit", rec.PID)
 		}
 	}
-	return flock.WithLock(sessionNotifierLockPath(project, profile, session), func() error {
+	err = flock.WithLock(sessionNotifierLockPath(project, profile, session), func() error {
 		current, err := readSessionNotifierRecord(path)
 		if err != nil {
 			return err
@@ -282,6 +283,7 @@ func stopSessionNotifier(project, profile, session string) error {
 		current.HeartbeatAt, current.LeaseExpiresAt = now, now
 		return writeSessionNotifierRecord(path, current)
 	})
+	return wasExpected, err
 }
 
 func runSessionNotifier(args []string) error {
@@ -329,6 +331,9 @@ func executeSessionNotifier(n sessionNotifierExecution) (returnErr error) {
 		return fmt.Errorf("session notifier refused non-canonical root %s (want %s)", n.Root, expectedRoot)
 	}
 	path := sessionNotifierRuntimePath(n.ProjectDir, n.Profile, n.Session)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create session notifier runtime directory: %w", err)
+	}
 	host, _ := os.Hostname()
 	now := n.Now().UTC()
 	rec := sessionNotifierRecord{
@@ -360,16 +365,30 @@ func executeSessionNotifier(n sessionNotifierExecution) (returnErr error) {
 		return err
 	}
 	defer watcher.Close()
-	// Snapshot before installing watches, then once more afterwards. Files in
-	// the first snapshot predate this notifier and must not wake anyone. Files
-	// appearing between the snapshots are arrivals during watcher setup, so
-	// catch them up explicitly; queued fsnotify events then dedupe through seen.
-	seen, err := snapshotSessionInboxMessages(n.Root)
+	// Snapshot before installing watches, then once more afterwards. A file
+	// already in inbox/new is still pending work and may have arrived while the
+	// notifier was down, so startup nudges it. This deliberately provides
+	// at-least-once delivery across notifier restarts: a crash before the agent
+	// drains the message may cause a duplicate wake. Within one process, seen
+	// still guarantees at most one successful nudge per message. The second
+	// snapshot closes the watcher-install race, and queued events dedupe through
+	// the same map.
+	pending, err := snapshotSessionInboxMessages(n.Root)
 	if err != nil {
 		return err
 	}
 	if err := addNotificationWatchTree(watcher, n.Root); err != nil {
 		return fmt.Errorf("watch canonical session root: %w", err)
+	}
+	seen := make(map[string]struct{}, len(pending))
+	for messagePath := range pending {
+		nudged, err := notifySessionInboxArrival(n.Root, n.Profile, n.Session, messagePath, seen, n.SendKeys)
+		if err != nil {
+			return fmt.Errorf("nudge pending inbox arrival during notifier startup: %w", err)
+		}
+		if nudged {
+			rec.LastNudgeAt, rec.LastError = n.Now().UTC(), ""
+		}
 	}
 	catchUp, err := snapshotSessionInboxMessages(n.Root)
 	if err != nil {
@@ -379,8 +398,12 @@ func executeSessionNotifier(n sessionNotifierExecution) (returnErr error) {
 		if _, existed := seen[messagePath]; existed {
 			continue
 		}
-		if _, err := notifySessionInboxArrival(n.Root, n.Profile, n.Session, messagePath, seen, n.SendKeys); err != nil {
+		nudged, err := notifySessionInboxArrival(n.Root, n.Profile, n.Session, messagePath, seen, n.SendKeys)
+		if err != nil {
 			return fmt.Errorf("nudge inbox arrival during notifier startup: %w", err)
+		}
+		if nudged {
+			rec.LastNudgeAt, rec.LastError = n.Now().UTC(), ""
 		}
 	}
 	heartbeat := time.NewTicker(n.Heartbeat)

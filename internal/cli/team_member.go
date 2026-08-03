@@ -12,7 +12,7 @@ import (
 
 var (
 	teamMemberLaunch = runResume
-	teamMemberStop   = runStop
+	teamMemberStop   = runDown
 )
 
 // runTeamMember dispatches `amq-squad team member <add|admit|replace|launch|control-continue|rm|list>`: runtime roster
@@ -807,8 +807,8 @@ func runTeamMemberRemove(args []string) error {
 	fmt.Printf("removed %s from the team.\n", role)
 	// rm is roster-only; it never touches the agent's tmux pane. Point at the
 	// pane-closing teardown so a pruned worker's window doesn't linger as an
-	// orphan (stop keeps the pane by default; --close-panes closes it).
-	fmt.Printf("if it is live, stop it AND close its pane with:\n  amq-squad stop --role %s --close-panes\n", role)
+	// orphan (down keeps the pane by default; --close-panes closes it).
+	fmt.Printf("if it is live, stop it AND close its pane with:\n  amq-squad down --role %s --close-panes\n", role)
 	return nil
 }
 
@@ -839,7 +839,7 @@ func teamMemberStopArgs(projectDir, profile, role, session string, force, closeP
 }
 
 func teamMemberStopCommand(projectDir, profile, role, session string, force, closePanes bool) string {
-	return "amq-squad stop " + shellJoin(teamMemberStopArgs(projectDir, profile, role, session, force, closePanes))
+	return "amq-squad down " + shellJoin(teamMemberStopArgs(projectDir, profile, role, session, force, closePanes))
 }
 
 func shellJoin(args []string) string {

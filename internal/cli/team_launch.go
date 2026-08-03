@@ -92,9 +92,10 @@ type teamLaunchResult struct {
 }
 
 type teamLaunchResultPane struct {
-	Role     string
-	PaneID   string
-	WindowID string
+	Role         string
+	PaneID       string
+	WindowID     string
+	ChildCommand string
 }
 
 type teamLaunchPane struct {

@@ -67,7 +67,7 @@ type signalTerminator struct {
 	sig syscall.Signal
 }
 
-type stopTerminatorFactory func(force bool) processTerminator
+type downTerminatorFactory func(force bool) processTerminator
 
 var (
 	runExactWakeRetire       = runAMQCommand
@@ -121,26 +121,26 @@ func signalNameOf(term processTerminator) string {
 	return "SIGTERM"
 }
 
-// runStop is the primary teardown verb. With no flag it genuinely terminates
+// runDown is the primary teardown verb. With no flag it genuinely terminates
 // the live, binary-matched agent PID with SIGTERM, reaps the wake sidecar, and
 // flips presence offline. Because the agent is actually being stopped, flipping
 // presence and reaping the sidecar are honest, not a status lie. The on-disk
 // state (launch record, mailbox, brief) is PRESERVED, so the session is
 // recoverable via `amq-squad resume`. --force escalates to SIGKILL for agents
 // that ignore SIGTERM.
-func runStop(args []string) error {
-	return runStopWithDeps(args, func(force bool) processTerminator {
+func runDown(args []string) error {
+	return runDownWithDeps(args, func(force bool) processTerminator {
 		return newSignalTerminator(force)
 	}, defaultDuplicateLaunchProbe)
 }
 
-// runStopWithDeps keeps the production stop dependencies immutable while
+// runDownWithDeps keeps the production stop dependencies immutable while
 // allowing parser-to-execution tests to supply inert process controls.
-func runStopWithDeps(args []string, terminatorForForce stopTerminatorFactory, probe duplicateLaunchProbe) error {
-	return runStopWithPaneDeps(args, terminatorForForce, probe, PaneCleanupDependencies{})
+func runDownWithDeps(args []string, terminatorForForce downTerminatorFactory, probe duplicateLaunchProbe) error {
+	return runDownWithPaneDeps(args, terminatorForForce, probe, PaneCleanupDependencies{})
 }
 
-func runStopWithPaneDeps(args []string, terminatorForForce stopTerminatorFactory, probe duplicateLaunchProbe, paneDeps PaneCleanupDependencies) error {
+func runDownWithPaneDeps(args []string, terminatorForForce downTerminatorFactory, probe duplicateLaunchProbe, paneDeps PaneCleanupDependencies) error {
 	fs := flag.NewFlagSet("down", flag.ContinueOnError)
 	sessionName := fs.String("session", "", "AMQ workstream session name (default: team workstream)")
 	role := fs.String("role", "", "narrow to a single configured role")
@@ -153,7 +153,7 @@ func runStopWithPaneDeps(args []string, terminatorForForce stopTerminatorFactory
 	profileFlag := fs.String("profile", "", "team profile to target (default: default profile)")
 	registerScopedFlagAliases(fs, projectFlag, sessionName, profileFlag)
 	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, stopUsage())
+		fmt.Fprint(os.Stderr, downUsage())
 	}
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -197,7 +197,7 @@ func runStopWithPaneDeps(args []string, terminatorForForce stopTerminatorFactory
 	})
 }
 
-func stopUsage() string {
+func downUsage() string {
 	var b strings.Builder
 	b.WriteString("amq-squad down - stop configured team members (the session stays resumable)\n\n")
 	b.WriteString("Usage:\n  amq-squad down (--role R | --all) [--project DIR] [--force] [--close-panes] [--profile NAME] [--session NAME] [--dry-run] [--json]\n\n")
@@ -299,7 +299,7 @@ func executeDown(d downExecution) error {
 		return err
 	}
 	t, workstream = currentTeam, currentWorkstream
-	exactStopScope := exactStopNamespaceScope{
+	exactDownScope := exactDownNamespaceScope{
 		Verb:            verb,
 		ProjectDir:      d.ProjectDir,
 		Profile:         d.Profile,
@@ -310,7 +310,7 @@ func executeDown(d downExecution) error {
 		ExplicitProfile: d.ExplicitProfile,
 		ExplicitSession: d.ExplicitSession,
 	}
-	exceptionUsed, err := ensureNoNamespaceConflictForStop(exactStopScope)
+	exceptionUsed, err := ensureNoNamespaceConflictForDown(exactDownScope)
 	if err != nil {
 		return err
 	}
@@ -338,7 +338,8 @@ func executeDown(d downExecution) error {
 		watcherStopped = true
 	}
 	if !d.DryRun && finalStop {
-		if err := stopSessionNotifier(t.Project, d.Profile, workstream); err != nil {
+		stopped, err := stopSessionNotifier(t.Project, d.Profile, workstream)
+		if err != nil {
 			if watcherStopped {
 				restartErr := reconcileNotificationWatcherStarted(t, d.Profile, workstream, "")
 				if restartErr != nil {
@@ -350,13 +351,13 @@ func executeDown(d downExecution) error {
 			}
 			return fmt.Errorf("stop session notifier before final agent teardown: %w", err)
 		}
-		notifierStopped = true
+		notifierStopped = stopped
 	}
 
 	reports := make([]downReport, 0, len(targets))
-	var exceptionScope *exactStopNamespaceScope
+	var exceptionScope *exactDownNamespaceScope
 	if exceptionUsed {
-		exceptionScope = &exactStopScope
+		exceptionScope = &exactDownScope
 	}
 	for _, m := range targets {
 		var report downReport
@@ -637,15 +638,15 @@ func previewDownMember(t team.Team, projectDir, profile string, m team.Member, w
 	return report
 }
 
-func terminateMember(t team.Team, projectDir, profile string, m team.Member, workstream string, term processTerminator, probe duplicateLaunchProbe, exactStopScope *exactStopNamespaceScope, closePanes bool, paneDeps PaneCleanupDependencies) downReport {
+func terminateMember(t team.Team, projectDir, profile string, m team.Member, workstream string, term processTerminator, probe duplicateLaunchProbe, exactDownScope *exactDownNamespaceScope, closePanes bool, paneDeps PaneCleanupDependencies) downReport {
 	report, rec, ok := resolveDownMemberRecord(t, projectDir, profile, m, workstream, probe, closePanes)
 	if !ok {
 		return report
 	}
 	cwd, handle, root := report.CWD, report.Handle, report.Root
-	if exactStopScope != nil {
-		requestedRoot := squadnamespace.AMQRoot(t.Project, exactStopScope.Profile, exactStopScope.Session)
-		if err := validateExactStopLaunchRecord(rec, m, handle, exactStopScope.Profile, exactStopScope.Session, requestedRoot); err != nil {
+	if exactDownScope != nil {
+		requestedRoot := squadnamespace.AMQRoot(t.Project, exactDownScope.Profile, exactDownScope.Session)
+		if err := validateExactStopLaunchRecord(rec, m, handle, exactDownScope.Profile, exactDownScope.Session, requestedRoot); err != nil {
 			report.Status = downStatusFailed
 			report.Detail = "launch record failed exact named-profile identity validation: " + err.Error()
 			return report
@@ -668,7 +669,7 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 		request.Attestation = att
 		return PreparePaneCleanup(request, paneDeps)
 	}
-	strictWakeRoot := exactStopScope != nil
+	strictWakeRoot := exactDownScope != nil
 	if recordIsExternal(rec) {
 		report.Pane = prepare(PaneCleanupAgentAttestation{}).Result
 		report.Status = downStatusMaybeLive

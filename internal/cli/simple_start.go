@@ -252,6 +252,9 @@ func runStartWithDependencies(args []string, deps simpleStartDependencies, in io
 		if err := validateCompleteTeamLaunchResult(buildTeamLaunchPanes(current.SpawnTeam, current.LaunchOptions), current.LaunchOptions.Target, result); err != nil {
 			return err
 		}
+		if err := validateSimpleStartRestoreResultCommands(current, result); err != nil {
+			return err
+		}
 		if err := verifySimpleStartRecords(current, result, deps); err != nil {
 			return err
 		}
@@ -308,9 +311,15 @@ Usage:
     [--target current-window|new-window|new-session] [--layout vertical|horizontal|tiled]
     [--trust sandboxed|approve-for-me|trusted] [--model role=model,...]
 
-The complete roster and launch plan are shown before one default-No approval.
+start shows the complete roster and launch plan, then asks before launching
+(default: No); answering No changes nothing. Pass --yes for automation.
 Rerunning keeps verified live roles, respawns stopped roles, and rolls forward
 partial managed launches without deleting the namespace.
+
+Examples:
+  amq-squad start
+  amq-squad start --project ~/Code/app
+  amq-squad start issue-96 --goal "Ship the reviewed change"
 `)
 	}
 	rest = allowInterspersedFlags(fs, rest)
@@ -846,6 +855,30 @@ func validateSimpleStartRestoreCommands(plan simpleStartPlan) error {
 		}
 		if !strings.Contains(pane.Command, " --no-bootstrap") {
 			return fmt.Errorf("start restore for %s refused: composed child command would replay bootstrap instead of resuming conversation %q", pane.Role, expected)
+		}
+	}
+	return nil
+}
+
+func validateSimpleStartRestoreResultCommands(plan simpleStartPlan, result teamLaunchResult) error {
+	returned := make(map[string]string, len(result.Panes))
+	for _, pane := range result.Panes {
+		returned[pane.Role] = pane.ChildCommand
+	}
+	for role, conversation := range plan.LaunchOptions.RestoreConversations {
+		conversation = strings.TrimSpace(conversation)
+		if conversation == "" {
+			continue
+		}
+		command := strings.TrimSpace(returned[role])
+		if command == "" {
+			return fmt.Errorf("start restore for %s refused: launch result omits the composed child command for recorded conversation %q", role, conversation)
+		}
+		if !strings.Contains(command, " --conversation "+shellQuote(conversation)) {
+			return fmt.Errorf("start restore for %s refused: dispatched child command omits recorded conversation %q", role, conversation)
+		}
+		if !strings.Contains(command, " --no-bootstrap") {
+			return fmt.Errorf("start restore for %s refused: dispatched child command would replay bootstrap instead of resuming conversation %q", role, conversation)
 		}
 	}
 	return nil

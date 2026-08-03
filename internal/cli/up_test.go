@@ -100,15 +100,15 @@ func (f *fakeBackend) LaunchWithResult(t team.Team, opts teamLaunchOptions) (tea
 	if err := f.Launch(t, opts); err != nil {
 		return teamLaunchResult{}, err
 	}
-	members := orderedTeamMembers(t.Members)
-	result := teamLaunchResult{Panes: make([]teamLaunchResultPane, 0, len(members))}
-	for i, member := range members {
+	panes := resolvedTeamLaunchPanes(t, opts)
+	result := teamLaunchResult{Panes: make([]teamLaunchResultPane, 0, len(panes))}
+	for i, pane := range panes {
 		window := "@1"
 		if opts.Target == "new-window" {
 			window = fmt.Sprintf("@%d", i+1)
 		}
 		result.Panes = append(result.Panes, teamLaunchResultPane{
-			Role: member.Role, PaneID: fmt.Sprintf("%%%d", i+1), WindowID: window,
+			Role: pane.Role, PaneID: fmt.Sprintf("%%%d", i+1), WindowID: window, ChildCommand: pane.Command,
 		})
 	}
 	return result, nil

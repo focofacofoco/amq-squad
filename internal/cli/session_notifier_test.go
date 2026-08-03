@@ -107,6 +107,54 @@ func TestSessionNotifierRetriesFailedNudgeWithoutDoubleSending(t *testing.T) {
 	}
 }
 
+func TestSessionNotifierStartupNudgesPendingInboxMessage(t *testing.T) {
+	project := canonicalFilesystemPath(t.TempDir())
+	const (
+		profile = "review"
+		session = "wake"
+		handle  = "dev"
+		paneID  = "%91"
+	)
+	root := filepath.Join(project, ".agent-mail", profile, session)
+	agentDir := filepath.Join(root, "agents", handle)
+	if err := os.MkdirAll(filepath.Join(agentDir, "inbox", "new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.Write(agentDir, launch.Record{
+		Schema: launch.SchemaVersion, Role: handle, Handle: handle, Binary: "codex",
+		Session: session, TeamProfile: profile, TeamHome: project, CWD: project,
+		Root: root, BaseRoot: filepath.Dir(root),
+		Tmux: &launch.TmuxInfo{PaneID: paneID, Session: session},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := filepath.Join(agentDir, "inbox", "new", "pending.md")
+	if err := os.WriteFile(message, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan os.Signal, 1)
+	nudges := 0
+	err := executeSessionNotifier(sessionNotifierExecution{
+		ProjectDir: project, Profile: profile, Session: session, Root: root, Token: "startup-catch-up",
+		TTL: time.Minute, Heartbeat: time.Hour, Stop: stop, Now: time.Now,
+		SendKeys: func(gotPane, _ string) error {
+			if gotPane != paneID {
+				t.Fatalf("nudge pane = %q, want %q", gotPane, paneID)
+			}
+			nudges++
+			stop <- os.Interrupt
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nudges != 1 {
+		t.Fatalf("startup nudges = %d, want exactly one for pending inbox message", nudges)
+	}
+}
+
 func TestSessionNotifierRerunAdoptsExistingProcessWithoutTmux(t *testing.T) {
 	project := canonicalFilesystemPath(t.TempDir())
 	const (
