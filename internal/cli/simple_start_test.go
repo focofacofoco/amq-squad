@@ -329,6 +329,7 @@ func newSimpleStartRunFixture(t *testing.T, member team.Member) *simpleStartRunF
 			ProcessStartTime: func(pid int) (time.Time, bool) { return f.started, f.alive[pid] },
 			PaneTitle:        func(paneID string) (string, bool) { title, ok := f.titles[paneID]; return title, ok },
 		},
+		ListPanes:    func() ([]tmuxpane.TmuxPane, error) { return nil, nil },
 		StartWatcher: func(team.Team, string, string, string) error { return nil },
 	}
 	return f

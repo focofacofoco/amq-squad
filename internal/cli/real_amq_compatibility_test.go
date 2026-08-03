@@ -920,6 +920,18 @@ func realAMQOrchestrationContract(t *testing.T, binary, version, profile string)
 	t.Helper()
 	const session = "issue-471"
 	project := t.TempDir()
+	authorizerBinary, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatalf("resolve disposable dispatch authorizer: %v", err)
+	}
+	authorizer := exec.Command(authorizerBinary, "300")
+	if err := authorizer.Start(); err != nil {
+		t.Fatalf("start disposable dispatch authorizer: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = authorizer.Process.Kill()
+		_ = authorizer.Wait()
+	})
 	ctx := realAMQProfileContext(project, profile, session, "cto")
 	realAMQInitAgents(t, binary, project, ctx.Root, "cto", "qa", team.DefaultOperatorHandle)
 	op := team.DefaultOperator()
@@ -929,7 +941,7 @@ func realAMQOrchestrationContract(t *testing.T, binary, version, profile string)
 		Orchestrated: true,
 		Lead:         "cto",
 		Members: []team.Member{
-			{Role: "cto", Binary: "codex", Handle: "cto", Session: session},
+			{Role: "cto", Binary: authorizerBinary, Handle: "cto", Session: session},
 			{Role: "qa", Binary: "codex", Handle: "qa", Session: session},
 		},
 	}
@@ -941,8 +953,9 @@ func realAMQOrchestrationContract(t *testing.T, binary, version, profile string)
 		recordBase = ctx.Root
 	}
 	seedAgentRecord(t, filepath.Dir(ctx.Root), session, "cto", launch.Record{
-		CWD: project, Binary: "codex", Role: "cto", Handle: "cto", Session: session,
+		CWD: project, Binary: authorizerBinary, Role: "cto", Handle: "cto", Session: session,
 		Root: ctx.Root, BaseRoot: recordBase, TeamProfile: profile, External: true,
+		AgentPID: authorizer.Process.Pid, StartedAt: time.Now().UTC(),
 	})
 
 	realAMQConcurrentDrainedSend(t, binary, ctx)
