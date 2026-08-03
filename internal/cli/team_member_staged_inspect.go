@@ -1,5 +1,7 @@
 package cli
 
+// v228-step5-delete: retained for legacy staged inspection consumers until P5.
+
 import (
 	"encoding/json"
 	"flag"

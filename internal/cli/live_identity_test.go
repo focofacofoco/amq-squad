@@ -196,55 +196,6 @@ func TestReadManagedLiveLaunchTypesMissingRosterHandleAsUnmanaged(t *testing.T) 
 	}
 }
 
-func TestResolvePreparedLiveActorUsesAuthoritativeActiveStagedClaimLifecycle(t *testing.T) {
-	project, _, token, claim := preparedStagedProjectionFixture(t, "codex")
-	canonical, err := liveidentity.CanonicalProject(project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec := stagedProjectionRecord(t, project, token, claim)
-	managed := managedLiveLaunch{Record: rec}
-	targetScope := liveIdentityScope{Project: canonical, Profile: team.DefaultProfile, Session: "prepared", Handle: "qa", AllowAdmittedStaged: true}
-	actor, err := resolvePreparedLiveActor(targetScope, managed)
-	if err != nil || actor.Binary != claim.Effective.Binary || actor.Model != claim.Effective.Model || actor.Role != claim.Role || actor.Handle != claim.Handle {
-		t.Fatalf("admitted target actor=%+v err=%v claim=%+v", actor, err, claim)
-	}
-	if _, err := resolvePreparedLiveActor(liveIdentityScope{Project: canonical, Profile: team.DefaultProfile, Session: "prepared", Handle: "qa"}, managed); err == nil || !strings.Contains(err.Error(), "admitted but not consumed") {
-		t.Fatalf("already-live resolver accepted unconsumed claim: %v", err)
-	}
-	launchToken := token
-	launchToken.LaunchAttempt = claim.ClaimID
-	if err := consumePreparedRunStagedClaim(project, team.DefaultProfile, "prepared", launchToken, "qa", "qa"); err != nil {
-		t.Fatal(err)
-	}
-	if actor, err = resolvePreparedLiveActor(liveIdentityScope{Project: canonical, Profile: team.DefaultProfile, Session: "prepared", Handle: "qa"}, managed); err != nil || actor.Binary != claim.Effective.Binary {
-		t.Fatalf("consumed live actor=%+v err=%v", actor, err)
-	}
-}
-
-func TestResolvePreparedLiveActorRejectsStaleFirstReplacedClaim(t *testing.T) {
-	project, _, token, first := preparedStagedProjectionFixture(t, "codex")
-	second, err := admitPreparedRunStagedClaim(project, team.DefaultProfile, "prepared", token, preparedRunStagedAdmissionRequest{
-		Role: "qa", Handle: "qa", AuthorizingRole: "cto", AuthorizingHandle: "cto", ActorMode: team.ActorModeReview,
-		SupersedesClaimID: first.ClaimID, LifecycleReason: "replace stale first claim",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonical, err := liveidentity.CanonicalProject(project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := liveIdentityScope{Project: canonical, Profile: team.DefaultProfile, Session: "prepared", Handle: "qa", AllowAdmittedStaged: true}
-	if _, err := resolvePreparedLiveActor(scope, managedLiveLaunch{Record: stagedProjectionRecord(t, project, token, first)}); err == nil || !strings.Contains(err.Error(), "exact authoritative claim") {
-		t.Fatalf("stale first claim verified: %v", err)
-	}
-	actor, err := resolvePreparedLiveActor(scope, managedLiveLaunch{Record: stagedProjectionRecord(t, project, token, second)})
-	if err != nil || actor.Binary != second.Effective.Binary || actor.Model != second.Effective.Model {
-		t.Fatalf("replacement actor=%+v err=%v", actor, err)
-	}
-}
-
 func TestLiveIdentityResolverFailsClosedOnLayerDrift(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

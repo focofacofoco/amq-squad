@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: retained for legacy staged goal/task consumers until P4
+// removes their prepared claim edges.
+
 import (
 	"encoding/json"
 	"errors"

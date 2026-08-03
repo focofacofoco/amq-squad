@@ -43,43 +43,6 @@ func TestPreparedRunIdentityMismatchNamesExecutableNextCommand(t *testing.T) {
 	}
 }
 
-func TestPreparedRunScopedRecoveryCommandExecutesAsDisplayed(t *testing.T) {
-	setupFakeAMQSessionRoots(t)
-	useFakeTmuxBackend(t)
-	dir := seedTeam(t, team.Team{
-		Workstream:   "audit",
-		Orchestrated: true,
-		Lead:         "cto",
-		Members: []team.Member{
-			{Role: "cto", Handle: "cto", Binary: "codex", Session: "audit"},
-		},
-	})
-	command := preparedRunRecoveryCommand(dir, team.DefaultProfile, "audit")
-	if strings.Contains(command, "<") {
-		t.Fatalf("scoped recovery printed an unresolved placeholder: %s", command)
-	}
-	argv := strings.Fields(command)
-	if len(argv) < 3 || strings.Join(argv[:3], " ") != "amq-squad run start" {
-		t.Fatalf("unexpected recovery command shape: %v", argv)
-	}
-	if _, _, err := captureOutput(t, func() error { return Run(argv[1:], "test") }); err != nil {
-		t.Fatalf("the scoped command displayed by the error did not execute: %v\ncommand: %s", err, command)
-	}
-}
-
-func TestMissingPreparedRunBinaryNamesBothExactAssignments(t *testing.T) {
-	err := missingPreparedRunBinaryError("special-reviewer")
-	for _, want := range []string{
-		"bootstrap blocker [missing] special-reviewer",
-		"--binary special-reviewer=claude",
-		"--binary special-reviewer=codex",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("missing-binary error lacks %q: %v", want, err)
-		}
-	}
-}
-
 func TestLiveIdentityRecoveryNamesRegisteredExecutableCommands(t *testing.T) {
 	setupFakeAMQSessionRoots(t)
 	dir := seedTeam(t, team.Team{

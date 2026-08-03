@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: retained for the legacy staged member surface until P5;
+// the public simple launcher no longer produces staged launch commands.
+
 import (
 	"encoding/json"
 	"errors"

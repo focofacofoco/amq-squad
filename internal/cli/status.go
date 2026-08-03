@@ -1737,22 +1737,9 @@ func classifyMemberStatusFromEntries(t team.Team, profile string, m team.Member,
 		rec.AdoptionMode = strings.TrimSpace(live.LaunchRecord.AdoptionMode)
 		rec.LauncherPaneID = strings.TrimSpace(live.LaunchRecord.LauncherPaneID)
 		rec.Bootstrap = bootstrapack.Evaluate(live.LaunchRecord.BootstrapExpectation, bootstrapack.Identity{Handle: live.LaunchRecord.Handle, Role: live.LaunchRecord.Role, Profile: live.LaunchRecord.TeamProfile, Session: live.LaunchRecord.Session, Root: live.LaunchRecord.Root}, rec.AgentDir, probe.Now())
-		if launchRecordClaimsPreparedIdentity(live.LaunchRecord) {
-			identity, _, identityErr := verifyRuntimeActionWithRecord("status promotion", t.Project, profile, workstream, rec.Handle, live.LaunchRecord)
-			rec.LiveIdentity = &identity
-			if identityErr != nil {
-				rec.LiveIdentityMode = "managed_refused"
-				rec.Status = live.Status
-				rec.Detail = identityErr.Error()
-				if live.Live() {
-					rec.Status = statusStateStale
-				}
-			} else {
-				rec.LiveIdentityMode = "managed_verified"
-			}
-		} else {
-			rec.LiveIdentityMode = "legacy_unverified"
-		}
+		// Prepared tuple fields from v2.27 are opaque compatibility data. Runtime
+		// status comes from the launch record plus direct PID/pane probes.
+		rec.LiveIdentityMode = "record_first"
 		if origin := strings.TrimSpace(live.LaunchRecord.SpawnOrigin); origin != "" {
 			rec.SpawnOrigin = origin
 		}

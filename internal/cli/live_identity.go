@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: prepared-generation identity fields remain readable for
+// legacy goal/task consumers until P4/P5 removes those edges.
+
 import (
 	"crypto/sha256"
 	"encoding/hex"

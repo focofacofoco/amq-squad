@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: retained for the legacy staged member surface until its
+// remaining goal/task consumers are removed in P4/P5.
+
 import (
 	"flag"
 	"fmt"

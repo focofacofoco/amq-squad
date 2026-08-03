@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: retained for legacy goal/task/dispatch consumers until
+// P4 removes their prepared state mutation edges.
+
 import (
 	"encoding/json"
 	"errors"

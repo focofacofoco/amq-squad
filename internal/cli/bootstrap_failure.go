@@ -300,6 +300,11 @@ var livePaneIDs = func() (map[string]bool, bool) {
 	return ids, true
 }
 
+var (
+	runStartLeadReadyNow   = time.Now
+	runStartLeadReadySleep = time.Sleep
+)
+
 // vanishedPaneBootstrapError is the failure text for an agent whose pane no
 // longer exists. There is no pane content to quote, so the message says what is
 // known and why nothing more specific is available, instead of implying the

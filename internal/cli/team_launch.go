@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: prepared launch fields and branches remain only for the
+// P4/P5 goal, task, and staged-member consumers; simple start never sets them.
+
 import (
 	"errors"
 	"flag"
@@ -74,6 +77,8 @@ type teamLaunchOptions struct {
 	SimpleStart           bool
 	CanonicalRoot         string
 	StartupPrompts        map[string]string
+	RestoreConversations  map[string]string
+	ComposedPanes         []teamLaunchPane
 	AfterCheckpoint       func(simpleStartCheckpoint) error
 	// ResolvedAMQPreflights is a complete, floor-validated snapshot prepared
 	// by a parent command while it still owns the namespace admission and
@@ -546,7 +551,7 @@ func executeTeamLaunch(opts teamLaunchOptions, explicitSession bool, explicitTru
 		quietNotice("AM_ROOT: %s\n", preflights[0].Root)
 	}
 	profileArg := commandProfileArg(opts.Profile)
-	quietNotice("next: amq-squad status%s --session %s | amq-squad console%s --session %s | amq-squad stop%s --all --session %s\n",
+	quietNotice("next: amq-squad status%s --session %s | amq-squad console%s --session %s | amq-squad down%s --all --session %s\n",
 		profileArg, shellQuote(opts.Workstream), profileArg, shellQuote(opts.Workstream), profileArg, shellQuote(opts.Workstream))
 	// Post-launch warn-if-stub nudge: `up` without a brief source auto-stubs
 	// the brief above and asks us to flag it so non-interactive automation
@@ -795,6 +800,11 @@ func buildTeamLaunchPanes(t team.Team, opts teamLaunchOptions) []teamLaunchPane 
 	panes := make([]teamLaunchPane, 0, len(members))
 	for _, m := range members {
 		cwd := m.EffectiveCWD(t.Project)
+		conversation := strings.TrimSpace(opts.RestoreConversations[m.Role])
+		startupPrompt := opts.StartupPrompts[m.Role]
+		if conversation != "" {
+			startupPrompt = ""
+		}
 		panes = append(panes, teamLaunchPane{
 			Role:   m.Role,
 			CWD:    cwd,
@@ -821,11 +831,19 @@ func buildTeamLaunchPanes(t team.Team, opts teamLaunchOptions) []teamLaunchPane 
 				StagedClaim:      opts.StagedClaim,
 				SimpleStart:      opts.SimpleStart,
 				CanonicalRoot:    opts.CanonicalRoot,
-				StartupPrompt:    opts.StartupPrompts[m.Role],
+				StartupPrompt:    startupPrompt,
+				Conversation:     conversation,
 			}),
 		})
 	}
 	return panes
+}
+
+func resolvedTeamLaunchPanes(t team.Team, opts teamLaunchOptions) []teamLaunchPane {
+	if opts.ComposedPanes != nil {
+		return append([]teamLaunchPane(nil), opts.ComposedPanes...)
+	}
+	return buildTeamLaunchPanes(t, opts)
 }
 
 type externalLeadAMQResolver func(team.Member, string, string, string, string) (amqEnv, error)

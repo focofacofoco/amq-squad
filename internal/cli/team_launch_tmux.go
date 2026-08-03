@@ -98,7 +98,7 @@ func buildTmuxLaunchPlan(t team.Team, opts teamLaunchOptions) tmuxLaunchPlan {
 		Workstream:            opts.Workstream,
 		Target:                opts.Target,
 		Layout:                opts.Layout,
-		Panes:                 buildTeamLaunchPanes(t, opts),
+		Panes:                 resolvedTeamLaunchPanes(t, opts),
 		StartDelay:            opts.Stagger,
 		PreparedRunGuard:      opts.PreparedRunGuard,
 		PreserveLauncherFocus: opts.PreserveLauncherFocus,
@@ -214,7 +214,7 @@ func tmuxDryRunLines(plan tmuxLaunchPlan) []string {
 		windowTarget = "$window"
 		firstTarget = "$first_pane"
 		lines = append(lines,
-			`window=$(tmux display-message -p -t "${TMUX_PANE:?run amq-squad up from inside a tmux pane}" '#{session_name}:#{window_index}')`,
+			`window=$(tmux display-message -p -t "${TMUX_PANE:?run amq-squad start from inside a tmux pane}" '#{session_name}:#{window_index}')`,
 		)
 	} else {
 		lines = append(lines, shellCommand("tmux", "new-session", "-d", "-s", plan.Session, "-n", "squad", "-c", plan.Panes[0].CWD))
@@ -265,7 +265,7 @@ func tmuxWindowsDryRunLines(plan tmuxLaunchPlan) []string {
 	lines := []string{
 		"# one tmux window per agent, added to your current tmux session",
 		"# (launched live outside tmux, a new detached '" + plan.Session + "' session is created instead)",
-		`session=$(tmux display-message -p -t "${TMUX_PANE:?run from inside tmux, or launch live with: amq-squad up --target new-window}" '#{session_name}')`,
+		`session=$(tmux display-message -p -t "${TMUX_PANE:?run from inside tmux, or launch live with: amq-squad start --target new-window}" '#{session_name}')`,
 	}
 	targets := make([]string, 0, len(plan.Panes))
 	for i, pane := range plan.Panes {

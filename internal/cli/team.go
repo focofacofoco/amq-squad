@@ -660,8 +660,7 @@ Examples:
 	if interactive {
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, "Next:")
-		fmt.Fprintln(os.Stderr, "  amq-squad up                   # bring all members up in the current tmux window")
-		fmt.Fprintln(os.Stderr, "  amq-squad up --dry-run         # print one launch command per member")
+		fmt.Fprintln(os.Stderr, "  amq-squad start                # reconcile and launch the configured roster")
 	}
 	return nil
 }
@@ -1419,6 +1418,7 @@ type emitTeamCommandInput struct {
 	SimpleStart      bool
 	CanonicalRoot    string
 	StartupPrompt    string
+	Conversation     string
 }
 
 type teamCommandPreviewData struct {
@@ -1450,6 +1450,10 @@ func emitTeamCommandWithPreview(in emitTeamCommandInput, preview teamCommandPrev
 	// generated team commands recommend the 1.0 shape.
 	b.WriteString(" agent up ")
 	b.WriteString(shellQuote(m.Binary))
+	if conversation := strings.TrimSpace(in.Conversation); conversation != "" {
+		b.WriteString(" --conversation ")
+		b.WriteString(shellQuote(conversation))
+	}
 	if in.StagedSpawn {
 		b.WriteString(" --staged-spawn")
 		if claim := strings.TrimSpace(in.StagedClaim); claim != "" {
@@ -1505,7 +1509,7 @@ func emitTeamCommandWithPreview(in emitTeamCommandInput, preview teamCommandPrev
 		b.WriteString(" --team-profile ")
 		b.WriteString(shellQuote(in.Profile))
 	}
-	if in.NoBootstrap {
+	if in.NoBootstrap || strings.TrimSpace(in.Conversation) != "" {
 		b.WriteString(" --no-bootstrap")
 	}
 	if in.ForceDuplicate {
@@ -2476,8 +2480,8 @@ Usage:
   amq-squad team profiles             List configured team profiles (read-only)
   amq-squad team rm [--profile NAME]  Delete one team profile config (confirm-gated)
 
-To launch the team, use the top-level 'up' verb: 'amq-squad up' brings it up,
-'amq-squad up --dry-run' prints one launch command per member.
+To launch the team, use the top-level 'start' verb: 'amq-squad start' shows
+the plan and reconciles the configured roster after approval.
 
 Most subcommands accept --profile NAME to operate on a named profile under
 .amq-squad/teams/<name>.json; omit the flag (or pass --profile default) to
@@ -2489,7 +2493,7 @@ persona with a different CLI.
 
 Examples:
   amq-squad team init --roles cto,fullstack --binary cto=codex
-  amq-squad up --dry-run
+  amq-squad start
   amq-squad team sync --apply
   amq-squad team rm --profile review
 `)

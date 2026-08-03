@@ -360,9 +360,6 @@ func runTeamMemberAdd(args []string) error {
 	}
 	mutation := func(expectedProfileDigest string) error {
 		return withProfileLock(projectDir, profile, func() error {
-			if err := verifyAcceptedProfileDigestBeforeRosterMutation(team.ProfilePath(projectDir, profile), expectedProfileDigest); err != nil {
-				return err
-			}
 			t, err := team.ReadProfile(projectDir, profile)
 			if err != nil {
 				return fmt.Errorf("read team: %w", err)
@@ -386,11 +383,9 @@ func runTeamMemberAdd(args []string) error {
 			return nil
 		})
 	}
-	preparedAcceptance, err := mutateRosterWithPreparedAcceptance(projectDir, profile, predictedSession, mutation)
-	if err != nil {
+	if err := mutation(""); err != nil {
 		return err
 	}
-	printRosterPreparedAcceptance(preparedAcceptance, profile, predictedSession, *jsonOut)
 
 	if *jsonOut {
 		return printJSONEnvelope("team_member_add", mutationResult{
@@ -665,9 +660,6 @@ func runTeamMemberUpdate(args []string) error {
 	var updated team.Member
 	mutation := func(expectedProfileDigest string) error {
 		return withProfileLock(projectDir, profile, func() error {
-			if err := verifyAcceptedProfileDigestBeforeRosterMutation(team.ProfilePath(projectDir, profile), expectedProfileDigest); err != nil {
-				return err
-			}
 			t, err := team.ReadProfile(projectDir, profile)
 			if err != nil {
 				return fmt.Errorf("read team: %w", err)
@@ -694,11 +686,9 @@ func runTeamMemberUpdate(args []string) error {
 			return writeTeamProfileWithAMQRosterSyncUnderLock(projectDir, profile, oldTeam, newTeam, resolveAMQEnvForTeamProfile)
 		})
 	}
-	preparedAcceptance, err := mutateRosterWithPreparedAcceptance(projectDir, profile, preparedSession, mutation)
-	if err != nil {
+	if err := mutation(""); err != nil {
 		return err
 	}
-	printRosterPreparedAcceptance(preparedAcceptance, profile, preparedSession, *jsonOut)
 
 	if *jsonOut {
 		return printJSONEnvelope("team_member_update", mutationResult{
@@ -766,9 +756,6 @@ func runTeamMemberRemove(args []string) error {
 	var removed bool
 	mutation := func(expectedProfileDigest string) error {
 		return withProfileLock(projectDir, profile, func() error {
-			if err := verifyAcceptedProfileDigestBeforeRosterMutation(team.ProfilePath(projectDir, profile), expectedProfileDigest); err != nil {
-				return err
-			}
 			t, err := team.ReadProfile(projectDir, profile)
 			if err != nil {
 				return fmt.Errorf("read team: %w", err)
@@ -801,11 +788,9 @@ func runTeamMemberRemove(args []string) error {
 			return nil
 		})
 	}
-	preparedAcceptance, err := mutateRosterWithPreparedAcceptance(projectDir, profile, removedMember.Session, mutation)
-	if err != nil {
+	if err := mutation(""); err != nil {
 		return err
 	}
-	printRosterPreparedAcceptance(preparedAcceptance, profile, removedMember.Session, *jsonOut)
 
 	if *jsonOut {
 		return printJSONEnvelope("team_member_rm", mutationResult{
@@ -815,7 +800,7 @@ func runTeamMemberRemove(args []string) error {
 			Profile: profile,
 			Role:    role,
 			Actions: []mutationAction{
-				followUp("stop", "close live pane", "amq-squad stop --project "+shellQuote(projectDir)+" --profile "+shellQuote(profile)+" --role "+shellQuote(role)+" --close-panes"),
+				followUp("down", "close live pane", "amq-squad down --project "+shellQuote(projectDir)+" --profile "+shellQuote(profile)+" --role "+shellQuote(role)+" --close-panes"),
 			},
 		})
 	}

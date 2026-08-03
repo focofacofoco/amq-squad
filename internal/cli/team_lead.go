@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: prepared external-lead validation remains for legacy
+// goal/staged consumers until their P4/P5 rewiring lands.
+
 import (
 	"errors"
 	"flag"
@@ -564,7 +567,7 @@ func runLeadRegisterWithPreparedToken(args []string, requestedPreparedToken prep
 		// through the shared accepted-state renderer for the same reason: the
 		// prompt must be a function of what preparation accepted, not of the
 		// live process that happens to be adopting the pane.
-		preparedPrompt, err = launchBootstrapPrompt(rec, agentDir, projectDir, preparedContext)
+		preparedPrompt, err = launchBootstrapPrompt(rec, agentDir, projectDir)
 		if err != nil {
 			return err
 		}

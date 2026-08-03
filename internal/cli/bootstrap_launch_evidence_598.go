@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: legacy doctor/bootstrap evidence reads old prepared
+// reservations until bootstrap-ack consumers are removed in step 5.
+
 import (
 	"encoding/json"
 	"os"

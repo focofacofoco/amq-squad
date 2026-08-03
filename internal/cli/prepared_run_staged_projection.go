@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: retained for legacy dispatch/task consumers until P4
+// removes their prepared roster projection edges.
+
 import (
 	"fmt"
 	"os"

@@ -1121,6 +1121,7 @@ func doctorCheckNotificationWatcher(d doctorExecution, workstream string) doctor
 	return doctorCheck{Name: name, Status: doctorOK, Detail: fmt.Sprintf("healthy pid=%d host=%s backend=%s backend_running=%t mailbox=%s watch_restarts=%d failure_streak=%d collect_pending=%t collect_retries=%d max_failures=%d heartbeat=%s last_scan=%s last_watch=%s last_collect=%s state=%s schema=%d", watcher.PID, watcher.Host, watcher.WatchBackend, watcher.WatchRunning, watcher.WatchMailbox, watcher.WatchRestarts, watcher.WatchFailures, watcher.CollectPending, watcher.CollectRetries, watcher.WatchMaxRetries, watcher.HeartbeatAt.UTC().Format(time.RFC3339), watcher.LastScanAt.UTC().Format(time.RFC3339), watcher.LastWatchAt.UTC().Format(time.RFC3339), watcher.LastCollectAt.UTC().Format(time.RFC3339), watcher.StatePath, watcher.SchemaVersion)}
 }
 
+// v228-step5-delete: compatibility diagnostics for old bootstrap expectations.
 func doctorCheckBootstrap(d doctorExecution) []doctorCheck {
 	profile := doctorProfile(d)
 	t, err := team.ReadProfile(d.ProjectDir, profile)

@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: retained for legacy goal/task/live-identity consumers
+// until P4 removes their prepared admission edges.
+
 import (
 	"fmt"
 	"strings"

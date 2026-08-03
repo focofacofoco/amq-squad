@@ -271,11 +271,7 @@ func bootstrapContextFor(rec launch.Record, agentDir, teamHome string) bootstrap
 		selfOperator = &view
 	}
 	orchestrated, isLead, leadHandle := bootstrapOrchestration(rec, teamHome)
-	exactSessionRoster := false
-	if home := strings.TrimSpace(teamHome); home != "" && strings.TrimSpace(rec.Session) != "" {
-		_, err := os.Stat(preparedRunPath(home, rec.TeamProfile, rec.Session))
-		exactSessionRoster = err == nil || !os.IsNotExist(err)
-	}
+	exactSessionRoster := strings.TrimSpace(rec.Session) != ""
 	currentTeam, warnings := bootstrapCurrentTeamWithRoster(rec, teamHome, exactSessionRoster)
 	execution := bootstrapExecution(rec, teamHome)
 	actorExecution, actorWarning := bootstrapActorExecution(rec, teamHome, execution)
@@ -345,10 +341,6 @@ func bootstrapActorExecution(rec launch.Record, teamHome string, execution *exec
 	if err != nil {
 		return fallback, fmt.Sprintf("actor execution contract could not read profile %q: %v; implementation and delegation are denied. Repair the profile and relaunch before accepting mutation work.", rec.TeamProfile, err)
 	}
-	t, err = projectPreparedRunStagedTeamForRecord(t, rec)
-	if err != nil {
-		return fallback, fmt.Sprintf("actor execution contract could not validate the authoritative staged claim: %v; implementation and delegation are denied. Repair the staged claim and relaunch.", err)
-	}
 	actor := actorExecutionContractForTeam(t, rec.Role, rec.Handle, *execution)
 	if _, ok := actorRosterMemberForTeam(t, rec.Role, rec.Handle); !ok {
 		return &actor, fmt.Sprintf("actor identity %s/%s does not match the exact profile roster; implementation and delegation are denied. Repair the launch record or profile and relaunch.", rec.Role, rec.Handle)
@@ -374,10 +366,6 @@ func bootstrapExecution(rec launch.Record, teamHome string) *executionModeData {
 		home = rec.CWD
 	}
 	t, err := team.ReadProfile(home, rec.TeamProfile)
-	if err != nil {
-		return nil
-	}
-	t, err = projectPreparedRunStagedTeamForRecord(t, rec)
 	if err != nil {
 		return nil
 	}

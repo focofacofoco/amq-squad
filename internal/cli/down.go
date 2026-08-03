@@ -77,7 +77,7 @@ var (
 )
 
 // newSignalTerminator returns a terminator that sends SIGTERM by default, or
-// SIGKILL when force is set. `stop` genuinely terminates the agent: SIGTERM
+// SIGKILL when force is set. `down` genuinely terminates the agent: SIGTERM
 // asks it to exit, --force escalates to an unignorable SIGKILL for agents
 // that swallow SIGTERM.
 func newSignalTerminator(force bool) signalTerminator {
@@ -141,7 +141,7 @@ func runStopWithDeps(args []string, terminatorForForce stopTerminatorFactory, pr
 }
 
 func runStopWithPaneDeps(args []string, terminatorForForce stopTerminatorFactory, probe duplicateLaunchProbe, paneDeps PaneCleanupDependencies) error {
-	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	fs := flag.NewFlagSet("down", flag.ContinueOnError)
 	sessionName := fs.String("session", "", "AMQ workstream session name (default: team workstream)")
 	role := fs.String("role", "", "narrow to a single configured role")
 	all := fs.Bool("all", false, "target every configured member of the team")
@@ -163,7 +163,7 @@ func runStopWithPaneDeps(args []string, terminatorForForce stopTerminatorFactory
 		return usageErrorf("--role and --all are mutually exclusive")
 	}
 	if *role == "" && !*all {
-		return usageErrorf("stop requires a target selector: pass --role <role> or --all")
+		return usageErrorf("down requires a target selector: pass --role <role> or --all")
 	}
 
 	ctx, err := resolveScopedCommandContext(*projectFlag, *profileFlag, *sessionName, "", fs)
@@ -175,7 +175,7 @@ func runStopWithPaneDeps(args []string, terminatorForForce stopTerminatorFactory
 		return fmt.Errorf("no team configured for profile %q. Run '%s' first.", ctx.Profile, profileInitCommand(ctx.Profile))
 	}
 	return executeDown(downExecution{
-		Verb:             "stop",
+		Verb:             "down",
 		ProjectDir:       ctx.ProjectDir,
 		ExplicitProject:  flagWasSet(fs, "project"),
 		RequestedSession: ctx.Session,
@@ -199,14 +199,14 @@ func runStopWithPaneDeps(args []string, terminatorForForce stopTerminatorFactory
 
 func stopUsage() string {
 	var b strings.Builder
-	b.WriteString("amq-squad stop - stop configured team members (the session stays resumable)\n\n")
-	b.WriteString("Usage:\n  amq-squad stop (--role R | --all) [--project DIR] [--force] [--close-panes] [--profile NAME] [--session NAME] [--dry-run] [--json]\n\n")
+	b.WriteString("amq-squad down - stop configured team members (the session stays resumable)\n\n")
+	b.WriteString("Usage:\n  amq-squad down (--role R | --all) [--project DIR] [--force] [--close-panes] [--profile NAME] [--session NAME] [--dry-run] [--json]\n\n")
 	b.WriteString(`Exactly one selector is required: --role R or --all. --all targets the
 configured members from this project's team.json in the resolved session
 (default: the team's workstream). --project targets another team-home without
 changing directories.
 
-stop GENUINELY TERMINATES each live, binary-matched agent: it sends SIGTERM to
+down GENUINELY TERMINATES each live, binary-matched agent: it sends SIGTERM to
 the launch-record PID, reaps the wake sidecar, and flips presence offline. It
 only signals PIDs that verify alive AND match the expected agent binary, so a
 reused PID is never touched. --force escalates to SIGKILL for agents that
@@ -220,14 +220,14 @@ is recoverable: bring it back with 'amq-squad resume'.
 without signaling processes, retiring wake, changing presence, or closing panes.
 --json emits one machine-readable result with separate agent and pane outcomes.
 
-Exit codes: a successful stop exits 0; a mixed run (some stopped, some failed
+Exit codes: a successful down exits 0; a mixed run (some stopped, some failed
 or unconfirmed) exits 3.
 
 Examples:
-  amq-squad stop --role cto
-  amq-squad stop --project ~/Code/app --all --session issue-96
-  amq-squad stop --all --session issue-96
-  amq-squad stop --role cto --force   # SIGKILL an agent that ignores SIGTERM
+  amq-squad down --role cto
+  amq-squad down --project ~/Code/app --all --session issue-96
+  amq-squad down --all --session issue-96
+  amq-squad down --role cto --force   # SIGKILL an agent that ignores SIGTERM
 `)
 	return b.String()
 }
@@ -256,7 +256,7 @@ type downExecution struct {
 func executeDown(d downExecution) error {
 	verb := d.Verb
 	if verb == "" {
-		verb = "stop"
+		verb = "down"
 	}
 	t, err := team.ReadProfile(d.ProjectDir, d.Profile)
 	if err != nil {
@@ -330,11 +330,27 @@ func executeDown(d downExecution) error {
 	}
 	finalStop := d.All || noOperationalUntargetedMembers(t, d.Profile, workstream, targets, d.Probe)
 	watcherStopped := false
+	notifierStopped := false
 	if !d.DryRun && finalStop && team.EffectiveOperatorNotifications(t.Operator).Enabled {
 		if err := stopNotificationWatcher(t.Project, d.Profile, workstream); err != nil {
 			return fmt.Errorf("stop notification watcher before final agent teardown: %w", err)
 		}
 		watcherStopped = true
+	}
+	if !d.DryRun && finalStop {
+		if err := stopSessionNotifier(t.Project, d.Profile, workstream); err != nil {
+			if watcherStopped {
+				restartErr := reconcileNotificationWatcherStarted(t, d.Profile, workstream, "")
+				if restartErr != nil {
+					return errors.Join(
+						fmt.Errorf("stop session notifier before final agent teardown: %w", err),
+						fmt.Errorf("restore notification watcher: %w", restartErr),
+					)
+				}
+			}
+			return fmt.Errorf("stop session notifier before final agent teardown: %w", err)
+		}
+		notifierStopped = true
 	}
 
 	reports := make([]downReport, 0, len(targets))
@@ -366,6 +382,14 @@ func executeDown(d downExecution) error {
 				return fmt.Errorf("%v; final stop was incomplete and notification watcher restart failed: %w", renderErr, restartErr)
 			}
 			return fmt.Errorf("final stop was incomplete and notification watcher restart failed: %w", restartErr)
+		}
+	}
+	if notifierStopped && !downReportsConfirmed(reports) {
+		if restartErr := reconcileSessionNotifierStarted(t, d.Profile, workstream, ""); restartErr != nil {
+			if renderErr != nil {
+				return fmt.Errorf("%v; final stop was incomplete and session notifier restart failed: %w", renderErr, restartErr)
+			}
+			return fmt.Errorf("final stop was incomplete and session notifier restart failed: %w", restartErr)
 		}
 	}
 	return renderErr

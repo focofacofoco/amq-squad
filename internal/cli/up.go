@@ -1,5 +1,8 @@
 package cli
 
+// v228-step5-delete: the public up command is removed from the registry; this
+// implementation remains only for internal legacy consumers through P4/P5.
+
 import (
 	"flag"
 	"fmt"

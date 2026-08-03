@@ -14,6 +14,13 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
+type worktreeIsolationResult struct {
+	Artifact string
+	Status   string
+	Evidence string
+	Fix      string
+}
+
 // worktreeIsolationReadinessRow is #497's planning-level readiness check:
 // launch fails closed when 2+ mutation-capable members would share one
 // resolved working directory (one Git index/checkout) without an explicit
@@ -59,7 +66,7 @@ import (
 // So "agree" means same condition, same exception semantics, same vocabulary,
 // with stage-appropriate severity and remedy. If you change one side's condition
 // or exception handling, change both.
-func worktreeIsolationReadinessRow(t team.Team, profile string) runReadinessRow {
+func worktreeIsolationReadinessRow(t team.Team, profile string) worktreeIsolationResult {
 	return worktreeIsolationReadinessRowForSession(t, profile, "")
 }
 
@@ -67,7 +74,7 @@ func worktreeIsolationReadinessRow(t team.Team, profile string) runReadinessRow 
 // session into remedies whose CLI accepts it. The exception itself remains a
 // profile-wide property; accepting the session keeps the printed command
 // compatible with the rest of the preparation flow without changing scope.
-func worktreeIsolationReadinessRowForSession(t team.Team, profile, session string) runReadinessRow {
+func worktreeIsolationReadinessRowForSession(t team.Team, profile, session string) worktreeIsolationResult {
 	groups := map[string][]string{}
 	groupDisplay := map[string]string{}
 	proxied := map[string]bool{}
@@ -99,7 +106,7 @@ func worktreeIsolationReadinessRowForSession(t team.Team, profile, session strin
 	}
 	if len(unobservable) > 0 {
 		sort.Strings(unobservable)
-		return runReadinessRow{
+		return worktreeIsolationResult{
 			Artifact: "worktree_isolation",
 			Status:   "blocked",
 			Evidence: fmt.Sprintf("cannot verify working-directory isolation for %s", strings.Join(unobservable, "; ")),
@@ -126,14 +133,14 @@ func worktreeIsolationReadinessRowForSession(t team.Team, profile, session strin
 		collisions = append(collisions, detail)
 	}
 	if len(collisions) == 0 {
-		return runReadinessRow{Artifact: "worktree_isolation", Status: "ready", Evidence: "no 2+ mutation-capable members share one working directory"}
+		return worktreeIsolationResult{Artifact: "worktree_isolation", Status: "ready", Evidence: "no 2+ mutation-capable members share one working directory"}
 	}
 	sort.Strings(collisions)
 	evidence := strings.Join(collisions, "; ")
 	if reason := strings.TrimSpace(t.SharedCwdException); reason != "" {
-		return runReadinessRow{Artifact: "worktree_isolation", Status: "ready", Evidence: fmt.Sprintf("shared-cwd collision accepted (%s); exception: %s", evidence, reason)}
+		return worktreeIsolationResult{Artifact: "worktree_isolation", Status: "ready", Evidence: fmt.Sprintf("shared-cwd collision accepted (%s); exception: %s", evidence, reason)}
 	}
-	return runReadinessRow{
+	return worktreeIsolationResult{
 		Artifact: "worktree_isolation",
 		Status:   "blocked",
 		Evidence: fmt.Sprintf("2+ mutation-capable members share one working directory without a recorded exception: %s", evidence),
