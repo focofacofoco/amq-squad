@@ -666,7 +666,7 @@ func TestBootstrapPromptIncludesCurrentTeamRouting(t *testing.T) {
 }
 
 func TestBootstrapPromptUsesCustomOperatorHandle(t *testing.T) {
-	teamHome := t.TempDir()
+	teamHome := canonicalFilesystemPath(t.TempDir())
 	op := team.OperatorConfig{Enabled: true, Handle: "operator"}
 	if err := team.Write(teamHome, team.Team{
 		Operator: &op,
@@ -705,7 +705,7 @@ func TestBootstrapPromptUsesCustomOperatorHandle(t *testing.T) {
 }
 
 func TestBootstrapSeparateTerminalIncludesScopedAnswerCommand(t *testing.T) {
-	teamHome := t.TempDir()
+	teamHome := canonicalFilesystemPath(t.TempDir())
 	op := team.DefaultOperator()
 	op.InteractionMode = team.OperatorInteractionSeparateTerminal
 	if err := team.Write(teamHome, team.Team{Operator: &op, Members: []team.Member{{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-393"}}}); err != nil {

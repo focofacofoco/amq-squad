@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/omriariav/amq-squad/v2/internal/flock"
 	"github.com/omriariav/amq-squad/v2/internal/launch"
+	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
@@ -164,10 +167,10 @@ func TestReconcileSimpleStartRolesUsesRecordedRuntimeAndClassifiesDrift(t *testi
 
 func TestReconcileSimpleStartRolesRejectsDuplicateLive(t *testing.T) {
 	tm := team.Team{Project: "/repo", Members: []team.Member{{Role: "dev", Handle: "dev", Binary: "codex"}}}
-	makeRecord := func(handle string, pid int) simpleStartRecord {
-		return simpleStartRecord{AgentDir: "/root/agents/" + handle, Record: launch.Record{
+	makeRecord := func(agentDir string, pid int) simpleStartRecord {
+		return simpleStartRecord{AgentDir: agentDir, Record: launch.Record{
 			Schema: launch.SchemaVersion, CWD: "/repo", TeamHome: "/repo", TeamProfile: team.DefaultProfile,
-			Root: "/root", Session: "work", Role: "dev", Handle: handle, Binary: "codex",
+			Root: "/root", Session: "work", Role: "dev", Handle: "dev", Binary: "codex",
 			Trust: trustModeSandboxed, ToolProfile: team.ToolProfileFull, AgentPID: pid,
 		}}
 	}
@@ -176,10 +179,35 @@ func TestReconcileSimpleStartRolesRejectsDuplicateLive(t *testing.T) {
 		ProcessMatch: func(int, func(string) bool) bool { return true },
 		ProcessTTY:   func(int) (string, bool) { return "", false },
 	}
-	_, _, err := reconcileSimpleStartRoles(tm, team.DefaultProfile, "work", "/root", []simpleStartRecord{makeRecord("dev", 1), makeRecord("legacy-dev", 2)}, teamLaunchOptions{Trust: trustModeSandboxed}, probe)
+	_, _, err := reconcileSimpleStartRoles(tm, team.DefaultProfile, "work", "/root", []simpleStartRecord{makeRecord("/root/agents/dev", 1), makeRecord("/root/agents/legacy-copy", 2)}, teamLaunchOptions{Trust: trustModeSandboxed}, probe)
 	var conflict *simpleStartConflictError
 	if !errors.As(err, &conflict) || conflict.Class != "duplicate_live" {
 		t.Fatalf("error = %v, want duplicate_live conflict", err)
+	}
+}
+
+func TestReconcileSimpleStartRolesTreatsSameRoleWrongHandleAsUnmanaged(t *testing.T) {
+	tm := team.Team{Project: "/repo", Members: []team.Member{{Role: "dev", Handle: "dev-2", Binary: "codex"}}}
+	records := []simpleStartRecord{{AgentDir: "/root/agents/dev-1", Record: launch.Record{
+		Schema: launch.SchemaVersion, CWD: "/repo", TeamHome: "/repo", TeamProfile: team.DefaultProfile,
+		Root: "/root", Session: "work", Role: "dev", Handle: "dev-1", Binary: "codex",
+		Trust: trustModeSandboxed, ToolProfile: team.ToolProfileFull, AgentPID: 42,
+	}}}
+	probe := launchRuntimeProbe{
+		PIDAlive:     func(int) bool { return true },
+		ProcessMatch: func(int, func(string) bool) bool { return true },
+		ProcessTTY:   func(int) (string, bool) { return "", false },
+	}
+	rows, removed, err := reconcileSimpleStartRoles(tm, team.DefaultProfile, "work", "/root", records, teamLaunchOptions{Trust: trustModeSandboxed}, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].State != "unmanaged" {
+		t.Fatalf("desired rows = %+v, want dev-2 unmanaged so it will spawn", rows)
+	}
+	if len(removed) != 1 || removed[0].State != "unmanaged" ||
+		!strings.Contains(removed[0].Detail, "dev-1") || !strings.Contains(removed[0].Detail, launch.ExistingPath(records[0].AgentDir)) {
+		t.Fatalf("foreign same-role record = %+v, want path-bearing unmanaged classification", removed)
 	}
 }
 
@@ -195,4 +223,303 @@ func TestSimpleStartCheckpointWrapsSentinel(t *testing.T) {
 	if !errors.As(err, &checkpointErr) || !errors.Is(err, sentinel) {
 		t.Fatalf("checkpoint error = %v", err)
 	}
+}
+
+type simpleStartRunFixture struct {
+	project string
+	profile string
+	session string
+	root    string
+	member  team.Member
+	started time.Time
+	alive   map[int]bool
+	ttys    map[int]string
+	titles  map[string]string
+	deps    simpleStartDependencies
+}
+
+func newSimpleStartRunFixture(t *testing.T, member team.Member) *simpleStartRunFixture {
+	t.Helper()
+	project := canonicalFilesystemPath(t.TempDir())
+	if member.Role == "" {
+		member.Role = "dev"
+	}
+	if member.Handle == "" {
+		member.Handle = member.Role
+	}
+	if member.Binary == "" {
+		member.Binary = "codex"
+	}
+	member.Session = "work"
+	if err := team.Write(project, team.Team{
+		Project: project, SharedCwdException: "simple start dependency fixture",
+		Members: []team.Member{member},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rulesPath := filepath.Join(project, ".amq-squad", "team-rules.md")
+	if err := os.MkdirAll(filepath.Dir(rulesPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rulesPath, []byte("test rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	previousBackend, hadBackend := teamLaunchBackends["tmux"]
+	teamLaunchBackends["tmux"] = &fakeBackend{}
+	t.Cleanup(func() {
+		if hadBackend {
+			teamLaunchBackends["tmux"] = previousBackend
+			return
+		}
+		delete(teamLaunchBackends, "tmux")
+	})
+
+	f := &simpleStartRunFixture{
+		project: project,
+		profile: team.DefaultProfile,
+		session: "work",
+		root:    squadnamespace.AMQRoot(project, team.DefaultProfile, "work"),
+		member:  member,
+		started: time.Unix(1_000, 0).UTC(),
+		alive:   map[int]bool{},
+		ttys:    map[int]string{},
+		titles:  map[string]string{},
+	}
+	f.deps = simpleStartDependencies{
+		LookPath: func(name string) (string, error) { return "/test/bin/" + name, nil },
+		ResolveAMQEnv: func(project, root, session, handle string) (amqEnv, error) {
+			if project != f.project || root != f.root || session != f.session || handle != memberHandle(f.member) {
+				t.Fatalf("ResolveAMQEnv(%q, %q, %q, %q) did not receive canonical inputs", project, root, session, handle)
+			}
+			return amqEnv{AMQVersion: doctorMinAMQVersion, Root: root, BaseRoot: filepath.Dir(root), SessionName: session, Me: handle}, nil
+		},
+		DuplicateProbe: duplicateLaunchProbe{
+			PIDAlive:         func(pid int) bool { return f.alive[pid] },
+			ProcessMatch:     func(int, func(string) bool) bool { return true },
+			ProcessTTY:       func(pid int) (string, bool) { tty, ok := f.ttys[pid]; return tty, ok },
+			ProcessStartTime: func(pid int) (time.Time, bool) { return f.started, f.alive[pid] },
+			Now:              func() time.Time { return f.started },
+		},
+		RuntimeProbe: launchRuntimeProbe{
+			PIDAlive:         func(pid int) bool { return f.alive[pid] },
+			ProcessMatch:     func(int, func(string) bool) bool { return true },
+			ProcessTTY:       func(pid int) (string, bool) { tty, ok := f.ttys[pid]; return tty, ok },
+			ProcessStartTime: func(pid int) (time.Time, bool) { return f.started, f.alive[pid] },
+			PaneTitle:        func(paneID string) (string, bool) { title, ok := f.titles[paneID]; return title, ok },
+		},
+		StartWatcher: func(team.Team, string, string, string) error { return nil },
+	}
+	return f
+}
+
+func (f *simpleStartRunFixture) args(extra ...string) []string {
+	args := []string{"--project", f.project, "--session", f.session, "--target", "new-window"}
+	return append(args, extra...)
+}
+
+func (f *simpleStartRunFixture) seedRecord(t *testing.T, role, handle string, pid int, paneID string, alive, titled bool) string {
+	t.Helper()
+	agentDir := filepath.Join(f.root, "agents", handle)
+	tty := "/dev/ttys-test"
+	rec := launch.Record{
+		Schema: launch.SchemaVersion, CWD: f.project, TeamHome: f.project, TeamProfile: f.profile,
+		Root: f.root, BaseRoot: filepath.Dir(f.root), Session: f.session,
+		Role: role, Handle: handle, Binary: "codex", Trust: trustModeSandboxed,
+		ToolProfile: team.ToolProfileFull, AgentPID: pid, AgentTTY: tty, StartedAt: f.started,
+		Tmux: &launch.TmuxInfo{Session: "test", WindowID: "@1", PaneID: paneID, Target: "new-window"},
+	}
+	if err := launch.Write(agentDir, rec); err != nil {
+		t.Fatal(err)
+	}
+	f.alive[pid] = alive
+	f.ttys[pid] = tty
+	if titled {
+		f.titles[paneID] = paneTitleToken(f.session, role)
+	}
+	return agentDir
+}
+
+func simpleStartLaunchResult(role, paneID string) teamLaunchResult {
+	return teamLaunchResult{Panes: []teamLaunchResultPane{{Role: role, PaneID: paneID, WindowID: "@1"}}}
+}
+
+func TestRunStartWithDependenciesApprovalDefaultsNo(t *testing.T) {
+	f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex"})
+	launchCalled := false
+	f.deps.Launch = func(team.Team, teamLaunchOptions) (teamLaunchResult, error) {
+		launchCalled = true
+		return teamLaunchResult{}, nil
+	}
+	var out bytes.Buffer
+	if err := runStartWithDependencies(f.args(), f.deps, strings.NewReader("n\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	if launchCalled {
+		t.Fatal("default-No approval launched the team")
+	}
+	if !strings.Contains(out.String(), "Launch now? [y/N]") || !strings.Contains(out.String(), "start cancelled") {
+		t.Fatalf("default-No output missing prompt/cancellation:\n%s", out.String())
+	}
+	if _, err := os.Stat(simpleStartLockPath(f.project, f.profile, f.session)); !os.IsNotExist(err) {
+		t.Fatalf("cancelled start created the launch lock: %v", err)
+	}
+}
+
+func TestRunStartWithDependenciesHoldsExactLockThroughSpawnVerification(t *testing.T) {
+	f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex"})
+	const (
+		pid    = 4101
+		paneID = "%1"
+	)
+	lockPath := simpleStartLockPath(f.project, f.profile, f.session)
+	wantLockPath := filepath.Join(f.project, ".amq-squad", "locks", "default.work.launch.lock")
+	if lockPath != wantLockPath {
+		t.Fatalf("lock path = %q, want %q", lockPath, wantLockPath)
+	}
+	var events []string
+	verified := false
+	basePIDAlive := f.deps.RuntimeProbe.PIDAlive
+	f.deps.RuntimeProbe.PIDAlive = func(got int) bool {
+		live := basePIDAlive(got)
+		if got == pid && live && !verified {
+			verified = true
+			events = append(events, "verify")
+		}
+		return live
+	}
+	f.deps.AfterCheckpoint = func(checkpoint simpleStartCheckpoint) error {
+		events = append(events, string(checkpoint))
+		if checkpoint == simpleStartCheckpointNamespaceCreation {
+			lock, acquired, err := flock.TryExclusive(lockPath, false)
+			if err != nil {
+				t.Fatalf("probe held launch lock: %v", err)
+			}
+			if acquired {
+				if lock != nil {
+					_ = lock.Close()
+				}
+				t.Fatal("launch lock was not held at namespace checkpoint")
+			}
+		}
+		if checkpoint == simpleStartCheckpointLaunchRecordWrite && !verified {
+			t.Fatal("launch-record checkpoint ran before PID-backed verification")
+		}
+		return nil
+	}
+	f.deps.Launch = func(spawn team.Team, opts teamLaunchOptions) (teamLaunchResult, error) {
+		if len(spawn.Members) != 1 || memberHandle(spawn.Members[0]) != "dev" {
+			t.Fatalf("spawn roster = %+v", spawn.Members)
+		}
+		if err := callSimpleStartCheckpoint(opts.AfterCheckpoint, simpleStartCheckpointPaneCreation); err != nil {
+			return teamLaunchResult{}, err
+		}
+		if err := callSimpleStartCheckpoint(opts.AfterCheckpoint, simpleStartCheckpointChildDispatch); err != nil {
+			return teamLaunchResult{}, err
+		}
+		f.seedRecord(t, "dev", "dev", pid, paneID, true, true)
+		return simpleStartLaunchResult("dev", paneID), nil
+	}
+	var out bytes.Buffer
+	if err := runStartWithDependencies(f.args("--yes"), f.deps, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("runStartWithDependencies: %v\n%s", err, out.String())
+	}
+	wantEvents := []string{"namespace_creation", "pane_creation", "child_dispatch", "verify", "launch_record_write"}
+	if strings.Join(events, ",") != strings.Join(wantEvents, ",") {
+		t.Fatalf("event order = %v, want %v", events, wantEvents)
+	}
+	if !strings.Contains(out.String(), "started work") {
+		t.Fatalf("successful --yes launch did not report started:\n%s", out.String())
+	}
+	lock, acquired, err := flock.TryExclusive(lockPath, false)
+	if err != nil || !acquired {
+		t.Fatalf("launch lock not released after success: acquired=%t err=%v", acquired, err)
+	}
+	if lock != nil {
+		_ = lock.Close()
+	}
+}
+
+func TestRunStartWithDependenciesRejectsDeadPIDWithSurvivingTitledPane(t *testing.T) {
+	f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex"})
+	f.deps.Launch = func(team.Team, teamLaunchOptions) (teamLaunchResult, error) {
+		f.seedRecord(t, "dev", "dev", 4102, "%2", false, true)
+		return simpleStartLaunchResult("dev", "%2"), nil
+	}
+	var out bytes.Buffer
+	err := runStartWithDependencies(f.args("--yes"), f.deps, strings.NewReader(""), &out)
+	if err == nil || !strings.Contains(err.Error(), "does not own the verified live child process") {
+		t.Fatalf("dead child with titled pane error = %v", err)
+	}
+	if strings.Contains(out.String(), "started work") {
+		t.Fatalf("dead child was reported started:\n%s", out.String())
+	}
+}
+
+func TestRunStartWithDependenciesSpawnsConfiguredHandleBesideForeignSameRoleRecord(t *testing.T) {
+	f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev-2", Binary: "codex"})
+	foreignDir := f.seedRecord(t, "dev", "dev-1", 4201, "%3", true, true)
+	launchCalls := 0
+	f.deps.Launch = func(spawn team.Team, _ teamLaunchOptions) (teamLaunchResult, error) {
+		launchCalls++
+		if len(spawn.Members) != 1 || memberHandle(spawn.Members[0]) != "dev-2" {
+			t.Fatalf("foreign handle suppressed configured spawn: %+v", spawn.Members)
+		}
+		f.seedRecord(t, "dev", "dev-2", 4202, "%4", true, true)
+		return simpleStartLaunchResult("dev", "%4"), nil
+	}
+	var out bytes.Buffer
+	if err := runStartWithDependencies(f.args("--yes"), f.deps, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("runStartWithDependencies: %v\n%s", err, out.String())
+	}
+	if launchCalls != 1 {
+		t.Fatalf("launch calls = %d, want 1", launchCalls)
+	}
+	for _, want := range []string{"unconfigured handle \"dev-1\"", launch.ExistingPath(foreignDir), "started work"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("start output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestRunStartWithDependenciesClassifiesUnmanagedInvalidAndRemovedRecords(t *testing.T) {
+	t.Run("unmanaged default-No", func(t *testing.T) {
+		f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex"})
+		var out bytes.Buffer
+		if err := runStartWithDependencies(f.args(), f.deps, strings.NewReader("n\n"), &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "unmanaged") || !strings.Contains(out.String(), "no launch record; will create") {
+			t.Fatalf("missing unmanaged classification:\n%s", out.String())
+		}
+	})
+
+	t.Run("record_invalid", func(t *testing.T) {
+		f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex"})
+		agentDir := filepath.Join(f.root, "agents", "broken")
+		path := launch.Path(agentDir)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := runStartWithDependencies(f.args(), f.deps, strings.NewReader("n\n"), &bytes.Buffer{})
+		var conflict *simpleStartConflictError
+		if !errors.As(err, &conflict) || conflict.Class != "record_invalid" || !strings.Contains(conflict.Detail, path) {
+			t.Fatalf("invalid record error = %v, want path-bearing record_invalid", err)
+		}
+	})
+
+	t.Run("Removed", func(t *testing.T) {
+		f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex"})
+		f.seedRecord(t, "ops", "ops", 4301, "%5", true, true)
+		var out bytes.Buffer
+		if err := runStartWithDependencies(f.args(), f.deps, strings.NewReader("n\n"), &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "ops") || !strings.Contains(out.String(), "removed from roster; live recorded runtime retained") {
+			t.Fatalf("missing Removed classification:\n%s", out.String())
+		}
+	})
 }

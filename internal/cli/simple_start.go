@@ -543,6 +543,12 @@ func readSimpleStartRecords(root string) ([]simpleStartRecord, error) {
 
 func reconcileSimpleStartRoles(t team.Team, profile, session, root string, records []simpleStartRecord, opts teamLaunchOptions, probe launchRuntimeProbe) ([]simpleStartRolePlan, []simpleStartRolePlan, error) {
 	used := make(map[int]bool)
+	entries := make([]launch.Entry, 0, len(records))
+	recordIndexByAgentDir := make(map[string]int, len(records))
+	for i, item := range records {
+		entries = append(entries, launch.Entry{AgentDir: item.AgentDir, Record: item.Record})
+		recordIndexByAgentDir[filepath.Clean(item.AgentDir)] = i
+	}
 	desiredByHandle := make(map[string]string, len(t.Members))
 	desiredByRole := make(map[string]string, len(t.Members))
 	for _, member := range t.Members {
@@ -558,49 +564,17 @@ func reconcileSimpleStartRoles(t team.Team, profile, session, root string, recor
 	}
 	var rows []simpleStartRolePlan
 	for _, member := range orderedTeamMembers(t.Members) {
-		handle := memberHandle(member)
-		var candidates []int
-		for i, item := range records {
-			if item.Record.Handle == handle || strings.EqualFold(item.Record.Role, member.Role) {
-				candidates = append(candidates, i)
-			}
+		selection := selectLaunchRecordWithRuntimeProbe(t, profile, member, session, probe, entries)
+		if len(selection.DuplicatePaths) > 0 {
+			return nil, nil, &simpleStartConflictError{Class: "duplicate_live", Detail: fmt.Sprintf("role %s has %d authoritative live launch records: %s", member.Role, len(selection.DuplicatePaths), strings.Join(selection.DuplicatePaths, ", "))}
 		}
-		var live []int
-		for _, i := range candidates {
-			rec := records[i].Record
-			paneID := ""
-			if rec.Tmux != nil {
-				paneID = rec.Tmux.PaneID
-			}
-			if classifyLaunchRuntimeIdentity(rec, "", paneID, probe).Live {
-				live = append(live, i)
-			}
-		}
-		if len(live) > 1 {
-			paths := make([]string, 0, len(live))
-			for _, i := range live {
-				paths = append(paths, launch.ExistingPath(records[i].AgentDir))
-			}
-			sort.Strings(paths)
-			return nil, nil, &simpleStartConflictError{Class: "duplicate_live", Detail: fmt.Sprintf("role %s has %d authoritative live launch records: %s", member.Role, len(live), strings.Join(paths, ", "))}
-		}
-		selected := -1
-		if len(live) == 1 {
-			selected = live[0]
-		} else {
-			for _, i := range candidates {
-				if records[i].Record.Handle == handle {
-					selected = i
-					break
-				}
-			}
-			if selected < 0 && len(candidates) > 0 {
-				selected = candidates[0]
-			}
-		}
-		if selected < 0 {
+		if !selection.Found {
 			rows = append(rows, simpleStartRolePlan{Member: member, State: "unmanaged", Detail: "no launch record; will create"})
 			continue
+		}
+		selected, ok := recordIndexByAgentDir[filepath.Clean(selection.Entry.AgentDir)]
+		if !ok {
+			return nil, nil, fmt.Errorf("selected launch record %s was not present in the start snapshot", launch.ExistingPath(selection.Entry.AgentDir))
 		}
 		used[selected] = true
 		rec := records[selected].Record
@@ -632,8 +606,20 @@ func reconcileSimpleStartRoles(t team.Team, profile, session, root string, recor
 			paneID = rec.Tmux.PaneID
 		}
 		state, detail := "stopped", "removed from roster; stopped record retained"
-		if classifyLaunchRuntimeIdentity(rec, "", paneID, probe).Live {
+		live := classifyLaunchRuntimeIdentity(rec, "", paneID, probe).Live
+		if live {
 			state, detail = "live/config-diverged", "removed from roster; live recorded runtime retained"
+		}
+		if desiredHandle, aliasesDesiredRole := desiredByRole[strings.ToLower(rec.Role)]; aliasesDesiredRole && desiredHandle != rec.Handle {
+			state = "unmanaged"
+			runtime := "stopped"
+			if live {
+				runtime = "live"
+			}
+			detail = fmt.Sprintf(
+				"unconfigured handle %q aliases configured role %q (expected handle %q); %s record retained: %s",
+				rec.Handle, rec.Role, desiredHandle, runtime, launch.ExistingPath(item.AgentDir),
+			)
 		}
 		copyRec := rec
 		removed = append(removed, simpleStartRolePlan{Member: member, State: state, Detail: detail, Record: &copyRec})
@@ -735,8 +721,8 @@ func verifySimpleStartRecords(plan simpleStartPlan, result teamLaunchResult, dep
 		if rec.Tmux == nil || rec.Tmux.PaneID != pane.PaneID {
 			return fmt.Errorf("launch record for %s does not own pane %s", pane.Role, pane.PaneID)
 		}
-		if !classifyLaunchRuntimeIdentity(rec, "", pane.PaneID, deps.RuntimeProbe).Live {
-			return fmt.Errorf("launch record for %s does not own a live process or pane", pane.Role)
+		if !classifyLaunchRuntimeIdentity(rec, "", pane.PaneID, deps.RuntimeProbe).PIDLive {
+			return fmt.Errorf("launch record for %s does not own the verified live child process", pane.Role)
 		}
 	}
 	return nil

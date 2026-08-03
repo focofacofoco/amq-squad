@@ -1751,6 +1751,14 @@ func statusUnmanagedLaunchRecordWarningsFromEntries(t team.Team, profile, workst
 }
 
 func selectStatusLaunchRecord(t team.Team, profile string, m team.Member, workstream string, probe duplicateLaunchProbe, entries []launch.Entry) statusLaunchSelection {
+	return selectLaunchRecordWithRuntimeProbe(t, profile, m, workstream, launchRuntimeProbeFromDuplicate(probe), entries)
+}
+
+// selectLaunchRecordWithRuntimeProbe is the record-first identity selector
+// shared by status, down, and simple-start reconciliation. Callers may differ
+// in how they observe runtime liveness, but durable candidacy remains one exact
+// profile/session/team-home/handle pipeline.
+func selectLaunchRecordWithRuntimeProbe(t team.Team, profile string, m team.Member, workstream string, runtimeProbe launchRuntimeProbe, entries []launch.Entry) statusLaunchSelection {
 	handle := memberHandle(m)
 	var candidates []launch.Entry
 	for _, entry := range entries {
@@ -1776,7 +1784,6 @@ func selectStatusLaunchRecord(t team.Team, profile string, m team.Member, workst
 		return launch.ExistingPath(candidates[i].AgentDir) < launch.ExistingPath(candidates[j].AgentDir)
 	})
 	var live []launch.Entry
-	runtimeProbe := launchRuntimeProbeFromDuplicate(probe)
 	for _, entry := range candidates {
 		paneID := ""
 		if entry.Record.Tmux != nil {
