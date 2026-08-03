@@ -712,6 +712,8 @@ func TestNamedProfileDispatchConflictIncludesConcreteRecoveryCommands(t *testing
 		"legacy/default session root",
 		"--override-namespace-conflict --reason <why>",
 		coldNamespaceMigrationIssueURL,
+		"amq-squad goal --project " + shellQuote(resolveDir(dir)) + " --profile release --session main",
+		"amq send --root " + shellQuote(filepath.Join(resolveDir(dir), ".agent-mail", "release", "main")),
 		"amq-squad archive main --project " + shellQuote(resolveDir(dir)) + " --profile default",
 		"amq-squad rm main --project " + shellQuote(resolveDir(dir)) + " --profile default",
 		"amq send --root " + shellQuote(filepath.Join(resolveDir(dir), ".agent-mail", "main")),
@@ -980,8 +982,8 @@ func TestDefaultProfileShadowRecoveryDoesNotAdvertiseInertOverride(t *testing.T)
 		t.Fatal("unprofiled dispatch should refuse when named profile owns session")
 	}
 	for _, want := range []string{
-		"explicit default-profile escape (acknowledged, not audited)",
-		"amq-squad dispatch --project " + shellQuote(resolveDir(dir)) + " --profile default --session main",
+		"explicit default-profile AMQ send",
+		"amq send --root " + shellQuote(filepath.Join(resolveDir(dir), ".agent-mail", "main")),
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("dispatch error missing %q:\n%v", want, err)

@@ -448,6 +448,68 @@ func withDispatchAMQCommandErrorSeam(t *testing.T, env amqEnv, output string, se
 	return &calls
 }
 
+func TestSimpleTaskDispatchFailureLeavesPlainClaimAndAllowsSecondSend(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	writeDispatchTeam(t, dir)
+	calls := withDispatchAMQCommandErrorSeam(t,
+		amqEnv{Root: ".agent-mail/{session}", BaseRoot: ".agent-mail"}, "", nil,
+	)
+	attempt := 0
+	runAMQCommand = func(req amqCommandRequest) ([]byte, error) {
+		*calls = append(*calls, req)
+		attempt++
+		if attempt == 1 {
+			return nil, errors.New("transport unavailable")
+		}
+		return []byte("Sent msg-second to qa\n"), nil
+	}
+
+	_, _, err := captureOutput(t, func() error {
+		return runDispatch([]string{
+			"--session", "issue-96", "--role", "qa", "--subject", "plain task",
+			"--body", "do the work", "--create-task", "--no-wake",
+		})
+	})
+	if err == nil || !strings.Contains(err.Error(), "task remains in_progress") {
+		t.Fatalf("first dispatch error = %v, want visible in_progress recovery guidance", err)
+	}
+	tasks, err := taskstore.ListForProfile(dir, team.DefaultProfile, "issue-96")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, want one created task", tasks)
+	}
+	created := tasks[0]
+	if created.Status != taskstore.StatusInProgress || created.AssignedTo != "qa" {
+		t.Fatalf("task after failed send = %+v, want qa/in_progress", created)
+	}
+	if len(created.Outbox) != 0 || created.Dispatch != nil || created.CompletionReconcile != nil || created.CompletionLifecycle != nil {
+		t.Fatalf("failed simple dispatch persisted retry/delivery state: %+v", created)
+	}
+
+	_, _, err = captureOutput(t, func() error {
+		return runDispatch([]string{
+			"--session", "issue-96", "--role", "qa", "--subject", "plain task",
+			"--body", "do the work", "--task", created.ID, "--no-wake",
+		})
+	})
+	if err != nil {
+		t.Fatalf("second dispatch of already-claimed task: %v", err)
+	}
+	after, err := taskstore.ShowForProfile(dir, team.DefaultProfile, "issue-96", created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != taskstore.StatusInProgress || after.AssignedTo != "qa" || len(after.Outbox) != 0 || after.Dispatch != nil {
+		t.Fatalf("second dispatch changed plain task authority: %+v", after)
+	}
+	if attempt != 2 {
+		t.Fatalf("AMQ send attempts = %d, want 2 explicit attempts", attempt)
+	}
+}
+
 func receiptHasStage(r *deliveryReceiptData, state string) bool {
 	if r == nil {
 		return false

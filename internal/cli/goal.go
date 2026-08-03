@@ -69,7 +69,7 @@ type goalDraftData struct {
 	Roster                      []goalRosterMember     `json:"roster"`
 	Tasks                       []goalTaskPlan         `json:"tasks"`
 	SpawnGates                  []goalCommandPlan      `json:"spawn_gates"`
-	Dispatches                  []goalDispatchPlan     `json:"dispatches"`
+	Dispatches                  []goalDispatchPlan     `json:"dispatches,omitempty"`
 	ApplyableMutations          []goalCommandPlan      `json:"applyable_mutations"`
 	OrchestratorPrompt          string                 `json:"orchestrator_prompt"`
 	SkillInvocation             string                 `json:"skill_invocation,omitempty"`
@@ -479,6 +479,9 @@ func runGoalWithVersion(args []string, version string) error {
 		printGoalUsage()
 		return nil
 	}
+	if strings.HasPrefix(args[0], "-") && args[0] != "-h" && args[0] != "--help" {
+		return runSimpleGoal(args)
+	}
 	switch args[0] {
 	case "-h", "--help":
 		printGoalUsage()
@@ -521,12 +524,18 @@ func normalizeOptionalStringFlag(args []string, name, defaultValue string) []str
 }
 
 func printGoalUsage() {
-	fmt.Fprint(os.Stderr, `amq-squad goal - manage preview-first goal setup plans
+	fmt.Fprint(os.Stderr, `amq-squad goal - send one goal to the configured lead
 
 Usage:
+  amq-squad goal --goal TEXT [--project DIR] [--profile NAME] [--session NAME] [--json]
   amq-squad goal <subcommand> [options]
 
-Subcommands:
+The direct form sends exactly one ordinary AMQ todo message from the configured
+operator mailbox to the selected lead. It creates no goal attempt, delivery
+state, deduplication token, receipt, supervision gate, or automatic retry. A
+failed send is reported as-is; inspect AMQ reality before choosing to send again.
+
+Legacy subcommands (retained until the deletion step):
   apply     apply an operator-approved visible lead goal
   claim     atomically claim one pane/AMQ goal delivery attempt
   deliver   deliver a binary-specific goal input to the resolved visible lead
@@ -537,12 +546,72 @@ Subcommands:
 Run 'amq-squad goal <subcommand> --help' for subcommand options and flags.
 
 Examples:
+  amq-squad goal --project ~/Code/app --session issue-96 --goal "fix issue #96" --json
   amq-squad goal draft --goal "fix issue #96" --session issue-96
   amq-squad goal draft --goal "deliver milestone v2.7.0" --repo omriariav/amq-squad --milestone v2.7.0 --session v2-7-0
   amq-squad goal apply --session issue-96 --gate release --yes --json
   amq-squad goal deliver --session issue-96 --goal "fix issue #96" --json
   amq-squad goal start --session issue-96 --goal "fix issue #96" --dry-run --json
 `)
+}
+
+func runSimpleGoal(args []string) error {
+	fs := flag.NewFlagSet("goal", flag.ContinueOnError)
+	projectFlag := fs.String("project", "", "project/team-home directory (default: cwd)")
+	profileFlag := fs.String("profile", "", "team profile (default: default profile)")
+	sessionFlag := fs.String("session", "", "AMQ workstream/session")
+	goalFlag := fs.String("goal", "", "goal text to send")
+	jsonOut := fs.Bool("json", false, "emit a schema-versioned mutation result envelope")
+	registerScopedFlagAliases(fs, projectFlag, sessionFlag, profileFlag)
+	fs.Usage = printGoalUsage
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return usageErrorf("goal direct mode takes no positional arguments")
+	}
+	goal := *goalFlag
+	if strings.TrimSpace(goal) == "" {
+		return usageErrorf("goal requires --goal TEXT")
+	}
+	opts, err := resolveGoalTargetOptions(
+		*projectFlag, *profileFlag, *sessionFlag, "",
+		flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"),
+		"goal", namespaceConflictOverrideOptions{},
+	)
+	if err != nil {
+		return err
+	}
+	operator := team.EffectiveOperator(opts.Team)
+	if !operator.Enabled || strings.TrimSpace(operator.Handle) == "" {
+		return usageErrorf("goal requires an enabled operator mailbox")
+	}
+	recipient := memberHandle(opts.Member)
+	ctx, err := resolveAMQContextForNamespace(opts.Project, opts.Profile, opts.Session, operator.Handle)
+	if err != nil {
+		return fmt.Errorf("resolve AMQ root for goal: %w", err)
+	}
+	ctx.Me = operator.Handle
+	thread := canonicalP2PThread(operator.Handle, recipient)
+	subject := "GOAL: " + opts.Session
+	cmd := []string{
+		"send", "--root", ctx.Root, "--me", operator.Handle, "--to", recipient,
+		"--thread", thread, "--kind", "todo", "--subject", subject, "--body", "-",
+	}
+	if _, err := runAMQCommand(amqCommandRequest{
+		Dir: opts.Project, Env: amqCommandEnv(ctx), Arg: cmd, Stdin: strings.NewReader(goal),
+	}); err != nil {
+		return fmt.Errorf("send goal to %s: %w", opts.Role, err)
+	}
+	if *jsonOut {
+		return printJSONEnvelope("goal", mutationResult{
+			Command: "goal", Status: "sent", Project: opts.Project, Profile: opts.Profile,
+			Session: opts.Session, Namespace: opts.Namespace, Role: opts.Role, Handle: recipient,
+			Thread: thread, Root: ctx.Root,
+		})
+	}
+	fmt.Printf("Sent goal to %s (handle %s) on %s via AMQ.\n", opts.Role, recipient, opts.Session)
+	return nil
 }
 
 func runGoalApply(args []string) error {
@@ -2484,7 +2553,7 @@ func buildGoalDraft(opts goalDraftOptions) (goalDraftData, error) {
 			"Default visibility is sibling-tabs: launch the visible lead from an existing visible tmux pane with the generated binary-specific goal input; workers remain behind spawn gates.",
 			"Step 1 / Step 2 / Step 3: preview first, create or register the visible goal lead, then monitor the run through that lead.",
 			"Execution mode is explicit: global_orchestrator monitors only; project_lead and project_team mutate through their project-root lead; direct_lead_session is an explicit exception.",
-			"The top-level orchestrator dispatches to the visible goal lead; child agents stay implementation details unless an approval gate, blocker, release risk, or final evidence requires surfacing them.",
+			"The operator sends one ordinary AMQ goal message to the visible lead; child agents stay implementation details unless an approval gate, blocker, release risk, or final evidence requires surfacing them.",
 			"Leads must immediately surface any blocker or approval request to the operator/orchestrator-visible surface; never leave it only in an internal pane or hidden gate.",
 			"When wake is unavailable, the parent orchestrator or NOC polls each visible lead's inbox, gates, and status on a cadence; one goal maps to one visible lead.",
 			"Visible lead binding is explicit: launch the visible lead with the generated binary-specific goal input; status names native_goal for Claude, prompt_goal for Codex, and the corresponding missing mode until launch evidence exists.",
@@ -2529,7 +2598,9 @@ func buildGoalDraft(opts goalDraftOptions) (goalDraftData, error) {
 	data.BriefSkeleton = renderGoalBriefSkeleton(data)
 	data.Tasks = defaultGoalTasks(data)
 	data.SpawnGates = defaultGoalSpawnGates(data)
-	data.Dispatches = defaultGoalDispatches(data)
+	// Simple mode deliberately has no prepared dispatch plan. Native tasks and
+	// ordinary AMQ messages remain separate records; workers claim tasks directly.
+	data.Dispatches = nil
 	data.ApplyableMutations = defaultGoalMutations(data)
 	data.SkillInvocation = renderGoalSkillInvocation(data)
 	data.Steps = goalDraftSteps(data)
@@ -2882,7 +2953,7 @@ func renderGoalBriefSkeleton(data goalDraftData) string {
 		fmt.Fprintf(&b, "- Budget turns: %d\n\n", data.AutonomousPolicy.BudgetTurns)
 	}
 	b.WriteString("## Out of scope\n- No autonomous action outside the declared policy envelope.\n- No child-authored spawn or prune authority.\n- No merge, release, destructive filesystem action, external communication, or provider side effect without operator approval.\n\n")
-	b.WriteString("## Acceptance\n- Preview is reviewed before any setup mutation.\n- Spawn gates are explicit and durable.\n- Visible lead binding is declared as native_goal for Claude or prompt_goal for Codex, otherwise the matching missing mode plus AMQ task and brief remain explicit.\n- Tasks, dispatches, review evidence, and final verification are recorded before merge-ready claims.\n")
+	b.WriteString("## Acceptance\n- Preview is reviewed before any setup mutation.\n- Spawn gates are explicit and durable.\n- Visible lead binding is declared as native_goal for Claude or prompt_goal for Codex, otherwise the matching missing mode plus AMQ task and brief remain explicit.\n- Tasks, plain AMQ status reports, review evidence, and final verification are recorded before merge-ready claims.\n")
 	return b.String()
 }
 
@@ -2931,6 +3002,8 @@ func defaultGoalSpawnGates(data goalDraftData) []goalCommandPlan {
 	return gates
 }
 
+// defaultGoalDispatches is legacy goal-plan machinery retained for the later
+// deletion step. buildGoalDraft deliberately leaves Dispatches empty.
 func defaultGoalDispatches(data goalDraftData) []goalDispatchPlan {
 	dispatches := make([]goalDispatchPlan, 0, len(data.Tasks))
 	for _, task := range data.Tasks {
@@ -3296,9 +3369,7 @@ func writeGoalDraftMarkdown(out *os.File, data goalDraftData) {
 	}
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "## Dispatches")
-	for _, dispatch := range data.Dispatches {
-		fmt.Fprintf(out, "- `%s`\n", dispatch.Command)
-	}
+	fmt.Fprintln(out, "- None. Add native tasks, send ordinary AMQ todo messages, and let workers claim tasks atomically.")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "## Orchestrator Prompt")
 	fmt.Fprintf(out, "`%s`\n", data.OrchestratorPrompt)
