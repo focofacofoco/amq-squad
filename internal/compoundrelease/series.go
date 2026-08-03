@@ -47,6 +47,7 @@ type SeriesInspection struct {
 	SeriesID       string
 	Scope          Scope
 	Snapshot       Snapshot
+	RecordPath     string
 	RecordAhead    bool
 	SuccessorAhead bool
 	Lock           LockArtifact
@@ -306,7 +307,7 @@ validated:
 		return SeriesInspection{}, fmt.Errorf("release series directory does not match validated manifest scope")
 	}
 	s.scope = derivedScope
-	return SeriesInspection{SeriesID: item.name, Scope: derivedScope, Snapshot: current, RecordAhead: recordAhead, SuccessorAhead: current.Pointer.State == operatorauth.ReleaseStateSuperseded, Lock: artifact}, nil
+	return SeriesInspection{SeriesID: item.name, Scope: derivedScope, Snapshot: current, RecordPath: filepath.Join(s.dirPath, s.generationName(current.Pointer.Generation)), RecordAhead: recordAhead, SuccessorAhead: current.Pointer.State == operatorauth.ReleaseStateSuperseded, Lock: artifact}, nil
 }
 
 // identifySeriesLocked proves the exact prepared-derived scope even when the
@@ -326,7 +327,7 @@ func identifySeriesLocked(item enumeratedSeries, artifact LockArtifact) (SeriesI
 		return SeriesInspection{}, fmt.Errorf("release series directory does not match validated manifest scope")
 	}
 	item.store.scope = scope
-	return SeriesInspection{SeriesID: item.name, Scope: scope, Snapshot: Snapshot{Pointer: pointer, Prepared: prepared}, Lock: artifact}, nil
+	return SeriesInspection{SeriesID: item.name, Scope: scope, Snapshot: Snapshot{Pointer: pointer, Prepared: prepared}, RecordPath: filepath.Join(item.store.dirPath, item.store.generationName(pointer.Generation)), Lock: artifact}, nil
 }
 
 // InspectSessionSeries is the lifecycle-only inspection entry point. It holds

@@ -237,22 +237,14 @@ func addActiveSeries(t *testing.T, first *Store, adapter *fakeReconcileAdapter, 
 		t.Fatal(err)
 	}
 	for i, child := range publishing.Prepared.Children {
-		path := filepath.Join(scope.ProjectDir, ".amq-squad", "receipts", child.Receipt.AttemptID+suffix+".json")
-		adapter.receiptPaths[child.Receipt.AttemptID] = path
 		id := "question-" + child.Role + suffix
-		raw := rawReleaseReceipt(t, scope, child, path, adapter.root, id)
-		bound, decodeErr := decodeBoundReleaseReceiptV2(raw, scope, child, path, adapter.root)
-		if decodeErr != nil || bound.Tuple == nil {
-			t.Fatalf("bound child %d: %v", i, decodeErr)
-		}
 		if _, err := store.ClaimChildSend(publishing.Pointer.GenerationID, i); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.AdoptChildPublication(publishing.Pointer.GenerationID, i, *bound.Tuple); err != nil {
+		if err := store.AdoptChildPublication(publishing.Pointer.GenerationID, i, id); err != nil {
 			t.Fatal(err)
 		}
-		writeReleaseQuestion(t, adapter.root, child.Receipt.Recipient, "new", id, fmt.Sprintf("2026-07-15T02:00:0%dZ", i), child, nil)
-		adapter.receipts[path] = raw
+		writeReleaseQuestion(t, adapter.root, publishing.Prepared.Spec.OperatorHandle, "new", id, fmt.Sprintf("2026-07-15T02:00:0%dZ", i), child, publishing.Prepared.Spec, nil)
 	}
 	result, err := store.Reconcile(publishing.Pointer.GenerationID, adapter)
 	if err != nil {
@@ -261,17 +253,15 @@ func addActiveSeries(t *testing.T, first *Store, adapter *fakeReconcileAdapter, 
 	return store, result.Snapshot
 }
 
-func TestResolveSeriesIndependentLeavesAndReceiptGenerationStability(t *testing.T) {
+func TestResolveSeriesIndependentLeavesAndMessageIdentityStability(t *testing.T) {
 	store, snapshot, adapter, query, first := activeInspectionFixture(t)
 	if len(first.Leaves) != 1 || len(first.Leaves[0].Children) != 2 || !first.Leaves[0].Children[0].Eligible || !first.Leaves[0].Children[1].Eligible || len(first.Recovery) != 1 || !first.Recovery[0].Cleared {
 		t.Fatalf("leaves=%+v", first.Leaves)
 	}
 	child := snapshot.Prepared.Children[0]
-	path := adapter.receiptPaths[child.Receipt.AttemptID]
-	adapter.receipts[path] = receiptAtGeneration(t, adapter.receipts[path], 9)
 	second, err := ResolveSessionSeries(sessionScope(store.scope), query, adapter)
 	if err != nil || second.Claim == nil || second.Claim.Token != first.Claim.Token {
-		t.Fatalf("live generation changed immutable token: first=%+v second=%+v err=%v", first.Claim, second.Claim, err)
+		t.Fatalf("stable mailbox identity changed immutable token: first=%+v second=%+v err=%v", first.Claim, second.Claim, err)
 	}
 	withoutID := query
 	withoutID.MessageID = ""
@@ -279,20 +269,36 @@ func TestResolveSeriesIndependentLeavesAndReceiptGenerationStability(t *testing.
 	if err != nil || noID.Claim != nil || noID.Disposition != ResolutionSuppressed {
 		t.Fatalf("message-id-free query selected authority: result=%+v err=%v", noID, err)
 	}
-	adapter.receipts[path] = []byte(strings.Replace(string(adapter.receipts[path]), `"sender":"cto"`, `"sender":"other"`, 1))
+	path := filepath.Join(adapter.root, "agents", snapshot.Prepared.Spec.OperatorHandle, "inbox", "new", query.MessageID+".md")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(raw), child.Body, child.Body+" changed", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	drifted, err := ResolveSessionSeries(sessionScope(store.scope), query, adapter)
 	if err != nil || drifted.Claim != nil || len(drifted.Recovery) != 1 {
-		t.Fatalf("immutable receipt drift remained eligible: result=%+v err=%v", drifted, err)
+		t.Fatalf("changed mailbox message remained eligible: result=%+v err=%v", drifted, err)
 	}
 }
 
 func TestResolveSeriesBrokenSiblingIsIsolatedWithOneRecovery(t *testing.T) {
 	store, snapshot, adapter, query, _ := activeInspectionFixture(t)
-	broken := snapshot.Prepared.Children[1]
-	delete(adapter.receipts, adapter.receiptPaths[broken.Receipt.AttemptID])
+	missingID := snapshot.Active.Children[1].QuestionMessageID
+	brokenPath := filepath.Join(adapter.root, "agents", snapshot.Prepared.Spec.OperatorHandle, "inbox", "new", missingID+".md")
+	if err := os.Remove(brokenPath); err != nil {
+		t.Fatal(err)
+	}
 	result, err := ResolveSessionSeries(sessionScope(store.scope), query, adapter)
-	if err != nil || result.Claim == nil || len(result.Recovery) != 1 || len(result.Leaves) != 1 || !result.Leaves[0].Children[0].Eligible || result.Leaves[0].Children[1].Eligible {
+	recordPath := filepath.Join(store.dirPath, store.generationName(snapshot.Pointer.Generation))
+	if err != nil || result.Claim == nil || len(result.Recovery) != 1 || result.Recovery[0].Reason != RecoveryReasonRecordInvalid || len(result.Leaves) != 1 || result.Leaves[0].State != ProjectionStateConflict || result.Leaves[0].Reason != ProjectionReasonRecordInvalid || !result.Leaves[0].Children[0].Eligible || result.Leaves[0].Children[1].Eligible || !strings.Contains(result.Leaves[0].Children[1].Reason, recordPath) || !strings.Contains(result.Leaves[0].Children[1].Reason, missingID) {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	missingChild := snapshot.Prepared.Children[1]
+	missing, err := ResolveSessionSeries(sessionScope(store.scope), ResolveQuery{MessageID: missingID, Gate: missingChild.Thread, Action: missingChild.Action, Target: missingChild.Target}, adapter)
+	if err != nil || missing.Claim != nil || missing.Disposition != ResolutionIneligible || !strings.Contains(missing.Reason, "record_invalid") || !strings.Contains(missing.Reason, recordPath) || !strings.Contains(missing.Reason, missingID) {
+		t.Fatalf("missing result=%+v err=%v", missing, err)
 	}
 }
 
@@ -302,20 +308,26 @@ func TestRecoveryKeyStableFingerprintTracksClearRecoveryClear(t *testing.T) {
 		t.Fatalf("initial clear=%+v", clear.Recovery)
 	}
 	initial := clear.Recovery[0]
-	child := snapshot.Prepared.Children[0]
-	path := adapter.receiptPaths[child.Receipt.AttemptID]
-	raw := append([]byte(nil), adapter.receipts[path]...)
-	delete(adapter.receipts, path)
+	path := filepath.Join(adapter.root, "agents", snapshot.Prepared.Spec.OperatorHandle, "inbox", "new", query.MessageID+".md")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
 
 	recovery, err := ResolveSessionSeries(sessionScope(store.scope), query, adapter)
-	if err != nil || len(recovery.Recovery) != 1 || recovery.Recovery[0].Cleared || recovery.Recovery[0].Reason != RecoveryReasonActiveEvidence {
+	if err != nil || len(recovery.Recovery) != 1 || recovery.Recovery[0].Cleared || recovery.Recovery[0].Reason != RecoveryReasonRecordInvalid {
 		t.Fatalf("recovery=%+v err=%v", recovery, err)
 	}
 	degraded := recovery.Recovery[0]
 	if degraded.Key != initial.Key || degraded.Fingerprint == initial.Fingerprint {
 		t.Fatalf("key/fingerprint initial=%+v recovery=%+v", initial, degraded)
 	}
-	adapter.receipts[path] = raw
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	clearedAgain, err := ResolveSessionSeries(sessionScope(store.scope), query, adapter)
 	if err != nil || len(clearedAgain.Recovery) != 1 || !clearedAgain.Recovery[0].Cleared {
@@ -387,26 +399,13 @@ func TestCloseArtifactFailureReplacesSeriesRecovery(t *testing.T) {
 	}
 }
 
-func TestResolveIdentifiableOtherSeriesFailuresAreIsolated(t *testing.T) {
+func TestResolveIdentifiableOtherSeriesLifecycleFailureIsIsolated(t *testing.T) {
 	first, _, adapter, query, _ := activeInspectionFixture(t)
 	second, secondSnapshot := addActiveSeries(t, first, adapter, "gate/release-other", "-other")
-	broken := secondSnapshot.Prepared.Children[0]
-	adapter.receiptErrs[adapter.receiptPaths[broken.Receipt.AttemptID]] = errors.New("read denied")
-	result, err := ResolveSessionSeries(sessionScope(first.scope), query, adapter)
-	if err != nil || result.Claim == nil || result.Claim.SeriesID != first.seriesID || len(result.Recovery) != 2 {
-		t.Fatalf("read-isolation result=%+v err=%v", result, err)
-	}
-	delete(adapter.receiptErrs, adapter.receiptPaths[broken.Receipt.AttemptID])
-	adapter.receiptPathErrs[broken.Receipt.AttemptID] = errors.New("path denied")
-	result, err = ResolveSessionSeries(sessionScope(first.scope), query, adapter)
-	if err != nil || result.Claim == nil || result.Claim.SeriesID != first.seriesID || len(result.Recovery) != 2 {
-		t.Fatalf("path-isolation result=%+v err=%v", result, err)
-	}
-	delete(adapter.receiptPathErrs, broken.Receipt.AttemptID)
 	if err := os.WriteFile(filepath.Join(second.dirPath, second.generationName(secondSnapshot.Pointer.Generation)), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err = ResolveSessionSeries(sessionScope(first.scope), query, adapter)
+	result, err := ResolveSessionSeries(sessionScope(first.scope), query, adapter)
 	if err != nil || result.Claim == nil || result.Claim.SeriesID != first.seriesID || len(result.Recovery) != 2 {
 		t.Fatalf("lifecycle-isolation result=%+v err=%v", result, err)
 	}
@@ -562,10 +561,6 @@ func (s staticInspectionAdapter) ResolveSessionRoot(Scope) (string, error) {
 	}
 	return s.root, s.rootErr
 }
-func (s staticInspectionAdapter) ExpectedReceiptPath(Scope, string) (string, error) {
-	return "", os.ErrNotExist
-}
-func (s staticInspectionAdapter) ReadReceipt(string) ([]byte, error) { return nil, os.ErrNotExist }
 func (s staticInspectionAdapter) ScanSessionMessages(string, func() time.Time) ([]state.Message, []state.Warning) {
 	if s.scanCalls != nil {
 		*s.scanCalls++
@@ -710,11 +705,11 @@ func TestRecordAheadInspectionIsRecoveryOnlyAndNonMutating(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipts := make(map[string]operatorauth.ReleaseDeliveryReceiptTuple)
+	messageIDs := make(map[string]string)
 	for _, child := range record.Children {
-		receipts[child.Role] = *child.Receipt
+		messageIDs[child.Role] = child.QuestionMessageID
 	}
-	active, err := operatorauth.NewActiveRelease(publishing.Prepared, receipts)
+	active, err := operatorauth.NewActiveRelease(publishing.Prepared, messageIDs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1054,7 +1049,7 @@ func TestInvocationGuardRejectsExactMessageDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	child := snapshot.Prepared.Children[0]
-	path := filepath.Join(adapter.root, "agents", child.Receipt.Recipient, "inbox", "new", query.MessageID+".md")
+	path := filepath.Join(adapter.root, "agents", snapshot.Prepared.Spec.OperatorHandle, "inbox", "new", query.MessageID+".md")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
