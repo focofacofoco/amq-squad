@@ -620,7 +620,8 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 	}
 	cwd, handle, root := report.CWD, report.Handle, report.Root
 	if exactStopScope != nil {
-		if err := validateExactStopLaunchRecord(rec, m, handle, exactStopScope.Profile, exactStopScope.Session, root); err != nil {
+		requestedRoot := squadnamespace.AMQRoot(t.Project, exactStopScope.Profile, exactStopScope.Session)
+		if err := validateExactStopLaunchRecord(rec, m, handle, exactStopScope.Profile, exactStopScope.Session, requestedRoot); err != nil {
 			report.Status = downStatusFailed
 			report.Detail = "launch record failed exact named-profile identity validation: " + err.Error()
 			return report
