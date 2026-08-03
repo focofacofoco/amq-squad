@@ -1,6 +1,7 @@
 package compoundrelease
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -292,13 +293,86 @@ func TestResolveSeriesBrokenSiblingIsIsolatedWithOneRecovery(t *testing.T) {
 	}
 	result, err := ResolveSessionSeries(sessionScope(store.scope), query, adapter)
 	recordPath := filepath.Join(store.dirPath, store.generationName(snapshot.Pointer.Generation))
-	if err != nil || result.Claim == nil || len(result.Recovery) != 1 || result.Recovery[0].Reason != RecoveryReasonRecordInvalid || len(result.Leaves) != 1 || result.Leaves[0].State != ProjectionStateConflict || result.Leaves[0].Reason != ProjectionReasonRecordInvalid || !result.Leaves[0].Children[0].Eligible || result.Leaves[0].Children[1].Eligible || !strings.Contains(result.Leaves[0].Children[1].Reason, recordPath) || !strings.Contains(result.Leaves[0].Children[1].Reason, missingID) {
+	if err != nil || result.Claim != nil || result.Disposition != ResolutionIneligible || len(result.Recovery) != 1 || result.Recovery[0].Reason != RecoveryReasonRecordInvalid || len(result.Leaves) != 1 || result.Leaves[0].State != ProjectionStateConflict || result.Leaves[0].Reason != ProjectionReasonRecordInvalid || result.Leaves[0].Children[0].Eligible || result.Leaves[0].Children[1].Eligible || !strings.Contains(result.Leaves[0].Children[1].Reason, recordPath) || !strings.Contains(result.Leaves[0].Children[1].Reason, missingID) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	missingChild := snapshot.Prepared.Children[1]
 	missing, err := ResolveSessionSeries(sessionScope(store.scope), ResolveQuery{MessageID: missingID, Gate: missingChild.Thread, Action: missingChild.Action, Target: missingChild.Target}, adapter)
 	if err != nil || missing.Claim != nil || missing.Disposition != ResolutionIneligible || !strings.Contains(missing.Reason, "record_invalid") || !strings.Contains(missing.Reason, recordPath) || !strings.Contains(missing.Reason, missingID) {
 		t.Fatalf("missing result=%+v err=%v", missing, err)
+	}
+}
+
+func TestV227ReceiptBearingSeriesConvergesToInertLegacyClear(t *testing.T) {
+	scope := testScope(t)
+	store := openTestStore(t, scope)
+	planned, err := store.Create(specForScope(scope))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pointerPath := filepath.Join(store.dirPath, "current.json")
+	generationPath := filepath.Join(store.dirPath, store.generationName(1))
+	preparedPath := filepath.Join(store.dirPath, store.preparedName(1))
+	rewriteJSONMap(t, pointerPath, func(value map[string]any) {
+		value["schema_version"] = float64(legacyStoreSchemaVersion)
+	})
+	rewriteJSONMap(t, generationPath, func(value map[string]any) {
+		value["schema_version"] = float64(legacyStoreSchemaVersion)
+		for _, raw := range value["children"].([]any) {
+			child := raw.(map[string]any)
+			child["receipt_path"] = filepath.Join(store.dirPath, "retired-receipt.json")
+			child["receipt_sha256"] = "sha256:" + strings.Repeat("0", 64)
+			child["receipt"] = map[string]any{"retired": true}
+		}
+	})
+	rewriteJSONMap(t, preparedPath, func(value map[string]any) {
+		for _, raw := range value["children"].([]any) {
+			child := raw.(map[string]any)
+			marker := child["release_child"].(map[string]any)
+			marker["schema_version"] = float64(legacyReleaseChildSchemaVersion)
+			child["receipt"] = map[string]any{
+				"attempt_id": marker["attempt_id"], "kind": operatorauth.ReleaseChildKindPrefix + child["role"].(string),
+				"sender": planned.Prepared.Spec.RequesterHandle, "recipient": planned.Prepared.Spec.OperatorHandle,
+				"thread": child["thread"], "namespace_id": planned.Prepared.Spec.Namespace.NamespaceID,
+				"target_identity": "release-receipt-target-v1-" + strings.Repeat("0", 64), "minimum_generation": float64(1),
+			}
+		}
+	})
+
+	before := captureArtifacts(t, store, []string{"current.json", store.generationName(1), store.preparedName(1)})
+	adapter := &fakeReconcileAdapter{root: t.TempDir()}
+	first, err := ResolveSessionSeries(sessionScope(scope), ResolveQuery{}, adapter)
+	if err != nil || first.Claim != nil || first.Degradation != nil || len(first.Leaves) != 1 || first.Leaves[0].State != ProjectionStateAborted || first.Leaves[0].Reason != ProjectionReasonLegacyCleared || len(first.Recovery) != 1 || !first.Recovery[0].Cleared || first.Recovery[0].Reason != RecoveryReasonLegacyCleared {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	second, err := ResolveSessionSeries(sessionScope(scope), ResolveQuery{}, adapter)
+	if err != nil || second.Claim != nil || len(second.Recovery) != 1 || second.Recovery[0].Fingerprint != first.Recovery[0].Fingerprint {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	after := captureArtifacts(t, store, []string{"current.json", store.generationName(1), store.preparedName(1)})
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("legacy clear projection mutated v2.27 artifacts")
+	}
+}
+
+func rewriteJSONMap(t *testing.T, path string, mutate func(map[string]any)) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	mutate(value)
+	updated, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(updated, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

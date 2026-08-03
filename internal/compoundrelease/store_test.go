@@ -524,7 +524,7 @@ func TestStoreActivateVersusSuccessorRace(t *testing.T) {
 func TestStoreStrictPointerDecode(t *testing.T) {
 	for name, corrupt := range map[string]func(string) string{
 		"unknown": func(s string) string {
-			return strings.Replace(s, `"schema_version": 1`, `"schema_version": 1, "unknown": true`, 1)
+			return strings.Replace(s, `"schema_version": 2`, `"schema_version": 2, "unknown": true`, 1)
 		},
 		"duplicate": func(s string) string { return strings.Replace(s, `"revision": 1`, `"revision": 1, "revision": 2`, 1) },
 		"trailing":  func(s string) string { return s + `{}` },

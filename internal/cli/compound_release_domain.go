@@ -230,7 +230,7 @@ func validateCLIReleaseMarkerClaim(selected cliReleaseSelectedContext, adapter *
 		return fmt.Errorf("release question id does not match eligibility claim")
 	}
 	if marker.GenerationID != claim.GenerationID || marker.PreparedManifestID != claim.PreparedManifestID ||
-		marker.Role != claim.Role || marker.Ordinal != claim.Ordinal || marker.Thread != claim.Gate ||
+		marker.Role != claim.Role || marker.Ordinal != claim.Ordinal || marker.AttemptID != claim.AttemptID || marker.Thread != claim.Gate ||
 		marker.Action != claim.Action || marker.Target != claim.Target {
 		return fmt.Errorf("release_child marker does not match eligibility claim")
 	}

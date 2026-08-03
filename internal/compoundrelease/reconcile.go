@@ -276,12 +276,15 @@ func (s *Store) invokeReconciledChild(current Snapshot, child operatorauth.Relea
 		return ReconcileResult{}, err
 	}
 	if err := reconcileFault("pre_invoke:" + strconv.Itoa(child.Ordinal)); err != nil {
+		if rollbackErr := s.rollbackChildSend(claim, noInvocationEvidence{claimToken: claim.Token}); rollbackErr != nil {
+			return ReconcileResult{}, fmt.Errorf("pre-invocation fault (%v), rollback failed: %w", err, rollbackErr)
+		}
 		return ReconcileResult{}, err
 	}
 	outcome := adapter.InvokeReleaseChild(ReleaseChildInvocation{
 		GenerationID: current.Pointer.GenerationID, Role: child.Role, Ordinal: child.Ordinal,
 		AttemptID: child.ReleaseChild.AttemptID, Root: root,
-		Kind: "operator_gate_release_" + child.Role, Sender: current.Prepared.Spec.RequesterHandle, Recipient: current.Prepared.Spec.OperatorHandle,
+		Kind: operatorauth.ReleaseChildKindPrefix + child.Role, Sender: current.Prepared.Spec.RequesterHandle, Recipient: current.Prepared.Spec.OperatorHandle,
 		Thread: child.Thread, Subject: child.Subject, Body: child.Body,
 		AuthorizationRequest: child.AuthorizationRequest, ReleaseChild: child.ReleaseChild,
 	})

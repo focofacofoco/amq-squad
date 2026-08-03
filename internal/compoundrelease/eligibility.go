@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/omriariav/amq-squad/v2/internal/operatorauth"
@@ -70,6 +71,7 @@ const (
 	ProjectionReasonNone                ProjectionReason = ""
 	ProjectionReasonRecordAhead         ProjectionReason = "record_ahead"
 	ProjectionReasonInactive            ProjectionReason = "inactive"
+	ProjectionReasonLegacyCleared       ProjectionReason = "legacy_cleared"
 	ProjectionReasonRecordInvalid       ProjectionReason = "record_invalid"
 	ProjectionReasonCorruptLifecycle    ProjectionReason = "corrupt_lifecycle"
 	ProjectionReasonCommonBarrier       ProjectionReason = "common_barrier"
@@ -86,6 +88,7 @@ const (
 	RecoveryReasonConflict            RecoveryReason = "conflict"
 	RecoveryReasonSuperseded          RecoveryReason = "superseded"
 	RecoveryReasonTerminalClear       RecoveryReason = "terminal_clear"
+	RecoveryReasonLegacyCleared       RecoveryReason = "legacy_cleared"
 	RecoveryReasonActiveEvidence      RecoveryReason = "active_evidence"
 	RecoveryReasonHealthyClear        RecoveryReason = "healthy_clear"
 	RecoveryReasonRecordInvalid       RecoveryReason = "record_invalid"
@@ -125,6 +128,7 @@ type EligibilityClaim struct {
 	ActiveSHA256       string
 	Role               string
 	Ordinal            int
+	AttemptID          string
 	Gate               string
 	Action             string
 	Target             string
@@ -224,7 +228,9 @@ func ResolveSessionSeries(scope SessionScope, query ResolveQuery, adapter Inspec
 				continue
 			}
 			inspection = identified
-			inspectionFailures[inspection.SeriesID] = inspectErr
+			if !inspection.LegacyCleared {
+				inspectionFailures[inspection.SeriesID] = inspectErr
+			}
 		}
 		inspections = append(inspections, inspection)
 	}
@@ -312,14 +318,15 @@ func ResolveSessionSeries(scope SessionScope, query ResolveQuery, adapter Inspec
 		result.Claim = nil
 		return result, nil
 	}
+	if reason := recordInvalidReason(result.Leaves); reason != "" {
+		result.Claim = nil
+		result.Disposition = ResolutionIneligible
+		result.Reason = reason
+		return result, nil
+	}
 	if result.Claim != nil {
 		result.Disposition = ResolutionEligible
 		result.Reason = "exact active compound release claim"
-		return result, nil
-	}
-	if reason := selectedRecordInvalidReason(result.Leaves, query); reason != "" {
-		result.Disposition = ResolutionIneligible
-		result.Reason = reason
 		return result, nil
 	}
 	if query.MessageID != "" && slices.Contains(result.Suppression.MessageIDs, query.MessageID) || slices.Contains(result.Suppression.Threads, query.Gate) {
@@ -329,16 +336,13 @@ func ResolveSessionSeries(scope SessionScope, query ResolveQuery, adapter Inspec
 	return result, nil
 }
 
-func selectedRecordInvalidReason(leaves []SeriesLeaf, query ResolveQuery) string {
+func recordInvalidReason(leaves []SeriesLeaf) string {
 	for _, leaf := range leaves {
 		if leaf.Reason != ProjectionReasonRecordInvalid {
 			continue
 		}
 		for _, child := range leaf.Children {
-			if child.Eligible {
-				continue
-			}
-			if query.MessageID != "" && child.QuestionMessageID == query.MessageID || query.Gate != "" && child.Thread == query.Gate {
+			if strings.HasPrefix(child.Reason, "record_invalid:") {
 				return child.Reason
 			}
 		}
@@ -432,6 +436,11 @@ func resolveSeriesLocked(inspection SeriesInspection, query ResolveQuery, eviden
 	leaf := newSeriesLeaf(inspection, "")
 	suppression := SuppressionProjection{}
 	appendValidatedSuppression(&suppression, inspection)
+	if inspection.LegacyCleared {
+		leaf = projectionLeaf(inspection, ProjectionReasonLegacyCleared)
+		leaf.State = ProjectionStateAborted
+		return leaf, nil, suppression, []RecoveryProjection{recoveryProjection(inspection, "clear_legacy_release", ProjectionStateAborted, true, RecoveryReasonLegacyCleared)}, nil
+	}
 	if inspection.RecordAhead {
 		leaf = projectionLeaf(inspection, ProjectionReasonRecordAhead)
 		return leaf, nil, suppression, []RecoveryProjection{recoveryProjection(inspection, "repair_active_pointer", "", false, RecoveryReasonRecordAhead)}, nil
@@ -489,7 +498,8 @@ func resolveSeriesLocked(inspection SeriesInspection, query ResolveQuery, eviden
 			ActiveManifestID:   inspection.Snapshot.Pointer.ActiveManifestID,
 			ActiveSHA256:       inspection.Snapshot.Pointer.ActiveSHA256,
 			Role:               child.Role, Ordinal: child.Ordinal, Gate: child.Thread,
-			Action: child.Action, Target: child.Target,
+			AttemptID: child.ReleaseChild.AttemptID,
+			Action:    child.Action, Target: child.Target,
 			QuestionMessageID: published.QuestionMessageID,
 		}
 		claim.Token = eligibilityToken(claim)
@@ -499,8 +509,15 @@ func resolveSeriesLocked(inspection SeriesInspection, query ResolveQuery, eviden
 	}
 	var recovery []RecoveryProjection
 	if recordInvalid {
+		claims = nil
 		leaf.State = ProjectionStateConflict
 		leaf.Reason = ProjectionReasonRecordInvalid
+		for i := range leaf.Children {
+			leaf.Children[i].Eligible = false
+			if !strings.HasPrefix(leaf.Children[i].Reason, "record_invalid:") {
+				leaf.Children[i].Reason = "series record_invalid blocks compound release authority"
+			}
+		}
 		recovery = append(recovery, recoveryProjection(inspection, "inspect_record_invalid", ProjectionStateConflict, false, RecoveryReasonRecordInvalid))
 	} else {
 		recovery = append(recovery, recoveryProjection(inspection, "release_series", ProjectionStateActive, true, RecoveryReasonHealthyClear))
@@ -549,6 +566,7 @@ func eligibilityToken(claim EligibilityClaim) string {
 		ActiveSHA256       string `json:"active_sha256"`
 		Role               string `json:"role"`
 		Ordinal            int    `json:"ordinal"`
+		AttemptID          string `json:"attempt_id"`
 		Gate               string `json:"gate"`
 		Action             string `json:"action"`
 		Target             string `json:"target"`
@@ -558,7 +576,7 @@ func eligibilityToken(claim EligibilityClaim) string {
 		SeriesID: claim.SeriesID, Scope: claim.Scope, GenerationID: claim.GenerationID,
 		PreparedManifestID: claim.PreparedManifestID, ActiveManifestID: claim.ActiveManifestID,
 		PreparedSHA256: claim.PreparedSHA256, ActiveSHA256: claim.ActiveSHA256,
-		Role: claim.Role, Ordinal: claim.Ordinal, Gate: claim.Gate, Action: claim.Action,
+		Role: claim.Role, Ordinal: claim.Ordinal, AttemptID: claim.AttemptID, Gate: claim.Gate, Action: claim.Action,
 		Target: claim.Target, QuestionMessageID: claim.QuestionMessageID,
 	}
 	b, _ := json.Marshal(canonical)

@@ -407,7 +407,7 @@ func TestCLIReleaseDomainSelectedContextNamedAndScopeDrift(t *testing.T) {
 	}
 }
 
-func TestCLIReleaseMarkerClaimComparatorRejectsScopeRootReceiptAndRoutingDrift(t *testing.T) {
+func TestCLIReleaseMarkerClaimComparatorRejectsScopeRootAuthorityAndRoutingDrift(t *testing.T) {
 	fixture, active := newCLIActiveReleaseAttentionFixture(t)
 	selected := selectedContextForCLIReleaseFixture(fixture)
 	question := releaseQuestionForCLIClassification(t, fixture.adapter.root, active.Active.Children[0].QuestionMessageID)
@@ -474,6 +474,9 @@ func TestCLIReleaseMarkerClaimComparatorRejectsScopeRootReceiptAndRoutingDrift(t
 		}},
 		{name: "role ordinal", mutate: func(_ *cliReleaseSelectedContext, _ *state.Message, _ *operatorauth.ReleaseChildContext, claim *compoundrelease.EligibilityClaim) {
 			claim.Role, claim.Ordinal = operatorauth.ReleaseChildGitHubRelease, 1
+		}},
+		{name: "attempt id", mutate: func(_ *cliReleaseSelectedContext, _ *state.Message, _ *operatorauth.ReleaseChildContext, claim *compoundrelease.EligibilityClaim) {
+			claim.AttemptID += "-drift"
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

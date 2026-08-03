@@ -137,9 +137,9 @@ func TestReleaseChildStrictDecode(t *testing.T) {
 		t.Fatalf("DecodeReleaseChild()=(%+v,%v)", got, err)
 	}
 	for name, raw := range map[string]string{
-		"unknown":                      strings.Replace(string(b), `"schema_version":2`, `"schema_version":2,"unknown":1`, 1),
+		"unknown":                      strings.Replace(string(b), `"schema_version":3`, `"schema_version":3,"unknown":1`, 1),
 		"trailing":                     string(b) + ` null`,
-		"schema":                       strings.Replace(string(b), `"schema_version":2`, `"schema_version":9`, 1),
+		"schema":                       strings.Replace(string(b), `"schema_version":3`, `"schema_version":9`, 1),
 		"taxonomy":                     strings.Replace(string(b), `"taxonomy_version":1`, `"taxonomy_version":9`, 1),
 		"ordinal":                      strings.Replace(string(b), `"ordinal":0`, `"ordinal":1`, 1),
 		"action":                       strings.Replace(string(b), `"action":"tag"`, `"action":"github_release"`, 1),

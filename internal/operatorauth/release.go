@@ -13,7 +13,7 @@ import (
 
 const (
 	ReleaseSchemaVersion      = 1
-	ReleaseChildSchemaVersion = 2
+	ReleaseChildSchemaVersion = 3
 	ReleaseManifestVersion    = 1
 )
 
@@ -29,6 +29,7 @@ const (
 const (
 	ReleaseChildTag           = "tag"
 	ReleaseChildGitHubRelease = "github_release"
+	ReleaseChildKindPrefix    = "operator_gate_release_"
 )
 
 // ReleaseNote is deliberately structured even though its first schema has a
@@ -241,7 +242,7 @@ func ValidateReleaseChild(child ReleaseChildContext) error {
 	if err := ValidateCanonicalSingleLineField("release_child target", child.Target, true); err != nil {
 		return err
 	}
-	wantAttempt := releaseAttemptIdentity(child.ReleaseID, child.SpecSHA256, child.GenerationID, child.Generation, child.Role, child.Ordinal, child.Thread, child.GateKind, child.Action, child.Target)
+	wantAttempt := releaseAttemptIdentity(child.ReleaseID, child.SpecSHA256, child.GenerationID, child.Generation, child.Role, child.Ordinal, child.Thread, releaseReceiptTargetIdentity(child.Thread, child.GateKind, child.Action, child.Target))
 	if child.AttemptID != wantAttempt {
 		return fmt.Errorf("release_child attempt identity does not match exact marker fields")
 	}
@@ -283,7 +284,8 @@ func derivePreparedReleaseCore(spec ReleaseSpec, generation uint64) (PreparedRel
 			body += "\nNote: " + spec.Note.Summary
 		}
 		renderedSHA := releaseDigest([]byte(subject + "\x00" + body))
-		attemptID := releaseAttemptIdentity(releaseID, specSHA, generationID, generation, role, ordinal, thread, gateKind, action, target)
+		targetIdentity := releaseReceiptTargetIdentity(thread, gateKind, action, target)
+		attemptID := releaseAttemptIdentity(releaseID, specSHA, generationID, generation, role, ordinal, thread, targetIdentity)
 		marker := ReleaseChildContext{
 			SchemaVersion: ReleaseChildSchemaVersion, TaxonomyVersion: ActionTaxonomyVersion,
 			ReleaseID: releaseID, GenerationID: generationID, Generation: generation, ChildCount: 2, SpecSHA256: specSHA,
@@ -338,8 +340,8 @@ func ValidatePreparedRelease(manifest PreparedReleaseManifest) error {
 	return nil
 }
 
-func releaseAttemptIdentity(releaseID, specSHA, generationID string, generation uint64, role string, ordinal int, thread, gateKind, action, target string) string {
-	return releaseIdentity("release-attempt-v2-", releaseID, specSHA, generationID, strconv.FormatUint(generation, 10), role, strconv.Itoa(ordinal), thread, gateKind, action, target)
+func releaseAttemptIdentity(releaseID, specSHA, generationID string, generation uint64, role string, ordinal int, thread, targetIdentity string) string {
+	return releaseIdentity("release-attempt-v2-", releaseID, specSHA, generationID, strconv.FormatUint(generation, 10), role, strconv.Itoa(ordinal), thread, targetIdentity)
 }
 
 func preparedReleaseIdentity(manifest PreparedReleaseManifest) string {
@@ -440,6 +442,12 @@ func releaseRoleTuple(role string) (ordinal int, gateKind, action string, ok boo
 
 func releaseChildThread(parent, specSHA string, generation uint64, ordinal int, role string) string {
 	return fmt.Sprintf("%s/release/%s/g%020d/%02d-%s", parent, strings.TrimPrefix(specSHA, "sha256:"), generation, ordinal, strings.ReplaceAll(role, "_", "-"))
+}
+
+// releaseReceiptTargetIdentity remains only as the stable v2 attempt hash
+// input. It creates no artifact and confers no authority.
+func releaseReceiptTargetIdentity(thread, gateKind, action, target string) string {
+	return releaseIdentity("release-receipt-target-v1-", thread, gateKind, action, target)
 }
 
 func releaseIdentity(prefix string, parts ...string) string {

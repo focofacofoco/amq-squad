@@ -18,6 +18,8 @@ type fakeReconcileAdapter struct {
 	root        string
 	rootErr     error
 	outcome     ReleaseChildInvokeOutcome
+	invoke      func(ReleaseChildInvocation) ReleaseChildInvokeOutcome
+	warnings    []state.Warning
 	resolved    int
 	scans       int
 	invocations []ReleaseChildInvocation
@@ -33,11 +35,15 @@ func (f *fakeReconcileAdapter) ResolveSessionRoot(Scope) (string, error) {
 
 func (f *fakeReconcileAdapter) ScanSessionMessages(root string, now func() time.Time) ([]state.Message, []state.Warning) {
 	f.scans++
-	return state.ScanSessionMessages(root, now)
+	messages, warnings := state.ScanSessionMessages(root, now)
+	return messages, append(warnings, f.warnings...)
 }
 
 func (f *fakeReconcileAdapter) InvokeReleaseChild(invocation ReleaseChildInvocation) ReleaseChildInvokeOutcome {
 	f.invocations = append(f.invocations, invocation)
+	if f.invoke != nil {
+		return f.invoke(invocation)
+	}
 	return f.outcome
 }
 
@@ -61,16 +67,19 @@ func reconcileFixture(t *testing.T) (*Store, Snapshot, *fakeReconcileAdapter) {
 }
 
 type releaseMessageHeader struct {
-	Schema   int            `json:"schema"`
-	ID       string         `json:"id"`
-	From     string         `json:"from"`
-	To       []string       `json:"to"`
-	Thread   string         `json:"thread"`
-	Subject  string         `json:"subject"`
-	Created  string         `json:"created"`
-	Priority string         `json:"priority"`
-	Kind     string         `json:"kind"`
-	Context  map[string]any `json:"context"`
+	Schema       int            `json:"schema"`
+	ID           string         `json:"id"`
+	From         string         `json:"from"`
+	To           []string       `json:"to"`
+	Thread       string         `json:"thread"`
+	Subject      string         `json:"subject"`
+	Created      string         `json:"created"`
+	Priority     string         `json:"priority"`
+	Kind         string         `json:"kind"`
+	ReplyTo      string         `json:"reply_to,omitempty"`
+	Labels       []string       `json:"labels,omitempty"`
+	Orchestrator string         `json:"orchestrator,omitempty"`
+	Context      map[string]any `json:"context"`
 }
 
 func writeReleaseQuestion(t *testing.T, root, owner, mailbox, id, created string, child operatorauth.ReleaseChildPlan, spec operatorauth.ReleaseSpec, mutate func(*releaseMessageHeader)) {
@@ -289,5 +298,230 @@ func TestReconcileNearMessageConflictsBeforeInvocation(t *testing.T) {
 	}
 	if len(adapter.invocations) != 0 {
 		t.Fatalf("near message invoked transport: %+v", adapter.invocations)
+	}
+}
+
+func TestExactReleaseMessageRejectsMailboxIdentityMutations(t *testing.T) {
+	_, publishing, adapter := reconcileFixture(t)
+	child, spec := publishing.Prepared.Children[0], publishing.Prepared.Spec
+	installExactReleaseQuestion(t, publishing, adapter, 0, "question-tag")
+	messages, warnings := state.ScanSessionMessages(adapter.root, time.Now)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings=%v", warnings)
+	}
+	groups := groupReleaseMessages(messages)
+	if len(groups) != 1 || !exactReleaseMessage(groups[0], child, spec) {
+		t.Fatalf("base group=%+v", groups)
+	}
+	base := groups[0]
+	mutations := map[string]func(*releaseMessageGroup){
+		"sender":             func(g *releaseMessageGroup) { g.Message.From = "other" },
+		"ordered recipients": func(g *releaseMessageGroup) { g.Message.To = []string{"other", spec.OperatorHandle} },
+		"thread":             func(g *releaseMessageGroup) { g.Message.Thread += "/other" },
+		"raw thread":         func(g *releaseMessageGroup) { g.Message.RawThread += "/other" },
+		"subject":            func(g *releaseMessageGroup) { g.Message.RawSubject += " changed" },
+		"message":            func(g *releaseMessageGroup) { g.Message.RawBody += " changed" },
+		"priority":           func(g *releaseMessageGroup) { g.Message.Priority = state.PriorityUrgent },
+		"kind":               func(g *releaseMessageGroup) { g.Message.Kind = state.KindStatus },
+		"reply to":           func(g *releaseMessageGroup) { g.Message.ReplyTo = "prior" },
+		"labels":             func(g *releaseMessageGroup) { g.Message.Labels = []string{"unexpected"} },
+		"orchestrator":       func(g *releaseMessageGroup) { g.Message.Orchestrator = "unexpected" },
+		"group owner":        func(g *releaseMessageGroup) { g.Owners = append(g.Owners, "outsider") },
+		"malformed created":  func(g *releaseMessageGroup) { g.Message.RawCreated = "2026-07-15 01:00:00Z" },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			group := cloneReleaseMessageGroup(base)
+			mutate(&group)
+			if exactReleaseMessage(group, child, spec) {
+				t.Fatalf("mutation %q remained exact: %+v", name, group)
+			}
+		})
+	}
+}
+
+func TestClassifyReleaseMessageGroupsOwnershipBranches(t *testing.T) {
+	_, publishing, adapter := reconcileFixture(t)
+	child, spec := publishing.Prepared.Children[0], publishing.Prepared.Spec
+	installExactReleaseQuestion(t, publishing, adapter, 0, "question-tag")
+	messages, warnings := state.ScanSessionMessages(adapter.root, time.Now)
+	if len(warnings) != 0 {
+		t.Fatal(warnings)
+	}
+	base := groupReleaseMessages(messages)[0]
+
+	exact, near, uncertain := classifyReleaseMessageGroups([]releaseMessageGroup{base}, child, spec)
+	if len(exact) != 1 || len(near) != 0 || uncertain {
+		t.Fatalf("exact=%v near=%v uncertain=%t", exact, near, uncertain)
+	}
+
+	senderOnly := cloneReleaseMessageGroup(base)
+	senderOnly.Owners = []string{spec.RequesterHandle}
+	for i := range senderOnly.Copies {
+		senderOnly.Copies[i].Owner = spec.RequesterHandle
+	}
+	exact, near, uncertain = classifyReleaseMessageGroups([]releaseMessageGroup{senderOnly}, child, spec)
+	if len(exact) != 0 || len(near) != 0 || !uncertain {
+		t.Fatalf("sender-only exact=%v near=%v uncertain=%t", exact, near, uncertain)
+	}
+
+	wrongSender := cloneReleaseMessageGroup(base)
+	wrongSender.Message.From = "other"
+	wrongSender.Copies[0].From = "other"
+	exact, near, uncertain = classifyReleaseMessageGroups([]releaseMessageGroup{wrongSender}, child, spec)
+	if len(exact) != 0 || !reflect.DeepEqual(near, []string{"question-tag"}) || uncertain {
+		t.Fatalf("near exact=%v near=%v uncertain=%t", exact, near, uncertain)
+	}
+}
+
+func cloneReleaseMessageGroup(group releaseMessageGroup) releaseMessageGroup {
+	clone := group
+	clone.Message.To = append([]string(nil), group.Message.To...)
+	clone.Message.Labels = append([]string(nil), group.Message.Labels...)
+	clone.Copies = append([]state.Message(nil), group.Copies...)
+	for i := range clone.Copies {
+		clone.Copies[i].To = append([]string(nil), clone.Copies[i].To...)
+		clone.Copies[i].Labels = append([]string(nil), clone.Copies[i].Labels...)
+	}
+	clone.Owners = append([]string(nil), group.Owners...)
+	return clone
+}
+
+func TestReconcilePhysicalCopyAndWarningBarriers(t *testing.T) {
+	t.Run("equal physical copies dedupe", func(t *testing.T) {
+		store, publishing, adapter := reconcileFixture(t)
+		if _, err := store.ClaimChildSend(publishing.Pointer.GenerationID, 0); err != nil {
+			t.Fatal(err)
+		}
+		child := publishing.Prepared.Children[0]
+		created := "2026-07-15T01:00:00Z"
+		writeReleaseQuestion(t, adapter.root, publishing.Prepared.Spec.OperatorHandle, "cur", "question-tag", created, child, publishing.Prepared.Spec, nil)
+		writeReleaseQuestion(t, adapter.root, publishing.Prepared.Spec.OperatorHandle, "new", "question-tag", created, child, publishing.Prepared.Spec, nil)
+		adapter.outcome = ReleaseChildInvokeOutcome{ProcessStarted: true, InvocationBegan: true, MessageID: "question-github-release"}
+		result, err := store.Reconcile(publishing.Pointer.GenerationID, adapter)
+		if err != nil || result.Disposition != ReconcilePublished || len(adapter.invocations) != 1 || mustGenerationRecord(t, store, 1).Children[0].QuestionMessageID != "question-tag" {
+			t.Fatalf("result=%+v invocations=%+v err=%v", result, adapter.invocations, err)
+		}
+	})
+
+	t.Run("unequal same id conflicts", func(t *testing.T) {
+		store, publishing, adapter := reconcileFixture(t)
+		child := publishing.Prepared.Children[0]
+		created := "2026-07-15T01:00:00Z"
+		writeReleaseQuestion(t, adapter.root, publishing.Prepared.Spec.OperatorHandle, "cur", "question-tag", created, child, publishing.Prepared.Spec, nil)
+		writeReleaseQuestion(t, adapter.root, publishing.Prepared.Spec.OperatorHandle, "new", "question-tag", created, child, publishing.Prepared.Spec, func(header *releaseMessageHeader) { header.Subject += " changed" })
+		result, err := store.Reconcile(publishing.Pointer.GenerationID, adapter)
+		if err != nil || result.Disposition != ReconcileConflict || len(adapter.invocations) != 0 {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+	})
+
+	t.Run("scan warning blocks mutation", func(t *testing.T) {
+		store, publishing, adapter := reconcileFixture(t)
+		adapter.warnings = []state.Warning{{Path: adapter.root, Reason: "fixture warning"}}
+		result, err := store.Reconcile(publishing.Pointer.GenerationID, adapter)
+		record := mustGenerationRecord(t, store, 1)
+		if err == nil || result.Disposition != ReconcileAmbiguous || len(adapter.invocations) != 0 || record.Children[0].State != childPublicationPlanned || record.Children[0].ClaimRevision != 0 {
+			t.Fatalf("result=%+v record=%+v err=%v", result, record, err)
+		}
+	})
+}
+
+func TestReconcilePlannedEvidenceAndEarlySecondChildMatrix(t *testing.T) {
+	t.Run("planned exact conflicts without retro claim", func(t *testing.T) {
+		store, publishing, adapter := reconcileFixture(t)
+		installExactReleaseQuestion(t, publishing, adapter, 0, "question-tag")
+		result, err := store.Reconcile(publishing.Pointer.GenerationID, adapter)
+		record := mustGenerationRecord(t, store, 1)
+		if err != nil || result.Disposition != ReconcileConflict || record.Children[0].ClaimRevision != 0 || record.Children[0].ClaimToken != "" || len(adapter.invocations) != 0 {
+			t.Fatalf("result=%+v record=%+v err=%v", result, record, err)
+		}
+	})
+
+	t.Run("planned sender-only evidence is ambiguous", func(t *testing.T) {
+		store, publishing, adapter := reconcileFixture(t)
+		child := publishing.Prepared.Children[0]
+		writeReleaseQuestion(t, adapter.root, publishing.Prepared.Spec.RequesterHandle, "new", "question-tag", "2026-07-15T01:00:00Z", child, publishing.Prepared.Spec, nil)
+		result, err := store.Reconcile(publishing.Pointer.GenerationID, adapter)
+		record := mustGenerationRecord(t, store, 1)
+		if err == nil || result.Disposition != ReconcileAmbiguous || record.Children[0].State != childPublicationPlanned || record.Children[0].ClaimRevision != 0 || len(adapter.invocations) != 0 {
+			t.Fatalf("result=%+v record=%+v err=%v", result, record, err)
+		}
+	})
+
+	t.Run("early second child evidence conflicts before tag invoke", func(t *testing.T) {
+		store, publishing, adapter := reconcileFixture(t)
+		installExactReleaseQuestion(t, publishing, adapter, 1, "question-github-release")
+		result, err := store.Reconcile(publishing.Pointer.GenerationID, adapter)
+		if err != nil || result.Disposition != ReconcileConflict || result.Role != operatorauth.ReleaseChildGitHubRelease || len(adapter.invocations) != 0 {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+	})
+}
+
+func TestReconcileFaultSeamsConvergeWithoutResend(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage string
+		setup func(*testing.T, *Store, Snapshot, *fakeReconcileAdapter)
+	}{
+		{name: "after complete scan", stage: "after_complete_scan"},
+		{name: "pre invoke", stage: "pre_invoke:0"},
+		{name: "after send return", stage: "after_send_return:0"},
+		{name: "after child adoption", stage: "after_child_adoption:0", setup: func(t *testing.T, store *Store, publishing Snapshot, adapter *fakeReconcileAdapter) {
+			if _, err := store.ClaimChildSend(publishing.Pointer.GenerationID, 0); err != nil {
+				t.Fatal(err)
+			}
+			installExactReleaseQuestion(t, publishing, adapter, 0, "question-tag")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, publishing, adapter := reconcileFixture(t)
+			if tc.setup != nil {
+				tc.setup(t, store, publishing, adapter)
+			}
+			adapter.invoke = func(invocation ReleaseChildInvocation) ReleaseChildInvokeOutcome {
+				id := "question-" + strings.ReplaceAll(invocation.Role, "_", "-")
+				installExactReleaseQuestion(t, publishing, adapter, invocation.Ordinal, id)
+				return ReleaseChildInvokeOutcome{ProcessStarted: true, InvocationBegan: true, MessageID: id}
+			}
+			oldFault := reconcileFault
+			fired := false
+			reconcileFault = func(stage string) error {
+				if stage == tc.stage && !fired {
+					fired = true
+					return errors.New("fault " + tc.stage)
+				}
+				return nil
+			}
+			t.Cleanup(func() { reconcileFault = oldFault })
+			if _, err := store.Reconcile(publishing.Pointer.GenerationID, adapter); err == nil || !fired {
+				t.Fatalf("fault stage=%s fired=%t err=%v", tc.stage, fired, err)
+			}
+			reconcileFault = oldFault
+			var result ReconcileResult
+			var err error
+			for attempt := 0; attempt < 4; attempt++ {
+				result, err = store.Reconcile(publishing.Pointer.GenerationID, adapter)
+				if err != nil {
+					t.Fatalf("recovery attempt %d: %v", attempt, err)
+				}
+				if result.Disposition == ReconcileActivated {
+					break
+				}
+			}
+			if result.Disposition != ReconcileActivated || result.Snapshot.Active == nil {
+				t.Fatalf("result=%+v", result)
+			}
+			counts := map[string]int{}
+			for _, invocation := range adapter.invocations {
+				counts[invocation.Role]++
+			}
+			for role, count := range counts {
+				if count != 1 {
+					t.Fatalf("role %s invoked %d times: %+v", role, count, adapter.invocations)
+				}
+			}
+		})
 	}
 }

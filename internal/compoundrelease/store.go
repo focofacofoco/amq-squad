@@ -25,7 +25,7 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
-const storeSchemaVersion = 1
+const storeSchemaVersion = 2
 
 const (
 	childPublicationPlanned   = "planned"
