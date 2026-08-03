@@ -161,7 +161,7 @@ func projectCompoundReleaseSession(projectDir, profile, generation, operatorHand
 	for _, leaf := range resolution.Leaves {
 		for _, child := range leaf.Children {
 			key := compoundReleaseChildAttentionKey(adapter.profile, adapter.session, leaf.SeriesID, child.Role, child.Ordinal)
-			if !child.Eligible || child.QuestionMessageID == "" {
+			if !child.EvidenceValid || child.QuestionMessageID == "" {
 				projection.Items = append(projection.Items, compoundReleaseChildTombstone(adapter.profile, adapter.session, key, leaf, child))
 				continue
 			}

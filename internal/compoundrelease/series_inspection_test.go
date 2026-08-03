@@ -293,8 +293,27 @@ func TestResolveSeriesBrokenSiblingIsIsolatedWithOneRecovery(t *testing.T) {
 	}
 	result, err := ResolveSessionSeries(sessionScope(store.scope), query, adapter)
 	recordPath := filepath.Join(store.dirPath, store.generationName(snapshot.Pointer.Generation))
-	if err != nil || result.Claim != nil || result.Disposition != ResolutionIneligible || len(result.Recovery) != 1 || result.Recovery[0].Reason != RecoveryReasonRecordInvalid || len(result.Leaves) != 1 || result.Leaves[0].State != ProjectionStateConflict || result.Leaves[0].Reason != ProjectionReasonRecordInvalid || result.Leaves[0].Children[0].Eligible || result.Leaves[0].Children[1].Eligible || !strings.Contains(result.Leaves[0].Children[1].Reason, recordPath) || !strings.Contains(result.Leaves[0].Children[1].Reason, missingID) {
+	if err != nil || result.Claim != nil || result.Disposition != ResolutionIneligible || len(result.Recovery) != 1 || result.Recovery[0].Reason != RecoveryReasonRecordInvalid || len(result.Leaves) != 1 || result.Leaves[0].State != ProjectionStateConflict || result.Leaves[0].Reason != ProjectionReasonRecordInvalid || result.Leaves[0].Children[0].Eligible || result.Leaves[0].Children[1].Eligible || !result.Leaves[0].Children[0].EvidenceValid || result.Leaves[0].Children[1].EvidenceValid || !strings.Contains(result.Leaves[0].Children[1].Reason, recordPath) || !strings.Contains(result.Leaves[0].Children[1].Reason, missingID) {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	encodedChildren, err := json.Marshal(result.Leaves[0].Children)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serializedChildren []map[string]json.RawMessage
+	if err := json.Unmarshal(encodedChildren, &serializedChildren); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := []string{"Eligible", "Ordinal", "QuestionMessageID", "Reason", "Role", "Thread"}
+	for i, child := range serializedChildren {
+		gotKeys := make([]string, 0, len(child))
+		for key := range child {
+			gotKeys = append(gotKeys, key)
+		}
+		slices.Sort(gotKeys)
+		if !slices.Equal(gotKeys, wantKeys) {
+			t.Fatalf("serialized child %d keys = %v, want %v: %s", i, gotKeys, wantKeys, encodedChildren)
+		}
 	}
 	missingChild := snapshot.Prepared.Children[1]
 	missing, err := ResolveSessionSeries(sessionScope(store.scope), ResolveQuery{MessageID: missingID, Gate: missingChild.Thread, Action: missingChild.Action, Target: missingChild.Target}, adapter)

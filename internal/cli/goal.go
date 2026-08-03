@@ -527,7 +527,7 @@ func printGoalUsage() {
 	fmt.Fprint(os.Stderr, `amq-squad goal - send one goal to the configured lead
 
 Usage:
-  amq-squad goal --goal TEXT [--project DIR] [--profile NAME] [--session NAME] [--json]
+  amq-squad goal --goal TEXT [--project DIR] [--profile NAME] [--session NAME] [--override-namespace-conflict --reason WHY] [--json]
   amq-squad goal <subcommand> [options]
 
 The direct form sends exactly one ordinary AMQ todo message from the configured
@@ -535,7 +535,8 @@ operator mailbox to the selected lead. It creates no goal attempt, delivery
 state, deduplication token, receipt, supervision gate, or automatic retry. A
 failed send is reported as-is; inspect AMQ reality before choosing to send again.
 
-Legacy subcommands (retained until the deletion step):
+Subcommands:
+  Legacy compatibility commands retained until the deletion step:
   apply     apply an operator-approved visible lead goal
   claim     atomically claim one pane/AMQ goal delivery attempt
   deliver   deliver a binary-specific goal input to the resolved visible lead
@@ -561,6 +562,8 @@ func runSimpleGoal(args []string) error {
 	profileFlag := fs.String("profile", "", "team profile (default: default profile)")
 	sessionFlag := fs.String("session", "", "AMQ workstream/session")
 	goalFlag := fs.String("goal", "", "goal text to send")
+	overrideNamespaceConflict := fs.Bool("override-namespace-conflict", false, "acknowledge a collided namespace and continue, writing an audit record")
+	overrideNamespaceReason := fs.String("reason", "", "required reason when --override-namespace-conflict is set")
 	jsonOut := fs.Bool("json", false, "emit a schema-versioned mutation result envelope")
 	registerScopedFlagAliases(fs, projectFlag, sessionFlag, profileFlag)
 	fs.Usage = printGoalUsage
@@ -577,9 +580,15 @@ func runSimpleGoal(args []string) error {
 	opts, err := resolveGoalTargetOptions(
 		*projectFlag, *profileFlag, *sessionFlag, "",
 		flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"),
-		"goal", namespaceConflictOverrideOptions{},
+		"goal",
 	)
 	if err != nil {
+		return err
+	}
+	if err := ensureNoNamespaceConflictWithOverride("goal", opts.Project, opts.Profile, opts.Session, flagWasSet(fs, "profile"), namespaceConflictOverrideOptions{
+		Allowed: *overrideNamespaceConflict,
+		Reason:  *overrideNamespaceReason,
+	}); err != nil {
 		return err
 	}
 	operator := team.EffectiveOperator(opts.Team)
@@ -652,7 +661,7 @@ command is confirm-gated; pass --yes after reviewing the gate and lead state.
 		Allowed: *overrideNamespaceConflict,
 		Reason:  *overrideNamespaceReason,
 	}
-	target, err := resolveGoalTargetOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal apply", override)
+	target, err := resolveGoalTargetOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal apply")
 	if err != nil {
 		return err
 	}
@@ -661,7 +670,7 @@ command is confirm-gated; pass --yes after reviewing the gate and lead state.
 		return err
 	}
 	defer admission.close()
-	currentTarget, err := resolveGoalTargetOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal apply", override)
+	currentTarget, err := resolveGoalTargetOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal apply")
 	if err != nil {
 		return fmt.Errorf("goal apply refused: target re-resolution under admission failed: %w", err)
 	}
@@ -763,7 +772,7 @@ confirm-gated and requires --yes in this first implementation slice.
 	// intentionally not applied here; the preview resolves against the configured
 	// lead, matching delivery without registration.
 	if *dryRun {
-		opts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal start", namespaceConflictOverrideOptions{})
+		opts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal start")
 		if err != nil {
 			return err
 		}
@@ -783,7 +792,7 @@ confirm-gated and requires --yes in this first implementation slice.
 		return usageErrorf("goal start delivery requires --yes (or run --dry-run to preview first)")
 	}
 	override := namespaceConflictOverrideOptions{Allowed: *overrideNamespaceConflict, Reason: *overrideNamespaceReason}
-	opts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal start", override)
+	opts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal start")
 	if err != nil {
 		return err
 	}
@@ -802,7 +811,7 @@ confirm-gated and requires --yes in this first implementation slice.
 		}
 		defer manifestAdmission.close()
 	}
-	currentOpts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal start", override)
+	currentOpts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal start")
 	if err != nil {
 		return fmt.Errorf("goal start refused: target re-resolution under admission failed: %w", err)
 	}
@@ -891,7 +900,7 @@ the busy guard for amq-squad send while goal delivery uses its claim-once path.
 		return err
 	}
 	override := namespaceConflictOverrideOptions{Allowed: *overrideNamespaceConflict, Reason: *overrideNamespaceReason}
-	opts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal deliver", override)
+	opts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal deliver")
 	if err != nil {
 		return err
 	}
@@ -900,7 +909,7 @@ the busy guard for amq-squad send while goal delivery uses its claim-once path.
 		return err
 	}
 	defer admission.close()
-	currentOpts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal deliver", override)
+	currentOpts, err := resolveGoalDeliveryOptions(*projectFlag, *profileFlag, *sessionFlag, *roleFlag, goal, flagWasSet(fs, "project"), flagWasSet(fs, "profile"), flagWasSet(fs, "session"), "goal deliver")
 	if err != nil {
 		return fmt.Errorf("goal deliver refused: target re-resolution under admission failed: %w", err)
 	}
@@ -933,8 +942,8 @@ the busy guard for amq-squad send while goal delivery uses its claim-once path.
 	return nil
 }
 
-func resolveGoalDeliveryOptions(projectFlag, profileFlag, sessionFlag, roleFlag, goal string, projectSet, profileSet, sessionSet bool, command string, override namespaceConflictOverrideOptions) (goalDeliveryOptions, error) {
-	opts, err := resolveGoalTargetOptions(projectFlag, profileFlag, sessionFlag, roleFlag, projectSet, profileSet, sessionSet, command, override)
+func resolveGoalDeliveryOptions(projectFlag, profileFlag, sessionFlag, roleFlag, goal string, projectSet, profileSet, sessionSet bool, command string) (goalDeliveryOptions, error) {
+	opts, err := resolveGoalTargetOptions(projectFlag, profileFlag, sessionFlag, roleFlag, projectSet, profileSet, sessionSet, command)
 	if err != nil {
 		return goalDeliveryOptions{}, err
 	}
@@ -942,7 +951,7 @@ func resolveGoalDeliveryOptions(projectFlag, profileFlag, sessionFlag, roleFlag,
 	return opts, nil
 }
 
-func resolveGoalTargetOptions(projectFlag, profileFlag, sessionFlag, roleFlag string, projectSet, profileSet, sessionSet bool, command string, override namespaceConflictOverrideOptions) (goalDeliveryOptions, error) {
+func resolveGoalTargetOptions(projectFlag, profileFlag, sessionFlag, roleFlag string, projectSet, profileSet, sessionSet bool, command string) (goalDeliveryOptions, error) {
 	ctx, err := resolveCanonicalContext(contextResolveOptions{
 		ProjectFlag: projectFlag, ProfileFlag: profileFlag, SessionFlag: sessionFlag,
 		ProjectExplicit: projectSet, ProfileExplicit: profileSet, SessionExplicit: sessionSet,

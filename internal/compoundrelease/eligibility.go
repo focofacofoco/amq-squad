@@ -141,8 +141,12 @@ type ChildLeaf struct {
 	Ordinal           int
 	Thread            string
 	QuestionMessageID string
-	Eligible          bool
-	Reason            string
+	// EvidenceValid is a per-child, in-memory mailbox observation. Eligible is
+	// the series-wide release-authority decision; evidence validity is never
+	// persisted or serialized as authority.
+	EvidenceValid bool `json:"-"`
+	Eligible      bool
+	Reason        string
 }
 
 type SeriesLeaf struct {
@@ -484,6 +488,7 @@ func resolveSeriesLocked(inspection SeriesInspection, query ResolveQuery, eviden
 			recordInvalid = true
 			continue
 		}
+		childLeaf.EvidenceValid = true
 		childLeaf.Eligible = true
 		childLeaf.Reason = "exact active compound release authority"
 		if query.MessageID != published.QuestionMessageID || query.Gate != child.Thread || query.Action != child.Action || query.Target != child.Target {

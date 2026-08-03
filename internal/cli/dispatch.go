@@ -81,29 +81,9 @@ var dispatchWakePane = defaultDispatchWakePane
 // drive the wake-first branch without real liveness probing.
 var dispatchRecipientWakeLive = defaultDispatchRecipientWakeLive
 
-// dispatchLinkTask and dispatchClaimTask retain the legacy auto-claim helper's
-// test seam. Simple-mode task dispatch uses the atomic claim operation directly;
-// the AMQ message is deliberately separate from task-store state.
-var dispatchLinkTask = taskstore.LinkDispatchForProfile
+// dispatchClaimTask is the simple-mode atomic claim seam. The AMQ message is
+// deliberately separate from task-store state.
 var dispatchClaimTask = taskstore.ClaimForProfile
-
-// Legacy prepared-dispatch seams remain only so the later implementation/test
-// deletion can land coherently. Simple-mode runDispatch does not call them.
-var dispatchPrepareTask = taskstore.PrepareDispatchForProfile
-var dispatchBeginTaskDelivery = taskstore.BeginOutboxDeliveryForProfile
-var dispatchFinishTask = taskstore.FinishDispatchForProfile
-
-// dispatchAfterLeadershipRead is retained for legacy prepared-dispatch tests;
-// simple-mode runDispatch has no task leadership epoch.
-var dispatchAfterLeadershipRead = func(projectDir, profile, session string, state taskstore.LeadershipState) error {
-	return nil
-}
-
-// dispatchAfterGenerationRead is retained for legacy prepared-dispatch tests;
-// simple-mode runDispatch has no prepared generation binding.
-var dispatchAfterGenerationRead = func(projectDir, profile, session string, ref *taskstore.GenerationRef) error {
-	return nil
-}
 
 func runDispatch(args []string) error {
 	fs := flag.NewFlagSet("dispatch", flag.ContinueOnError)

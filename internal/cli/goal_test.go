@@ -63,10 +63,46 @@ func TestSimpleGoalSendsOneOperatorTodoWithoutGoalState(t *testing.T) {
 		return snapshot.String()
 	}
 	before := snapshotSquadState()
+	regularFiles := func(root string) []string {
+		var files []string
+		err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if info.Mode().IsRegular() {
+				files = append(files, path)
+			}
+			return nil
+		})
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return files
+	}
+	sessionRoot := filepath.Join(dir, ".agent-mail", "issue-96")
+	if files := regularFiles(sessionRoot); len(files) != 0 {
+		t.Fatalf("goal session root started with files: %v", files)
+	}
 	calls := withAMQCommandSeams(t,
 		amqEnv{Root: filepath.Join(dir, ".agent-mail", "{session}"), BaseRoot: filepath.Join(dir, ".agent-mail")},
 		"Sent goal-simple to cto\n",
 	)
+	previousRun := runAMQCommand
+	runAMQCommand = func(req amqCommandRequest) ([]byte, error) {
+		out, err := previousRun(req)
+		if err != nil {
+			return out, err
+		}
+		messageDir := filepath.Join(sessionRoot, "agents", "cto", "inbox", "new")
+		if err := os.MkdirAll(messageDir, 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(messageDir, "goal-simple.md"), []byte("one durable goal message\n"), 0o644); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	t.Cleanup(func() { runAMQCommand = previousRun })
 	goalText := "  ship the simple path\n\nAcceptance: preserve exact text.  "
 
 	stdout, stderr, err := captureOutput(t, func() error {
@@ -107,6 +143,9 @@ func TestSimpleGoalSendsOneOperatorTodoWithoutGoalState(t *testing.T) {
 	}
 	if len(*calls) != 1 {
 		t.Fatalf("rejected role override sent AMQ: %+v", *calls)
+	}
+	if files := regularFiles(sessionRoot); len(files) != 1 || files[0] != filepath.Join(sessionRoot, "agents", "cto", "inbox", "new", "goal-simple.md") {
+		t.Fatalf("direct goal must add exactly one session-root message file: %v", files)
 	}
 	if after := snapshotSquadState(); after != before {
 		t.Fatalf("simple goal mutated local .amq-squad state\nbefore=%q\nafter=%q", before, after)

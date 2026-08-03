@@ -795,6 +795,9 @@ func TestStatusUsesPlainTaskStateAndOmitsGoalSupervision(t *testing.T) {
 	if strings.Contains(out, `"goal_supervision"`) || env.Data.GoalSupervision != nil {
 		t.Fatalf("simple status projected goal-supervision machinery: %s", out)
 	}
+	if strings.Contains(out, `"open_gates"`) {
+		t.Fatalf("scoped status emitted an unobserved hardcoded gate count: %s", out)
+	}
 }
 
 func TestStatusIgnoresUnstructuredWorkerCompletionReport(t *testing.T) {

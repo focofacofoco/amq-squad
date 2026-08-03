@@ -152,7 +152,7 @@ type statusOperatorPoll struct {
 	Owner        string `json:"owner,omitempty"`
 	Cursor       string `json:"cursor,omitempty"`
 	Unread       int    `json:"unread"`
-	OpenGates    int    `json:"open_gates"`
+	OpenGates    *int   `json:"open_gates,omitempty"`
 	OpenBlockers int    `json:"open_blockers"`
 }
 
@@ -739,7 +739,6 @@ func statusOperatorForTeam(t team.Team, ns squadnamespace.Ref) statusOperatorVie
 		Required:     op.PollRequired,
 		Owner:        contract.PollOwner,
 		Unread:       0,
-		OpenGates:    0,
 		OpenBlockers: 0,
 	}
 	return out

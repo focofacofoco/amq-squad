@@ -155,8 +155,8 @@ var monitorOperatorState = func(projectDir, profile, session string) (openGates 
 	if err != nil {
 		return 0, 0, err
 	}
-	if data.Operator.Poll != nil {
-		return data.Operator.Poll.OpenGates, data.Operator.Poll.Unread, nil
+	if data.Operator.Poll != nil && data.Operator.Poll.OpenGates != nil {
+		return *data.Operator.Poll.OpenGates, data.Operator.Poll.Unread, nil
 	}
 	return 0, 0, nil
 }

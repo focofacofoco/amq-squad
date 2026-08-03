@@ -193,7 +193,7 @@ func namespaceConflictForProfileSession(projectDir, profile, session string) *na
 		RecoveryCommands: []string{
 			"amq-squad status --project " + shellQuote(projectDir) + " --profile " + shellQuote(profile) + " --session " + shellQuote(session) + " --json",
 			"amq-squad status --project " + shellQuote(projectDir) + " --profile default --session " + shellQuote(session) + " --json",
-			"amq-squad goal --project " + shellQuote(projectDir) + " --profile " + shellQuote(profile) + " --session " + shellQuote(session) + " --goal <goal>",
+			"amq-squad goal --project " + shellQuote(projectDir) + " --profile " + shellQuote(profile) + " --session " + shellQuote(session) + " --goal <goal> --override-namespace-conflict --reason <why>",
 			"amq send --root " + shellQuote(requested) + " --me <sender> --to <recipient> --thread <thread> --kind todo --subject <subject> --body <body>",
 			"amq-squad send --project " + shellQuote(projectDir) + " --profile " + shellQuote(profile) + " --session " + shellQuote(session) + " --role <role> --body <prompt> --override-namespace-conflict --reason <why>",
 			"stopped-run namespace migration backlog: " + coldNamespaceMigrationIssueURL,
