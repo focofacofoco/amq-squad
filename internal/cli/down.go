@@ -402,6 +402,7 @@ func validateExactStopLaunchRecords(t team.Team, profile, workstream string, tar
 	if scanErr != nil {
 		return fmt.Errorf("stop refused: scan launch records: %w", scanErr)
 	}
+	requestedRoot := squadnamespace.AMQRoot(t.Project, profile, workstream)
 	for _, m := range targets {
 		selection := selectStatusLaunchRecord(t, profile, m, workstream, probe, entries)
 		if len(selection.DuplicatePaths) > 0 {
@@ -413,7 +414,7 @@ func validateExactStopLaunchRecords(t team.Team, profile, workstream string, tar
 			if handle == "" {
 				handle = memberHandle(m)
 			}
-			if err := validateExactStopLaunchRecord(rec, m, handle, profile, workstream, rec.Root); err != nil {
+			if err := validateExactStopLaunchRecord(rec, m, handle, profile, workstream, requestedRoot); err != nil {
 				return fmt.Errorf("stop refused: launch record for role %q failed exact named-profile identity validation: %w", m.Role, err)
 			}
 			continue

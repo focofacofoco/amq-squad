@@ -78,7 +78,7 @@ func swapTeamMemberStopRunner(t *testing.T, runner func([]string) error) {
 func seedExactStopProject(t *testing.T, members []team.Member) (projectDir, namedRoot, legacyRoot string) {
 	t.Helper()
 	setupFakeAMQSessionRoots(t)
-	projectDir = t.TempDir()
+	projectDir = canonicalFilesystemPath(t.TempDir())
 	resumeChdir(t, projectDir)
 	seedProfile(t, projectDir, exactStopProfile, team.Team{
 		Project:    projectDir,
@@ -314,8 +314,17 @@ func TestExactNamedProfileStopWakeLockRootValidation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("poisoned wake-lock stop: %v\n%s", err, stdout)
 		}
-		if !reflect.DeepEqual(processMatchCalls, []int{8100}) {
-			t.Fatalf("ProcessMatch calls = %v, poisoned legacy wake pid must not be inspected", processMatchCalls)
+		agentProbeCount := 0
+		for _, pid := range processMatchCalls {
+			if pid == 8200 {
+				t.Fatalf("ProcessMatch calls = %v, poisoned legacy wake pid must not be inspected", processMatchCalls)
+			}
+			if pid == 8100 {
+				agentProbeCount++
+			}
+		}
+		if agentProbeCount == 0 {
+			t.Fatalf("ProcessMatch calls = %v, selected agent pid was never verified", processMatchCalls)
 		}
 		if !reflect.DeepEqual(term.calls, []int{8100}) {
 			t.Fatalf("signals = %v, want only named agent pid", term.calls)

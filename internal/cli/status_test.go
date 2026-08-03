@@ -458,7 +458,7 @@ func TestExecuteStatusIsolatesForeignProfileLaunchRecord(t *testing.T) {
 
 func TestExecuteStatusJSONNamedProfileKeepsExactStopActionsOnLegacySessionRootConflict(t *testing.T) {
 	setupFakeAMQSessionRoots(t)
-	dir := t.TempDir()
+	dir := canonicalFilesystemPath(t.TempDir())
 	seedProfile(t, dir, "release", team.Team{
 		Project: dir,
 		Members: []team.Member{
@@ -930,6 +930,8 @@ func TestStatusTaskWarningsSuppressClosedAndSupersededTasks(t *testing.T) {
 func TestStatusWarnsAgedOperatorGate(t *testing.T) {
 	setupFakeAMQSessionRoots(t)
 	project, base, _ := seedNotifyProject(t, team.DefaultOperator())
+	project = canonicalFilesystemPath(project)
+	base = canonicalFilesystemPath(base)
 	seedNotifyLaunch(t, project, base, "s", "cto")
 	seedNotifyMessage(t, base, "s", team.DefaultOperatorHandle, "new", notifyMsg{
 		ID:      "gate-1",
@@ -1751,7 +1753,7 @@ func TestExecuteStatusJSONReportsClaimedReservedPromptGoalForLiveCodexLead(t *te
 		Orchestrated: true,
 		Lead:         "cto",
 	}
-	dir := seedTeam(t, tm)
+	dir := canonicalFilesystemPath(seedTeam(t, tm))
 	tm, err := team.Read(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -1761,7 +1763,8 @@ func TestExecuteStatusJSONReportsClaimedReservedPromptGoalForLiveCodexLead(t *te
 	created := time.Now().Add(-time.Minute).UTC()
 	prompt := codexGoalControlPrompt("ship", tm, team.DefaultProfile, "issue-507", "cto", attemptID)
 	seedAgentRecord(t, base, "issue-507", "cto", launch.Record{
-		Binary: "codex", Handle: "cto", Role: "cto", AgentPID: 4242,
+		Binary: "codex", Handle: "cto", Role: "cto", Session: "issue-507", AgentPID: 4242,
+		TeamHome: dir, TeamProfile: team.DefaultProfile,
 		GoalBinding: &launch.GoalBinding{
 			Mode: "prompt_goal", NativeGoal: false, Source: "goal-control", DeliveryState: goalBindingDeliveryReserved,
 			Command: prompt, Goal: "ship", AttemptID: attemptID,

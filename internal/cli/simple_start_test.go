@@ -322,10 +322,16 @@ func (f *simpleStartRunFixture) seedRecord(t *testing.T, role, handle string, pi
 	t.Helper()
 	agentDir := filepath.Join(f.root, "agents", handle)
 	tty := "/dev/ttys-test"
+	binary := "codex"
+	launcher := ""
+	if handle == memberHandle(f.member) {
+		binary = f.member.Binary
+		launcher = f.member.Launcher
+	}
 	rec := launch.Record{
 		Schema: launch.SchemaVersion, CWD: f.project, TeamHome: f.project, TeamProfile: f.profile,
 		Root: f.root, BaseRoot: filepath.Dir(f.root), Session: f.session,
-		Role: role, Handle: handle, Binary: "codex", Trust: trustModeSandboxed,
+		Role: role, Handle: handle, Binary: binary, Launcher: launcher, Trust: trustModeSandboxed,
 		ToolProfile: team.ToolProfileFull, AgentPID: pid, AgentTTY: tty, StartedAt: f.started,
 		Tmux: &launch.TmuxInfo{Session: "test", WindowID: "@1", PaneID: paneID, Target: "new-window"},
 	}
@@ -453,6 +459,41 @@ func TestRunStartWithDependenciesRejectsDeadPIDWithSurvivingTitledPane(t *testin
 	}
 	if strings.Contains(out.String(), "started work") {
 		t.Fatalf("dead child was reported started:\n%s", out.String())
+	}
+}
+
+func TestRunStartWithDependenciesLauncherPIDImageIsAccepted(t *testing.T) {
+	project := canonicalFilesystemPath(t.TempDir())
+	launcher := filepath.Join(project, "codex-launcher")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := newSimpleStartRunFixture(t, team.Member{Role: "dev", Handle: "dev", Binary: "codex", Launcher: launcher})
+	const (
+		pid    = 4103
+		paneID = "%6"
+	)
+	matchedLauncher := false
+	f.deps.RuntimeProbe.ProcessMatch = func(gotPID int, predicate func(string) bool) bool {
+		if gotPID != pid {
+			return false
+		}
+		matchedLauncher = predicate(filepath.Base(launcher) + " --forward codex")
+		return matchedLauncher
+	}
+	f.deps.Launch = func(team.Team, teamLaunchOptions) (teamLaunchResult, error) {
+		f.seedRecord(t, "dev", "dev", pid, paneID, true, true)
+		return simpleStartLaunchResult("dev", paneID), nil
+	}
+	var out bytes.Buffer
+	if err := runStartWithDependencies(f.args("--yes"), f.deps, strings.NewReader(""), &out); err != nil {
+		t.Fatalf("launcher-backed start failed: %v\n%s", err, out.String())
+	}
+	if !matchedLauncher {
+		t.Fatal("honest ProcessMatch did not recognize the recorded launcher image")
+	}
+	if !strings.Contains(out.String(), "started work") {
+		t.Fatalf("launcher-backed child was not reported started:\n%s", out.String())
 	}
 }
 
