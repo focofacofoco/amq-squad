@@ -576,7 +576,7 @@ func TestBootstrapContextForResolvesBriefPath(t *testing.T) {
 	ctx := bootstrapContextFor(launch.Record{
 		Role: "cto", Handle: "cto", Binary: "codex", Session: "issue-96", CWD: teamHome,
 	}, teamHome+"/agents/cto", teamHome)
-	want := teamHome + "/.amq-squad/briefs/issue-96.md"
+	want := canonicalFilesystemPath(teamHome) + "/.amq-squad/briefs/issue-96.md"
 	if ctx.BriefPath != want {
 		t.Errorf("BriefPath = %q, want %q", ctx.BriefPath, want)
 	}
@@ -599,8 +599,8 @@ func TestBuildBootstrapPromptWithoutRules(t *testing.T) {
 }
 
 func TestBootstrapPromptIncludesCurrentTeamRouting(t *testing.T) {
-	teamHome := t.TempDir()
-	qaProject := t.TempDir()
+	teamHome := canonicalFilesystemPath(t.TempDir())
+	qaProject := canonicalFilesystemPath(t.TempDir())
 	if err := os.MkdirAll(filepath.Join(qaProject, ".agent-mail", "fresh-cpo", "agents", "qa", "inbox"), 0o755); err != nil {
 		t.Fatal(err)
 	}
