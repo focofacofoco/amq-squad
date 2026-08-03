@@ -18,6 +18,7 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
 	"github.com/omriariav/amq-squad/v2/internal/team"
+	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 )
 
 // simpleStartCheckpoint is the crash-injection boundary shared by the
@@ -63,6 +64,7 @@ type simpleStartDependencies struct {
 	Launch          func(team.Team, teamLaunchOptions) (teamLaunchResult, error)
 	StartWatcher    func(team.Team, string, string, string) error
 	DeliverGoal     func(simpleStartPlan, string) error
+	ListPanes       tmuxpane.PaneLister
 	Sleep           func(time.Duration)
 }
 
@@ -85,6 +87,7 @@ func defaultSimpleStartDependencies() simpleStartDependencies {
 		},
 		StartWatcher: reconcileSessionNotifierStarted,
 		DeliverGoal:  deliverSimpleStartGoal,
+		ListPanes:    statusPaneLister,
 		Sleep:        time.Sleep,
 	}
 }
@@ -135,6 +138,9 @@ func normalizeSimpleStartDependencies(deps simpleStartDependencies) simpleStartD
 	}
 	if deps.DeliverGoal == nil {
 		deps.DeliverGoal = defaults.DeliverGoal
+	}
+	if deps.ListPanes == nil {
+		deps.ListPanes = defaults.ListPanes
 	}
 	if deps.Sleep == nil {
 		deps.Sleep = defaults.Sleep
@@ -235,6 +241,9 @@ func runStartWithDependencies(args []string, deps simpleStartDependencies, in io
 		return err
 	}
 	if len(current.SpawnTeam.Members) > 0 {
+		if err := refuseRecordlessSimpleStartPanes(current, deps.ListPanes); err != nil {
+			return err
+		}
 		if err := validateSimpleStartRestoreCommands(current); err != nil {
 			return err
 		}
@@ -279,7 +288,7 @@ func runStartWithDependencies(args []string, deps simpleStartDependencies, in io
 	}
 	if len(current.SpawnTeam.Members) > 0 && strings.TrimSpace(current.Goal) != "" {
 		if err := deps.DeliverGoal(verified, current.Goal); err != nil {
-			return fmt.Errorf("all agents are live but deliver goal to lead: %w", err)
+			fmt.Fprintf(os.Stderr, "WARNING: all agents are live, but goal delivery to the lead failed: %v\n", err)
 		}
 	}
 	if len(current.SpawnTeam.Members) == 0 {
@@ -288,6 +297,55 @@ func runStartWithDependencies(args []string, deps simpleStartDependencies, in io
 		fmt.Fprintf(out, "started %s using profile %s in %s\n", current.Session, current.Profile, current.Project)
 	}
 	fmt.Fprintf(out, "AM_ROOT: %s\n", current.Root)
+	return nil
+}
+
+func refuseRecordlessSimpleStartPanes(plan simpleStartPlan, list tmuxpane.PaneLister) error {
+	recordless := false
+	for _, row := range plan.Roles {
+		if row.State == "unmanaged" && row.Record == nil {
+			recordless = true
+			break
+		}
+	}
+	if !recordless {
+		return nil
+	}
+	if plan.LaunchOptions.Target == "new-session" && !tmuxSessionExists(plan.LaunchOptions.TerminalSession) {
+		return nil
+	}
+	panes, err := list()
+	if err != nil {
+		return fmt.Errorf("inspect tmux panes before recordless launch: %w", err)
+	}
+	return classifyRecordlessSimpleStartPanes(plan, panes)
+}
+
+func classifyRecordlessSimpleStartPanes(plan simpleStartPlan, panes []tmuxpane.TmuxPane) error {
+	expected := make(map[string]string)
+	for _, row := range plan.Roles {
+		if row.State == "unmanaged" && row.Record == nil {
+			expected[paneTitleToken(plan.Session, row.Member.Role)] = row.Member.Role
+		}
+	}
+	for _, pane := range panes {
+		title := strings.TrimSpace(pane.DiscoveryToken)
+		if title == "" {
+			title = strings.TrimSpace(pane.Title)
+		}
+		role, ok := expected[title]
+		if !ok {
+			continue
+		}
+		identity := strings.TrimSpace(pane.PaneID)
+		if identity == "" {
+			identity = strings.Trim(strings.Join([]string{pane.Session, pane.Window, pane.Pane}, ":"), ":")
+		}
+		return &simpleStartConflictError{
+			Class:  "unmanaged",
+			Detail: fmt.Sprintf("role %s has a live launcher-stamped tmux pane %s but no launch record; refusing to create a second runtime", role, identity),
+		}
+	}
 	return nil
 }
 
@@ -419,7 +477,7 @@ func buildSimpleStartPlan(req simpleStartRequest, deps simpleStartDependencies) 
 	if err := validateModelOverrideKeys(req.Options.ModelOverrides, memberRoles); err != nil {
 		return simpleStartPlan{}, err
 	}
-	if row := worktreeIsolationReadinessRowForSession(t, req.Profile, session); row.Status == "blocked" {
+	if row := worktreeIsolationCheckForSession(t, req.Profile, session); row.Status == "blocked" {
 		return simpleStartPlan{}, fmt.Errorf("worktree isolation blocked: %s; %s", row.Evidence, row.Fix)
 	}
 	if deps.LookPath == nil {

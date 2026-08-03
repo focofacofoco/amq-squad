@@ -274,6 +274,23 @@ func TestLifecycleHelpDocumentsProject(t *testing.T) {
 	}
 }
 
+func TestStartHelpDescribesSingleReconcileCommand(t *testing.T) {
+	_, stderr, err := captureOutput(t, func() error { return Run([]string{"start", "--help"}, "test") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"reconcile one canonical team workstream", "Rerunning keeps verified live roles", "and rolls forward", "partial managed launches"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("start help missing %q:\n%s", want, stderr)
+		}
+	}
+	for _, stale := range []string{"--prepare", "[--go]", " --go ", " --go\n"} {
+		if strings.Contains(stderr, stale) {
+			t.Fatalf("start help still advertises %q:\n%s", stale, stderr)
+		}
+	}
+}
+
 func TestGoalGroupHelp(t *testing.T) {
 	for _, args := range [][]string{{"goal", "--help"}, {"goal", "-h"}} {
 		_, stderr, err := captureOutput(t, func() error { return Run(args, "test") })

@@ -1395,30 +1395,27 @@ func uniqueMemberCWDs(projectDir string, members []team.Member) []string {
 }
 
 type emitTeamCommandInput struct {
-	CWD              string
-	SquadBin         string
-	TeamHome         string
-	Member           team.Member
-	NoBootstrap      bool
-	Workstream       string
-	BinaryArgs       map[string][]string
-	TrustMode        string
-	Model            string
-	ForceDuplicate   bool
-	NoGitignore      bool
-	Symphony         bool
-	WakeInjectVia    string
-	WakeInjectArgs   []string
-	WakeInjectMode   string
-	Profile          string
-	PreparedRunToken preparedRunToken
-	StagedSpawn      bool
-	StagedClaim      string
-	ExplicitProfile  bool
-	SimpleStart      bool
-	CanonicalRoot    string
-	StartupPrompt    string
-	Conversation     string
+	CWD             string
+	SquadBin        string
+	TeamHome        string
+	Member          team.Member
+	NoBootstrap     bool
+	Workstream      string
+	BinaryArgs      map[string][]string
+	TrustMode       string
+	Model           string
+	ForceDuplicate  bool
+	NoGitignore     bool
+	Symphony        bool
+	WakeInjectVia   string
+	WakeInjectArgs  []string
+	WakeInjectMode  string
+	Profile         string
+	ExplicitProfile bool
+	SimpleStart     bool
+	CanonicalRoot   string
+	StartupPrompt   string
+	Conversation    string
 }
 
 type teamCommandPreviewData struct {
@@ -1438,12 +1435,6 @@ func emitTeamCommandWithPreview(in emitTeamCommandInput, preview teamCommandPrev
 	b.WriteString("cd ")
 	b.WriteString(shellQuote(in.CWD))
 	b.WriteString(" && ")
-	if !in.PreparedRunToken.empty() {
-		b.WriteString(internalPreparedRunTokenEnv)
-		b.WriteString("=")
-		b.WriteString(shellQuote(encodePreparedRunToken(in.PreparedRunToken)))
-		b.WriteString(" ")
-	}
 	b.WriteString(shellQuote(in.SquadBin))
 	// Emit the modern single-agent surface: `agent up <binary> [flags] [-- child]`.
 	// Legacy `launch <binary>` still works with a deprecation warning, but
@@ -1453,13 +1444,6 @@ func emitTeamCommandWithPreview(in emitTeamCommandInput, preview teamCommandPrev
 	if conversation := strings.TrimSpace(in.Conversation); conversation != "" {
 		b.WriteString(" --conversation ")
 		b.WriteString(shellQuote(conversation))
-	}
-	if in.StagedSpawn {
-		b.WriteString(" --staged-spawn")
-		if claim := strings.TrimSpace(in.StagedClaim); claim != "" {
-			b.WriteString(" --staged-claim ")
-			b.WriteString(shellQuote(claim))
-		}
 	}
 	b.WriteString(" --role ")
 	b.WriteString(shellQuote(m.Role))

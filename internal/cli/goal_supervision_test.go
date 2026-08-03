@@ -41,12 +41,7 @@ func eligibleGoalSupervisionInput() goalSupervisionAssessmentInput {
 				Source: "launch-record", DeliveryState: "blocked", GoalDigest: "goal-digest",
 				AttemptID: "attempt-1", BindingDigest: "binding-digest", CommandDigest: "command-digest",
 			},
-			PauseGeneration:       "pause-generation",
-			PreparedRunGeneration: "prepared-generation",
-			PreparedRunDigest:     "prepared-digest",
-			PreparedLaunchAttempt: "prepared-attempt",
-			PreparedGoalNamespace: "default/release",
-			PreparedGoalDigest:    "prepared-goal-digest",
+			PauseGeneration: "pause-generation",
 		},
 		Lifecycle: GoalSupervisionLifecycleEvidence{
 			Known: true, Fresh: true, Source: "heartbeat-file", Phase: "goal_blocked",
@@ -292,13 +287,6 @@ func TestAssessGoalSupervisionEligibilityTruthTable(t *testing.T) {
 			},
 			state: GoalSupervisionNativeGoalBlockedUnknown,
 		},
-		{
-			name: "prepared binding missing",
-			mutate: func(in *goalSupervisionAssessmentInput) {
-				in.Binding.PreparedRunGeneration = ""
-			},
-			state: GoalSupervisionNativeGoalBlockedUnknown,
-		},
 	}
 
 	for _, tc := range tests {
@@ -345,7 +333,7 @@ func TestAssessGoalSupervisionEligibilityReasonsAreExplicitAndOrdered(t *testing
 	want := []string{
 		"fresh_assessment", "sources_complete", "exact_namespace", "exact_lead_identity",
 		"lifecycle_known", "resumable_lifecycle", "native_goal_paused", "goal_binding_content",
-		"goal_attempt", "launch_generation", "prepared_run_binding", "pause_generation",
+		"goal_attempt", "launch_generation", "pause_generation",
 		"runtime_identity", "pane_identity", "pane_idle", "blocker_known", "blocker_resolved",
 		"gates_known", "no_open_gate", "no_gate_ambiguity", "local_input_known",
 		"no_local_input", "invariants_ok", "claim_known", "claim_clear",
@@ -445,50 +433,6 @@ func TestGoalSupervisionExactPaneIdentityRequiresAllStableIDsAndTitle(t *testing
 	}
 }
 
-func TestVerifyGoalSupervisionBlockedBindingContentsIsExact(t *testing.T) {
-	member := team.Member{Role: "cto", Binary: "claude", Handle: "cto"}
-	tm := team.Team{
-		Project: "/project", Orchestrated: true, Lead: "cto",
-		ExecutionMode: executionModeProjectLead, Members: []team.Member{member},
-	}
-	goal := "ship the accepted run"
-	attemptID := strings.Repeat("a", 32)
-	command := nativeGoalControlPrompt(
-		goal, tm, team.DefaultProfile, "release", member.Role, attemptID,
-	)
-	valid := launch.GoalBinding{
-		Mode: "native_goal_blocked", NativeGoal: true,
-		Source: "goal-runtime", DeliveryState: "blocked",
-		Goal: goal, AttemptID: attemptID, Command: command,
-	}
-	if gotGoal, gotAttempt, err := verifyGoalSupervisionBlockedBindingContents(
-		tm, team.DefaultProfile, "release", member, &valid,
-	); err != nil || gotGoal != goal || gotAttempt != attemptID {
-		t.Fatalf("valid blocked binding = goal %q attempt %q err %v", gotGoal, gotAttempt, err)
-	}
-	tests := []struct {
-		name   string
-		mutate func(*launch.GoalBinding)
-	}{
-		{name: "typed goal", mutate: func(b *launch.GoalBinding) { b.Goal = "different" }},
-		{name: "typed attempt", mutate: func(b *launch.GoalBinding) { b.AttemptID = strings.Repeat("b", 32) }},
-		{name: "command", mutate: func(b *launch.GoalBinding) { b.Command = strings.Replace(b.Command, "release", "other", 1) }},
-		{name: "source", mutate: func(b *launch.GoalBinding) { b.Source = "launch-record" }},
-		{name: "delivery", mutate: func(b *launch.GoalBinding) { b.DeliveryState = "delivered" }},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := valid
-			tc.mutate(&got)
-			if _, _, err := verifyGoalSupervisionBlockedBindingContents(
-				tm, team.DefaultProfile, "release", member, &got,
-			); err == nil {
-				t.Fatalf("mismatched %s binding was accepted: %+v", tc.name, got)
-			}
-		})
-	}
-}
-
 func TestBuildGoalSupervisionAssessmentContentVerificationDoesNotOverrideStatusVeto(t *testing.T) {
 	project := t.TempDir()
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
@@ -539,14 +483,6 @@ func TestBuildGoalSupervisionAssessmentContentVerificationDoesNotOverrideStatusV
 		t.Fatalf("stale/refused status unexpectedly verified binding: %+v", binding)
 	}
 
-	previousVerifier := goalSupervisionBlockedBindingVerifier
-	goalSupervisionBlockedBindingVerifier = func(
-		team.Team, string, string, team.Member, launch.Record,
-	) (string, string, error) {
-		return "ship", "attempt-1", nil
-	}
-	t.Cleanup(func() { goalSupervisionBlockedBindingVerifier = previousVerifier })
-
 	assessment := buildGoalSupervisionAssessment(
 		tm, team.DefaultProfile, session, ns, rows,
 		goalSupervisionGateObservation{Evidence: GoalSupervisionGateEvidence{Known: true}},
@@ -565,42 +501,6 @@ func TestBuildGoalSupervisionAssessmentContentVerificationDoesNotOverrideStatusV
 		assessment.Binding.Goal.ContentExact ||
 		assessment.Eligible {
 		t.Fatalf("content verification overrode status veto: %+v", assessment.Binding.Goal)
-	}
-}
-
-func TestVerifyGoalSupervisionPreparedGoalRejectsGoalOrGenerationDrift(t *testing.T) {
-	generation := strings.Repeat("a", 32)
-	launchAttempt := strings.Repeat("b", 32)
-	manifestDigest := "sha256:manifest"
-	goalDigest := "sha256:goal"
-	manifest := preparedRunManifest{
-		Generation: generation, Profile: team.DefaultProfile,
-		Session: "release", Namespace: "default/release", GoalText: "ship",
-		GoalNamespace: "default/release", GoalDigest: goalDigest,
-	}
-	rec := launch.Record{
-		PreparedRunGeneration: generation, PreparedRunDigest: manifestDigest,
-		PreparedRunGoalNamespace: "default/release", PreparedRunGoalDigest: goalDigest,
-		PreparedRunLaunchAttempt: launchAttempt,
-	}
-	if err := verifyGoalSupervisionPreparedGoal(
-		"ship", team.DefaultProfile, "release", rec, manifest, manifestDigest,
-	); err != nil {
-		t.Fatalf("exact prepared goal rejected: %v", err)
-	}
-	changedGoal := manifest
-	changedGoal.GoalText = "different"
-	if err := verifyGoalSupervisionPreparedGoal(
-		"ship", team.DefaultProfile, "release", rec, changedGoal, manifestDigest,
-	); err == nil {
-		t.Fatal("prepared goal text drift was accepted")
-	}
-	changedGeneration := rec
-	changedGeneration.PreparedRunGeneration = strings.Repeat("c", 32)
-	if err := verifyGoalSupervisionPreparedGoal(
-		"ship", team.DefaultProfile, "release", changedGeneration, manifest, manifestDigest,
-	); err == nil {
-		t.Fatal("prepared generation drift was accepted")
 	}
 }
 

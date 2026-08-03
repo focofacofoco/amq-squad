@@ -1255,12 +1255,6 @@ func inspectResumeExecLaunchRecords(checks []resumeExecLaunchCheck, snapshots ma
 			results = append(results, res)
 			continue
 		}
-		if _, _, identityErr := verifyRuntimeActionWithRecord("resume post-launch", c.Project, c.Profile, c.Workstream, c.Handle, rec); identityErr != nil {
-			res.State = resumeExecLaunchStateFailed
-			res.Detail = identityErr.Error()
-			results = append(results, res)
-			continue
-		}
 		if info, statErr := os.Stat(launch.ExistingPath(c.AgentDir)); statErr == nil {
 			res.RecordModTime = info.ModTime()
 		}
@@ -1488,14 +1482,6 @@ func planMemberResume(in memberPlanInput) (resumePlan, error) {
 	}
 
 	if live.Live() {
-		if recFound {
-			if _, _, identityErr := verifyRuntimeActionWithRecord("resume", in.Team.Project, in.Profile, env.SessionName, handle, rec); identityErr != nil {
-				plan.Action = resumeBlocked
-				plan.Command = ""
-				plan.Note = identityErr.Error()
-				return plan, nil
-			}
-		}
 		// Live signal detected (agent / wake / presence / replacement). Same
 		// contract as before: suppress the command unless --force-duplicate.
 		note := resumeLiveNote(live, m.Binary)

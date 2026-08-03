@@ -15,7 +15,7 @@ var (
 	teamMemberStop   = runDown
 )
 
-// runTeamMember dispatches `amq-squad team member <add|admit|replace|launch|control-continue|rm|list>`: runtime roster
+// runTeamMember dispatches `amq-squad team member <add|update|control-continue|rm|list>`: runtime roster
 // mutation. This is the durable-roster primitive the goal-first composition
 // model rests on — a lead (any binary) grows or shrinks its team mid-session,
 // and the change persists to team.json so resume rebuilds the team it built.
@@ -29,17 +29,8 @@ Usage:
       [--actor-mode review|implementation]
       [--spawn-origin NAME] [--spawn-depth N]
       [--project DIR] [--profile NAME] [--launch] [--target new-window] [--dry-run] [--json]
-  amq-squad team member admit <role> --actor-mode review|implementation
-      [--session S] [--project DIR] [--profile NAME] [--reason TEXT] [--json]
-  amq-squad team member replace <role> --claim CLAIM_ID --actor-mode review|implementation
-      [--session S] [--project DIR] [--profile NAME] [--reason TEXT] [--json]
-  amq-squad team member launch <role> --claim CLAIM_ID
-      [--session S] [--project DIR] [--profile NAME]
-      [--target current-window|new-window] [--timeout 2m] [--dry-run] [--json]
   amq-squad team member control-continue <role> --client EXACT_CLIENT
       [--session S] [--project DIR] [--profile NAME] [--json]
-  amq-squad team member status <role> [--session S] [--project DIR] [--profile NAME] [--json]
-  amq-squad team member history <role> [--session S] [--project DIR] [--profile NAME] [--json]
   amq-squad team member update <role> [--binary <claude|codex>] [--handle H]
       [--session S | --no-session-pin]
       [--model M] [--effort E] [--claude-args "…"] [--codex-args "…"]
@@ -51,12 +42,9 @@ Usage:
 
 Mutates the persisted team profile (team.json) atomically and under an
 exclusive lock, then re-validates it (orchestration constraints included).
-When an edit keeps one affected session pin and that session already has a
-valid, ready accepted preparation, add/update/rm also publishes its replacement
-generation before returning, so the roster edit does not require a separate
-prepare/accept round trip.
-The new member is NOT launched; 'add' prints how to start it (a managed pane
-via 'resume --exec --target new-window', or 'agent up' for an unmanaged one-off).
+The new member is NOT launched; run 'start' to reconcile the roster and spawn
+only missing roles. Replace a running role with 'down <role>' followed by
+'start'.
 
 'update' changes an existing member in place (binary, session pin, model,
 effort, native args, handle, actor-mode) without the remove-then-add dance; the only
@@ -84,18 +72,8 @@ Examples:
 		return runTeamMemberAdd(args[1:])
 	case "update":
 		return runTeamMemberUpdate(args[1:])
-	case "admit":
-		return runTeamMemberStagedAdmission(args[1:], false)
-	case "replace":
-		return runTeamMemberStagedAdmission(args[1:], true)
-	case "launch":
-		return runTeamMemberStagedLaunch(args[1:])
 	case "control-continue":
 		return runTeamMemberControlContinue(args[1:])
-	case "status":
-		return runTeamMemberStagedInspect(args[1:], false)
-	case "history":
-		return runTeamMemberStagedInspect(args[1:], true)
 	case "rm", "remove":
 		return runTeamMemberRemove(args[1:])
 	case "list", "ls":
@@ -103,8 +81,7 @@ Examples:
 	default:
 		return unknownSubcommandError(
 			"team member", args[0],
-			"add", "update", "admit", "replace", "launch", "control-continue",
-			"status", "history", "rm", "remove", "list", "ls",
+			"add", "update", "control-continue", "rm", "remove", "list", "ls",
 		)
 	}
 }

@@ -269,10 +269,25 @@ func stopSessionNotifier(project, profile, session string) (bool, error) {
 			return wasExpected, fmt.Errorf("session notifier pid %d did not exit", rec.PID)
 		}
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return wasExpected, fmt.Errorf("create session notifier runtime directory while stopping: %w", err)
+	}
 	err = flock.WithLock(sessionNotifierLockPath(project, profile, session), func() error {
 		current, err := readSessionNotifierRecord(path)
 		if err != nil {
 			return err
+		}
+		// The notifier may remove its runtime directory while exiting. We already
+		// verified the exact owner above, so preserve that record as the baseline
+		// when the post-signal path is absent instead of writing a schema-zero file.
+		if current.SchemaVersion == 0 {
+			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+				current = rec
+			} else if statErr != nil {
+				return statErr
+			} else {
+				return fmt.Errorf("session notifier runtime record became empty while stopping")
+			}
 		}
 		if current.OwnerToken != rec.OwnerToken && strings.TrimSpace(current.OwnerToken) != "" {
 			return fmt.Errorf("session notifier ownership changed while stopping")
@@ -436,8 +451,13 @@ func executeSessionNotifier(n sessionNotifierExecution) (returnErr error) {
 			}
 			rec.LastError = watchErr.Error()
 		case <-heartbeat.C:
-			if err := addNotificationWatchTree(watcher, n.Root); err != nil {
-				rec.LastError = err.Error()
+			heartbeatErr := addNotificationWatchTree(watcher, n.Root)
+			nudged, rescanErr := rescanSessionInboxMessages(n.Root, n.Profile, n.Session, seen, n.SendKeys)
+			heartbeatErr = errors.Join(heartbeatErr, rescanErr)
+			if heartbeatErr != nil {
+				rec.LastError = heartbeatErr.Error()
+			} else if nudged {
+				rec.LastNudgeAt, rec.LastError = n.Now().UTC(), ""
 			}
 		}
 		now = n.Now().UTC()
@@ -446,6 +466,26 @@ func executeSessionNotifier(n sessionNotifierExecution) (returnErr error) {
 			return err
 		}
 	}
+}
+
+func rescanSessionInboxMessages(root, profile, session string, seen map[string]struct{}, sendKeys sessionNotifierSendKeys) (bool, error) {
+	pending, err := snapshotSessionInboxMessages(root)
+	if err != nil {
+		return false, err
+	}
+	var (
+		nudgedAny bool
+		nudgeErrs []error
+	)
+	for messagePath := range pending {
+		nudged, err := notifySessionInboxArrival(root, profile, session, messagePath, seen, sendKeys)
+		if err != nil {
+			nudgeErrs = append(nudgeErrs, err)
+			continue
+		}
+		nudgedAny = nudgedAny || nudged
+	}
+	return nudgedAny, errors.Join(nudgeErrs...)
 }
 
 func snapshotSessionInboxMessages(root string) (map[string]struct{}, error) {

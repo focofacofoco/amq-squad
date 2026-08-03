@@ -21,7 +21,7 @@ type worktreeIsolationResult struct {
 	Fix      string
 }
 
-// worktreeIsolationReadinessRow is #497's planning-level readiness check:
+// worktreeIsolationCheck is #497's pre-launch isolation check:
 // launch fails closed when 2+ mutation-capable members would share one
 // resolved working directory (one Git index/checkout) without an explicit
 // recorded exception (team.Team.SharedCwdException). This is a static check
@@ -66,15 +66,15 @@ type worktreeIsolationResult struct {
 // So "agree" means same condition, same exception semantics, same vocabulary,
 // with stage-appropriate severity and remedy. If you change one side's condition
 // or exception handling, change both.
-func worktreeIsolationReadinessRow(t team.Team, profile string) worktreeIsolationResult {
-	return worktreeIsolationReadinessRowForSession(t, profile, "")
+func worktreeIsolationCheck(t team.Team, profile string) worktreeIsolationResult {
+	return worktreeIsolationCheckForSession(t, profile, "")
 }
 
-// worktreeIsolationReadinessRowForSession carries the active preparation
-// session into remedies whose CLI accepts it. The exception itself remains a
-// profile-wide property; accepting the session keeps the printed command
-// compatible with the rest of the preparation flow without changing scope.
-func worktreeIsolationReadinessRowForSession(t team.Team, profile, session string) worktreeIsolationResult {
+// worktreeIsolationCheckForSession carries the active workstream into remedies
+// whose CLI accepts it. The exception itself remains a profile-wide property;
+// accepting the session keeps the printed command scoped without changing the
+// isolation rule.
+func worktreeIsolationCheckForSession(t team.Team, profile, session string) worktreeIsolationResult {
 	groups := map[string][]string{}
 	groupDisplay := map[string]string{}
 	proxied := map[string]bool{}

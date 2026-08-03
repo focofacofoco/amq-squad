@@ -14,35 +14,6 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
-func TestPreparedRunIdentityMismatchNamesExecutableNextCommand(t *testing.T) {
-	setupFakeAMQSessionRoots(t)
-	dir := seedTeam(t, team.Team{
-		Workstream:   "audit",
-		Orchestrated: true,
-		Lead:         "cto",
-		Members: []team.Member{
-			{Role: "cto", Handle: "cto", Binary: "codex", Session: "audit"},
-		},
-	})
-	chdir(t, dir)
-
-	err := preparedRunIdentityMismatchf("prepared generation gen-old already has terminal launch evidence")
-	if !strings.HasPrefix(err.Error(), "prepared generation gen-old already has terminal launch evidence; remedy: ") {
-		t.Fatalf("identity error lost what failed and why: %v", err)
-	}
-	const displayed = "amq-squad status --json"
-	if !strings.Contains(err.Error(), "'"+displayed+"'") {
-		t.Fatalf("identity error does not name the canonical inspection command: %v", err)
-	}
-	if strings.Contains(preparedRunIdentityRecoveryHint, "<") {
-		t.Fatalf("generic recovery must not print unresolved placeholders: %s", preparedRunIdentityRecoveryHint)
-	}
-	argv := strings.Fields(displayed)
-	if _, _, runErr := captureOutput(t, func() error { return Run(argv[1:], "test") }); runErr != nil {
-		t.Fatalf("the command displayed by the error did not execute: %v", runErr)
-	}
-}
-
 func TestLiveIdentityRecoveryNamesRegisteredExecutableCommands(t *testing.T) {
 	setupFakeAMQSessionRoots(t)
 	dir := seedTeam(t, team.Team{

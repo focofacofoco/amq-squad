@@ -13,6 +13,7 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/launch"
 	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
 	"github.com/omriariav/amq-squad/v2/internal/team"
+	"github.com/omriariav/amq-squad/v2/internal/tmuxpane"
 )
 
 func TestSimpleStartCommandPinsCanonicalInputsAndExactInstruction(t *testing.T) {
@@ -208,6 +209,26 @@ func TestReconcileSimpleStartRolesTreatsSameRoleWrongHandleAsUnmanaged(t *testin
 	if len(removed) != 1 || removed[0].State != "unmanaged" ||
 		!strings.Contains(removed[0].Detail, "dev-1") || !strings.Contains(removed[0].Detail, launch.ExistingPath(records[0].AgentDir)) {
 		t.Fatalf("foreign same-role record = %+v, want path-bearing unmanaged classification", removed)
+	}
+}
+
+func TestClassifyRecordlessSimpleStartPaneIsUnmanagedConflict(t *testing.T) {
+	plan := simpleStartPlan{
+		Session: "work",
+		Roles: []simpleStartRolePlan{{
+			Member: team.Member{Role: "dev", Handle: "dev", Binary: "codex"},
+			State:  "unmanaged",
+		}},
+	}
+	err := classifyRecordlessSimpleStartPanes(plan, []tmuxpane.TmuxPane{{
+		Session: "squad", Window: "0", Pane: "1", PaneID: "%17", Title: paneTitleToken("work", "dev"),
+	}})
+	var conflict *simpleStartConflictError
+	if !errors.As(err, &conflict) || conflict.Class != "unmanaged" {
+		t.Fatalf("error = %v, want unmanaged conflict", err)
+	}
+	if !strings.Contains(conflict.Detail, "dev") || !strings.Contains(conflict.Detail, "%17") {
+		t.Fatalf("conflict detail = %q, want role and pane identity", conflict.Detail)
 	}
 }
 
@@ -713,6 +734,38 @@ func TestSimpleStartGoalIsLastAndNeverResentOnSpawnlessRerun(t *testing.T) {
 	}
 	if got := strings.Join(events[:3], ","); got != "launch,notifier,goal" {
 		t.Fatalf("first start order = %s, want launch,notifier,goal", got)
+	}
+}
+
+func TestSimpleStartGoalFailureWarnsAfterSuccessfulLaunch(t *testing.T) {
+	f := newSimpleStartRunFixture(t, team.Member{Role: "cto", Handle: "cto", Binary: "codex"})
+	configured, err := team.Read(f.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured.Orchestrated, configured.Lead = true, "cto"
+	if err := team.Write(f.project, configured); err != nil {
+		t.Fatal(err)
+	}
+	f.deps.Launch = func(team.Team, teamLaunchOptions) (teamLaunchResult, error) {
+		f.seedRecord(t, "cto", "cto", 4502, "%11", true, true)
+		return simpleStartLaunchResult("cto", "%11"), nil
+	}
+	f.deps.DeliverGoal = func(simpleStartPlan, string) error {
+		return errors.New("goal mailbox unavailable")
+	}
+	var out bytes.Buffer
+	_, stderr, err := captureOutput(t, func() error {
+		return runStartWithDependencies(f.args("--yes", "--goal", "ship it"), f.deps, strings.NewReader(""), &out)
+	})
+	if err != nil {
+		t.Fatalf("start returned goal-delivery failure after launch: %v", err)
+	}
+	if !strings.Contains(stderr, "WARNING: all agents are live") || !strings.Contains(stderr, "goal mailbox unavailable") {
+		t.Fatalf("stderr missing loud goal warning: %q", stderr)
+	}
+	if !strings.Contains(out.String(), "started ") {
+		t.Fatalf("successful launch was not reported: %s", out.String())
 	}
 }
 

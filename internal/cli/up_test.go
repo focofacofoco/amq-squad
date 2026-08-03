@@ -90,13 +90,6 @@ func (f *fakeBackend) Launch(t team.Team, opts teamLaunchOptions) error {
 }
 
 func (f *fakeBackend) LaunchWithResult(t team.Team, opts teamLaunchOptions) (teamLaunchResult, error) {
-	if !opts.PreparedRunToken.empty() {
-		for _, member := range orderedTeamMembers(t.Members) {
-			if err := consumePreparedRunMember(t.Project, opts.Profile, opts.Workstream, opts.PreparedRunToken, member.Role, memberHandle(member)); err != nil {
-				return teamLaunchResult{}, err
-			}
-		}
-	}
 	if err := f.Launch(t, opts); err != nil {
 		return teamLaunchResult{}, err
 	}
@@ -113,8 +106,6 @@ func (f *fakeBackend) LaunchWithResult(t team.Team, opts teamLaunchOptions) (tea
 	}
 	return result, nil
 }
-
-func (*fakeBackend) preparedResultBeforeDispatch() {}
 
 // useFakeBackend registers a fresh fake backend under the name "fake" for
 // the duration of t and restores the prior teamLaunchBackends entry on

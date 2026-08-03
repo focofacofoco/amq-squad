@@ -376,24 +376,33 @@ func executeDown(d downExecution) error {
 		reports = append(reports, report)
 	}
 	renderErr := renderDownReportsScoped(d.Out, verb, d.ProjectDir, d.Profile, workstream, reports, d.JSON)
-	if watcherStopped && !downReportsConfirmed(reports) {
-		restartErr := reconcileNotificationWatcherStarted(t, d.Profile, workstream, "")
-		if restartErr != nil {
-			if renderErr != nil {
-				return fmt.Errorf("%v; final stop was incomplete and notification watcher restart failed: %w", renderErr, restartErr)
-			}
-			return fmt.Errorf("final stop was incomplete and notification watcher restart failed: %w", restartErr)
-		}
-	}
-	if notifierStopped && !downReportsConfirmed(reports) {
-		if restartErr := reconcileSessionNotifierStarted(t, d.Profile, workstream, ""); restartErr != nil {
-			if renderErr != nil {
-				return fmt.Errorf("%v; final stop was incomplete and session notifier restart failed: %w", renderErr, restartErr)
-			}
-			return fmt.Errorf("final stop was incomplete and session notifier restart failed: %w", restartErr)
+	if !downReportsConfirmed(reports) {
+		restoreErr := restoreDownSessionServices(
+			watcherStopped,
+			notifierStopped,
+			func() error { return reconcileNotificationWatcherStarted(t, d.Profile, workstream, "") },
+			func() error { return reconcileSessionNotifierStarted(t, d.Profile, workstream, "") },
+		)
+		if restoreErr != nil {
+			return errors.Join(renderErr, restoreErr)
 		}
 	}
 	return renderErr
+}
+
+func restoreDownSessionServices(watcherStopped, notifierStopped bool, restartWatcher, restartNotifier func() error) error {
+	var restoreErrs []error
+	if watcherStopped {
+		if err := restartWatcher(); err != nil {
+			restoreErrs = append(restoreErrs, fmt.Errorf("final stop was incomplete and notification watcher restart failed: %w", err))
+		}
+	}
+	if notifierStopped {
+		if err := restartNotifier(); err != nil {
+			restoreErrs = append(restoreErrs, fmt.Errorf("final stop was incomplete and session notifier restart failed: %w", err))
+		}
+	}
+	return errors.Join(restoreErrs...)
 }
 
 // markDownLaunchRecordStopped preserves the resumable record while removing it
@@ -749,7 +758,7 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 	// Full actor identity is required only at the live-agent signal boundary.
 	// Dead/no-PID cleanup remains independently bound by exact wake retirement
 	// evidence and never sends an unverified agent signal.
-	if _, _, err := verifyRuntimeActionWithRecord("stop", projectDir, profile, workstream, handle, rec); err != nil {
+	if _, _, err := verifyRuntimeActionWithRecord("stop", projectDir, profile, workstream, handle, rec, probe); err != nil {
 		report.Status = downStatusFailed
 		report.Detail = err.Error()
 		return report

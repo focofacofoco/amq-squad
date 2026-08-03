@@ -7,13 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/omriariav/amq-squad/v2/internal/launch"
-	"github.com/omriariav/amq-squad/v2/internal/liveidentity"
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
@@ -632,62 +632,6 @@ func TestExecuteDownNotLiveForDeadPID(t *testing.T) {
 	}
 }
 
-func TestExecuteDownDeadPreparedAgentAllowsExactStaleWakeCleanup(t *testing.T) {
-	previousRetire := runExactWakeRetire
-	previousResolve := resolveRuntimeLiveIdentityNow
-	t.Cleanup(func() {
-		runExactWakeRetire = previousRetire
-		resolveRuntimeLiveIdentityNow = previousResolve
-	})
-	resolveRuntimeLiveIdentityNow = func(liveIdentityScope) (liveidentity.Result, error) {
-		// executeDown performs a read-only status projection before teardown;
-		// returning a mismatch here proves that projection cannot block the
-		// independent dead-agent exact-wake cleanup path.
-		return failedLiveIdentityResult(errors.New("agent is dead"))
-	}
-	base := setupFakeAMQSessionRoots(t)
-	dir := seedTeam(t, team.Team{Members: []team.Member{{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-96"}}})
-	root := filepath.Join(base, "issue-96")
-	agentDir := seedAgentRecord(t, base, "issue-96", "cto", launch.Record{
-		Binary: "codex", Handle: "cto", AgentPID: 1234, Root: root, AMQVersion: doctorMinAMQVersion, WakePID: 4242,
-		WakeInjectVia: "/usr/bin/tmux", PreparedRunGeneration: "g", PreparedRunDigest: "d", PreparedRunLaunchAttempt: "a",
-	})
-	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
-	stubOwnerlessWakeRecovery(t, root, "cto", 4242)
-	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
-		if err := os.Remove(wakeLockPath(agentDir)); err != nil {
-			t.Fatal(err)
-		}
-		return []byte(fmt.Sprintf(`{"status":"retired","agent":"cto","root":%q,"pid":4242,"reason":"exactly-bound proven-stale wake lock removed"}`, root)), nil
-	}
-	term := &recordingTerminator{}
-	out, err := runDownExec(t, downExecution{ProjectDir: dir, RequestedSession: "issue-96", ExplicitSession: true, Role: "cto", Terminator: term,
-		Probe: downFakeProbe(map[int]bool{1234: false}, map[int]bool{})})
-	if err != nil || len(term.calls) != 0 || !strings.Contains(out, "amq_exact") {
-		t.Fatalf("out=%s err=%v signal calls=%v", out, err, term.calls)
-	}
-}
-
-func TestExecuteDownLivePreparedMismatchSendsNoSignals(t *testing.T) {
-	previous := resolveRuntimeLiveIdentityNow
-	t.Cleanup(func() { resolveRuntimeLiveIdentityNow = previous })
-	resolveRuntimeLiveIdentityNow = func(liveIdentityScope) (liveidentity.Result, error) {
-		return failedLiveIdentityResult(errors.New("wrong pane"))
-	}
-	base := setupFakeAMQSessionRoots(t)
-	dir := seedTeam(t, team.Team{Members: []team.Member{{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-96"}}})
-	seedAgentRecord(t, base, "issue-96", "cto", launch.Record{
-		Binary: "codex", Handle: "cto", AgentPID: 1234, Root: filepath.Join(base, "issue-96"),
-		PreparedRunGeneration: "g", PreparedRunDigest: "d", PreparedRunLaunchAttempt: "a",
-	})
-	term := &recordingTerminator{}
-	out, err := runDownExec(t, downExecution{ProjectDir: dir, RequestedSession: "issue-96", ExplicitSession: true, Role: "cto", Terminator: term,
-		Probe: downFakeProbe(map[int]bool{1234: true}, map[int]bool{1234: true})})
-	if err == nil || len(term.calls) != 0 || !strings.Contains(out, "verified live identity mismatch") || !strings.Contains(out, liveidentity.RecoveryAction) {
-		t.Fatalf("out=%s err=%v signal calls=%v", out, err, term.calls)
-	}
-}
-
 func TestExecuteDownMaybeLiveForNoPIDWithFreshPresence(t *testing.T) {
 	base := setupFakeAMQSessionRoots(t)
 	dir := seedTeam(t, team.Team{
@@ -746,6 +690,25 @@ func TestRenderDownReportsMaybeLiveWithFailureStaysPartial(t *testing.T) {
 	}
 	if !strings.Contains(pe.Message, "may still be live") {
 		t.Errorf("partial message should mention maybe-live members: %q", pe.Message)
+	}
+}
+
+func TestRestoreDownSessionServicesAttemptsBothAfterPartialStop(t *testing.T) {
+	watcherErr := errors.New("watcher restart failed")
+	notifierErr := errors.New("notifier restart failed")
+	var calls []string
+	err := restoreDownSessionServices(true, true, func() error {
+		calls = append(calls, "watcher")
+		return watcherErr
+	}, func() error {
+		calls = append(calls, "notifier")
+		return notifierErr
+	})
+	if !slices.Equal(calls, []string{"watcher", "notifier"}) {
+		t.Fatalf("restore calls = %v, want both services", calls)
+	}
+	if !errors.Is(err, watcherErr) || !errors.Is(err, notifierErr) {
+		t.Fatalf("restore error = %v, want both causes", err)
 	}
 }
 

@@ -155,6 +155,51 @@ func TestSessionNotifierStartupNudgesPendingInboxMessage(t *testing.T) {
 	}
 }
 
+func TestSessionNotifierHeartbeatRescansUnseenInboxMessage(t *testing.T) {
+	project := canonicalFilesystemPath(t.TempDir())
+	const (
+		profile = "review"
+		session = "wake"
+		handle  = "dev"
+		paneID  = "%92"
+	)
+	root := filepath.Join(project, ".agent-mail", profile, session)
+	agentDir := filepath.Join(root, "agents", handle)
+	if err := os.MkdirAll(filepath.Join(agentDir, "inbox", "new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.Write(agentDir, launch.Record{
+		Schema: launch.SchemaVersion, Role: handle, Handle: handle, Binary: "codex",
+		Session: session, TeamProfile: profile, TeamHome: project, CWD: project,
+		Root: root, BaseRoot: filepath.Dir(root), Tmux: &launch.TmuxInfo{PaneID: paneID, Session: session},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	message := filepath.Join(agentDir, "inbox", "new", "missed-event.md")
+	if err := os.WriteFile(message, []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]struct{}{}
+	nudges := 0
+	nudged, err := rescanSessionInboxMessages(root, profile, session, seen, func(gotPane, _ string) error {
+		if gotPane != paneID {
+			t.Fatalf("nudge pane = %q, want %q", gotPane, paneID)
+		}
+		nudges++
+		return nil
+	})
+	if err != nil || !nudged || nudges != 1 {
+		t.Fatalf("heartbeat rescan nudged=%t count=%d err=%v", nudged, nudges, err)
+	}
+	nudged, err = rescanSessionInboxMessages(root, profile, session, seen, func(string, string) error {
+		nudges++
+		return nil
+	})
+	if err != nil || nudged || nudges != 1 {
+		t.Fatalf("deduped heartbeat rescan nudged=%t count=%d err=%v", nudged, nudges, err)
+	}
+}
+
 func TestSessionNotifierRerunAdoptsExistingProcessWithoutTmux(t *testing.T) {
 	project := canonicalFilesystemPath(t.TempDir())
 	const (
@@ -196,5 +241,51 @@ func TestSessionNotifierRerunAdoptsExistingProcessWithoutTmux(t *testing.T) {
 	}
 	if spawned != 1 {
 		t.Fatalf("spawn count = %d, want one notifier adopted on rerun", spawned)
+	}
+}
+
+func TestStopSessionNotifierRecreatesRuntimeParentBeforeLock(t *testing.T) {
+	project := canonicalFilesystemPath(t.TempDir())
+	const (
+		profile = "review"
+		session = "wake"
+		pid     = 8124
+	)
+	path := sessionNotifierRuntimePath(project, profile, session)
+	now := time.Unix(20_000, 0).UTC()
+	host, _ := os.Hostname()
+	if err := writeSessionNotifierRecord(path, sessionNotifierRecord{
+		SchemaVersion: sessionNotifierSchema, ProjectDir: project, Profile: profile, Session: session,
+		Root: filepath.Join(project, ".agent-mail", profile, session), PID: pid, Host: host,
+		OwnerToken: "stop-parent", Expected: true, Health: "healthy",
+		HeartbeatAt: now, LeaseExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previousNow, previousAlive, previousMatch, previousSignal := sessionNotifierNow, sessionNotifierPIDAlive, sessionNotifierProcessMatch, notificationWatcherSignal
+	t.Cleanup(func() {
+		sessionNotifierNow, sessionNotifierPIDAlive, sessionNotifierProcessMatch, notificationWatcherSignal = previousNow, previousAlive, previousMatch, previousSignal
+	})
+	alive := true
+	sessionNotifierNow = func() time.Time { return now }
+	sessionNotifierPIDAlive = func(got int) bool { return got == pid && alive }
+	sessionNotifierProcessMatch = func(got int, _ func(string) bool) bool { return got == pid }
+	notificationWatcherSignal = func(got int, _ os.Signal) error {
+		if got != pid {
+			t.Fatalf("signal pid = %d, want %d", got, pid)
+		}
+		alive = false
+		return os.RemoveAll(filepath.Dir(path))
+	}
+	stopped, err := stopSessionNotifier(project, profile, session)
+	if err != nil || !stopped {
+		t.Fatalf("stop notifier stopped=%t err=%v", stopped, err)
+	}
+	rec, err := readSessionNotifierRecord(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Expected || rec.OwnerToken != "" || rec.Health != "inactive" {
+		t.Fatalf("stopped notifier record = %+v", rec)
 	}
 }

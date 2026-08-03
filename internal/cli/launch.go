@@ -95,17 +95,6 @@ func (f *stringListFlag) Set(value string) error {
 // and the replay path (execRestoreRecord). It is internal-only and carries no
 // deprecation surface of its own.
 func runLaunch(args []string) error {
-	return runLaunchWithIntent(args, preparedRunToken{}, nil)
-}
-
-// v228-step5-delete: retained for legacy direct callers until restore and
-// prepared-consumer rewiring is complete in P4/P5. New launches never supply
-// either value.
-func runLaunchWithPreparedToken(args []string, requestedPreparedToken preparedRunToken) error {
-	return runLaunchWithIntent(args, requestedPreparedToken, nil)
-}
-
-func runLaunchWithIntent(args []string, _ preparedRunToken, _ *preparedRestoreDescriptor) error {
 	// Split at "--" so launcher flags aren't consumed by amq-squad's parser.
 	squadArgs, childArgs := splitDashDash(args)
 
@@ -827,7 +816,7 @@ func exactRootChildCommand(target string, trailing []string) (string, []string) 
 }
 
 func execAMQCoop(amqBin string, coopArgs []string) error {
-	env := amqexec.NoUpdateCheckEnv(envWithoutPreparedRunRestore(envWithoutPreparedRunToken(envWithoutAMQIdentity(os.Environ()))))
+	env := amqexec.NoUpdateCheckEnv(envWithoutAMQIdentity(os.Environ()))
 	return amqSyscallExec(amqBin, append([]string{"amq"}, coopArgs...), env)
 }
 

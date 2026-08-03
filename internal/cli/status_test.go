@@ -12,7 +12,6 @@ import (
 	"github.com/omriariav/amq-squad/v2/internal/activity"
 	"github.com/omriariav/amq-squad/v2/internal/bootstrapack"
 	"github.com/omriariav/amq-squad/v2/internal/launch"
-	"github.com/omriariav/amq-squad/v2/internal/liveidentity"
 	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
 	"github.com/omriariav/amq-squad/v2/internal/runtimecontrol"
 	"github.com/omriariav/amq-squad/v2/internal/state"
@@ -357,54 +356,6 @@ func TestExecuteStatusLiveAgent(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q in:\n%s", want, out)
 		}
-	}
-}
-
-func TestExecuteStatusTreatsPreparedIdentityAsRecordFirstCompatibilityData(t *testing.T) {
-	previous := resolveRuntimeLiveIdentityNow
-	t.Cleanup(func() { resolveRuntimeLiveIdentityNow = previous })
-	legacyResolverCalled := false
-	resolveRuntimeLiveIdentityNow = func(liveIdentityScope) (liveidentity.Result, error) {
-		legacyResolverCalled = true
-		return liveidentity.Result{}, nil
-	}
-	base := setupFakeAMQSessionRoots(t)
-	dir := seedTeam(t, team.Team{Members: []team.Member{{Role: "cto", Binary: "codex", Handle: "cto", Session: "issue-507"}}})
-	seedAgentRecord(t, base, "issue-507", "cto", launch.Record{
-		Binary: "codex", Handle: "cto", Role: "cto", AgentPID: 5555,
-		PreparedRunGeneration: "g", PreparedRunDigest: "d", PreparedRunLaunchAttempt: "a",
-	})
-
-	tests := []struct {
-		name        string
-		alive       bool
-		binaryMatch bool
-		wantStatus  statusState
-		wantRecord  string
-		wantDetail  string
-	}{
-		{name: "recorded process is live", alive: true, binaryMatch: true, wantStatus: statusStateLive, wantRecord: "launched", wantDetail: "agent pid 5555 alive"},
-		{name: "recorded process is dead", alive: false, binaryMatch: false, wantStatus: statusStateStale, wantRecord: "stale-record", wantDetail: "pid 5555 not alive"},
-		{name: "recorded process has binary mismatch", alive: true, binaryMatch: false, wantStatus: statusStateStale, wantRecord: "stale-record", wantDetail: "binary mismatch"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			legacyResolverCalled = false
-			out, err := runStatusExec(t, statusExecution{
-				ProjectDir: dir, RequestedSession: "issue-507", ExplicitSession: true, JSON: true,
-				Probe: statusProbe(map[int]bool{5555: tt.alive}, map[int]bool{5555: tt.binaryMatch}, time.Now()),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			row := decodeJSONEnvelope[statusEnvelopeData](t, out).Data.Records[0]
-			if legacyResolverCalled {
-				t.Fatal("record-first status invoked the removed prepared-identity resolver")
-			}
-			if row.Status != tt.wantStatus || row.RecordState != tt.wantRecord || row.LiveIdentityMode != "record_first" || row.LiveIdentity != nil || !strings.Contains(row.Detail, tt.wantDetail) {
-				t.Fatalf("record-first status projection = %+v", row)
-			}
-		})
 	}
 }
 
