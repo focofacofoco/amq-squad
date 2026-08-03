@@ -369,8 +369,8 @@ Usage:
     [--target current-window|new-window|new-session] [--layout vertical|horizontal|tiled]
     [--trust sandboxed|approve-for-me|trusted] [--model role=model,...]
 
-start shows the complete roster and launch plan, then asks before launching
-(default: No); answering No changes nothing. Pass --yes for automation.
+By default, start previews the complete roster and launch plan, then asks before
+launching (default: No); answering No changes nothing. Pass --yes for automation.
 Rerunning keeps verified live roles, respawns stopped roles, and rolls forward
 partial managed launches without deleting the namespace.
 

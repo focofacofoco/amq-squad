@@ -763,7 +763,23 @@ func buildGoalSupervisionAssessment(
 			GoalDigest: digestGoalSupervisionString(rec.GoalBinding.Goal), AttemptID: strings.TrimSpace(rec.GoalBinding.AttemptID),
 			BindingDigest: digestJSON(*rec.GoalBinding), CommandDigest: digestGoalSupervisionString(rec.GoalBinding.Command),
 		}
-		input.Binding.Goal.ContentExact = bindingData.Verified
+		if nativeGoalBindingBlocked(rec.GoalBinding) {
+			goal, attemptID, err := verifyGoalSupervisionBlockedBindingContents(
+				t, profile, session, leadMember, rec.GoalBinding,
+			)
+			if err != nil {
+				input.SourceErrors = append(input.SourceErrors, "verify blocked native goal binding: "+err.Error())
+				input.Binding.Goal.StateKnown = false
+				input.Binding.Goal.Verified = false
+				input.Binding.Goal.ContentExact = false
+			} else {
+				input.Binding.Goal.ContentExact = bindingData.Verified
+				input.Binding.Goal.GoalDigest = digestGoalSupervisionString(goal)
+				input.Binding.Goal.AttemptID = attemptID
+			}
+		} else {
+			input.Binding.Goal.ContentExact = bindingData.Verified
+		}
 		input.Binding.PauseGeneration = goalSupervisionPauseGeneration(input.Binding)
 	}
 	if goalSupervisionNativePaused(input.Binding.Goal) {
@@ -809,6 +825,38 @@ func readGoalSupervisionLaunchSnapshot(agentDir string) (launch.Record, string, 
 		return launch.Record{}, "", 0, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return rec, digestBytes(payload), info.ModTime().UnixNano(), nil
+}
+
+func verifyGoalSupervisionBlockedBindingContents(
+	t team.Team,
+	profile, session string,
+	member team.Member,
+	binding *launch.GoalBinding,
+) (string, string, error) {
+	if binding == nil || binding.Mode != "native_goal_blocked" || !binding.NativeGoal {
+		return "", "", fmt.Errorf("binding is not a blocked native goal")
+	}
+	if binding.Source != "goal-runtime" || binding.DeliveryState != "blocked" {
+		return "", "", fmt.Errorf("binding source/delivery is not exact blocked runtime evidence")
+	}
+	if !goalSupervisionAllNonBlank(binding.Goal, binding.AttemptID, binding.Command) {
+		return "", "", fmt.Errorf("typed goal, attempt, and command are required")
+	}
+	goal, attemptID, err := parseNativeGoalBindingCommand(binding.Command)
+	if err != nil {
+		return "", "", err
+	}
+	if binding.Goal != goal || strings.TrimSpace(binding.AttemptID) != attemptID {
+		return "", "", fmt.Errorf("typed goal or attempt differs from the generated command")
+	}
+	contract, err := goalDeliveryContractForBinary(member.Binary)
+	if err != nil || !contract.NativeGoal {
+		return "", "", fmt.Errorf("lead binary does not support a native goal contract")
+	}
+	if binding.Command != contract.prompt(goal, t, profile, session, member.Role, attemptID) {
+		return "", "", fmt.Errorf("blocked binding command differs from the exact generated command")
+	}
+	return goal, attemptID, nil
 }
 
 func goalSupervisionExactPaneIdentity(

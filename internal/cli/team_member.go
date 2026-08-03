@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +14,8 @@ import (
 var (
 	teamMemberLaunch = runResume
 	teamMemberStop   = runDown
+
+	teamMemberBeforeRosterMutation = func() {}
 )
 
 // runTeamMember dispatches `amq-squad team member <add|update|control-continue|rm|list>`: runtime roster
@@ -337,6 +340,9 @@ func runTeamMemberAdd(args []string) error {
 	}
 	mutation := func(expectedProfileDigest string) error {
 		return withProfileLock(projectDir, profile, func() error {
+			if err := verifyAcceptedProfileDigestBeforeRosterMutation(team.ProfilePath(projectDir, profile), expectedProfileDigest); err != nil {
+				return err
+			}
 			t, err := team.ReadProfile(projectDir, profile)
 			if err != nil {
 				return fmt.Errorf("read team: %w", err)
@@ -360,7 +366,7 @@ func runTeamMemberAdd(args []string) error {
 			return nil
 		})
 	}
-	if err := mutation(""); err != nil {
+	if err := mutateRosterWithProfileCAS(projectDir, profile, mutation); err != nil {
 		return err
 	}
 
@@ -637,6 +643,9 @@ func runTeamMemberUpdate(args []string) error {
 	var updated team.Member
 	mutation := func(expectedProfileDigest string) error {
 		return withProfileLock(projectDir, profile, func() error {
+			if err := verifyAcceptedProfileDigestBeforeRosterMutation(team.ProfilePath(projectDir, profile), expectedProfileDigest); err != nil {
+				return err
+			}
 			t, err := team.ReadProfile(projectDir, profile)
 			if err != nil {
 				return fmt.Errorf("read team: %w", err)
@@ -663,7 +672,7 @@ func runTeamMemberUpdate(args []string) error {
 			return writeTeamProfileWithAMQRosterSyncUnderLock(projectDir, profile, oldTeam, newTeam, resolveAMQEnvForTeamProfile)
 		})
 	}
-	if err := mutation(""); err != nil {
+	if err := mutateRosterWithProfileCAS(projectDir, profile, mutation); err != nil {
 		return err
 	}
 
@@ -733,6 +742,9 @@ func runTeamMemberRemove(args []string) error {
 	var removed bool
 	mutation := func(expectedProfileDigest string) error {
 		return withProfileLock(projectDir, profile, func() error {
+			if err := verifyAcceptedProfileDigestBeforeRosterMutation(team.ProfilePath(projectDir, profile), expectedProfileDigest); err != nil {
+				return err
+			}
 			t, err := team.ReadProfile(projectDir, profile)
 			if err != nil {
 				return fmt.Errorf("read team: %w", err)
@@ -765,7 +777,7 @@ func runTeamMemberRemove(args []string) error {
 			return nil
 		})
 	}
-	if err := mutation(""); err != nil {
+	if err := mutateRosterWithProfileCAS(projectDir, profile, mutation); err != nil {
 		return err
 	}
 
@@ -846,6 +858,41 @@ func resolveExistingTeamProfile(projectFlag, profileFlag string, projectSet bool
 // a lead and a worker mutating the roster at once cannot lose an update.
 func withProfileLock(projectDir, profile string, fn func() error) error {
 	return team.WithProfileLock(projectDir, profile, fn)
+}
+
+// mutateRosterWithProfileCAS preserves concurrent profile changes made after
+// the command has planned its mutation. The digest is ordinary optimistic
+// concurrency control; it does not certify or authorize the roster edit.
+func mutateRosterWithProfileCAS(projectDir, profile string, mutate func(expectedProfileDigest string) error) error {
+	expected, err := teamProfileDigest(team.ProfilePath(projectDir, profile))
+	if err != nil {
+		return fmt.Errorf("capture team profile before roster mutation: %w", err)
+	}
+	teamMemberBeforeRosterMutation()
+	return mutate(expected)
+}
+
+func verifyAcceptedProfileDigestBeforeRosterMutation(profilePath, expected string) error {
+	if strings.TrimSpace(expected) == "" {
+		return nil
+	}
+	current, err := teamProfileDigest(profilePath)
+	if err != nil {
+		return fmt.Errorf("verify team profile before roster mutation: %w", err)
+	}
+	if current != expected {
+		return fmt.Errorf("team profile changed after roster mutation planning; retry the roster edit")
+	}
+	return nil
+}
+
+func teamProfileDigest(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%x", sum), nil
 }
 
 // inheritedSession returns the workstream a new member should join: the

@@ -433,6 +433,50 @@ func TestGoalSupervisionExactPaneIdentityRequiresAllStableIDsAndTitle(t *testing
 	}
 }
 
+func TestVerifyGoalSupervisionBlockedBindingContentsIsExact(t *testing.T) {
+	member := team.Member{Role: "cto", Binary: "claude", Handle: "cto"}
+	tm := team.Team{
+		Project: "/project", Orchestrated: true, Lead: "cto",
+		ExecutionMode: executionModeProjectLead, Members: []team.Member{member},
+	}
+	goal := "ship the accepted run"
+	attemptID := strings.Repeat("a", 32)
+	command := nativeGoalControlPrompt(
+		goal, tm, team.DefaultProfile, "release", member.Role, attemptID,
+	)
+	valid := launch.GoalBinding{
+		Mode: "native_goal_blocked", NativeGoal: true,
+		Source: "goal-runtime", DeliveryState: "blocked",
+		Goal: goal, AttemptID: attemptID, Command: command,
+	}
+	if gotGoal, gotAttempt, err := verifyGoalSupervisionBlockedBindingContents(
+		tm, team.DefaultProfile, "release", member, &valid,
+	); err != nil || gotGoal != goal || gotAttempt != attemptID {
+		t.Fatalf("valid blocked binding = goal %q attempt %q err %v", gotGoal, gotAttempt, err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*launch.GoalBinding)
+	}{
+		{name: "typed goal", mutate: func(b *launch.GoalBinding) { b.Goal = "different" }},
+		{name: "typed attempt", mutate: func(b *launch.GoalBinding) { b.AttemptID = strings.Repeat("b", 32) }},
+		{name: "command", mutate: func(b *launch.GoalBinding) { b.Command = strings.Replace(b.Command, "release", "other", 1) }},
+		{name: "source", mutate: func(b *launch.GoalBinding) { b.Source = "launch-record" }},
+		{name: "delivery", mutate: func(b *launch.GoalBinding) { b.DeliveryState = "delivered" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := valid
+			tc.mutate(&got)
+			if _, _, err := verifyGoalSupervisionBlockedBindingContents(
+				tm, team.DefaultProfile, "release", member, &got,
+			); err == nil {
+				t.Fatalf("mismatched %s binding was accepted: %+v", tc.name, got)
+			}
+		})
+	}
+}
+
 func TestBuildGoalSupervisionAssessmentContentVerificationDoesNotOverrideStatusVeto(t *testing.T) {
 	project := t.TempDir()
 	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
@@ -444,14 +488,16 @@ func TestBuildGoalSupervisionAssessmentContentVerificationDoesNotOverrideStatusV
 		ExecutionMode: executionModeProjectLead,
 		Members:       []team.Member{member},
 	}
+	goal := "ship"
+	attemptID := strings.Repeat("a", 32)
 	agentDir := filepath.Join(ns.AMQRoot, "agents", member.Handle)
 	rec := launch.Record{
 		CWD: project, Binary: member.Binary, Handle: member.Handle, Role: member.Role,
 		Session: session, TeamProfile: team.DefaultProfile, AgentPID: 4242, StartedAt: now.Add(-time.Minute),
 		GoalBinding: &launch.GoalBinding{
 			Mode: "native_goal_blocked", NativeGoal: true, Source: "goal-runtime",
-			DeliveryState: "blocked", Goal: "ship", AttemptID: "attempt-1",
-			Command: "synthetic exact command", Detail: "waiting",
+			DeliveryState: "blocked", Goal: goal, AttemptID: attemptID,
+			Command: nativeGoalControlPrompt(goal, tm, team.DefaultProfile, session, member.Role, attemptID), Detail: "waiting",
 		},
 	}
 	if err := launch.Write(agentDir, rec); err != nil {
@@ -501,6 +547,33 @@ func TestBuildGoalSupervisionAssessmentContentVerificationDoesNotOverrideStatusV
 		assessment.Binding.Goal.ContentExact ||
 		assessment.Eligible {
 		t.Fatalf("content verification overrode status veto: %+v", assessment.Binding.Goal)
+	}
+
+	bad := stored
+	badBinding := *stored.GoalBinding
+	badBinding.Command = strings.Replace(badBinding.Command, session, "other", 1)
+	bad.GoalBinding = &badBinding
+	if err := launch.Write(agentDir, bad); err != nil {
+		t.Fatal(err)
+	}
+	rows[0].goalBinding = bad.GoalBinding
+	rows[0].liveness.LaunchRecord = bad
+	malformed := buildGoalSupervisionAssessment(
+		tm, team.DefaultProfile, session, ns, rows,
+		goalSupervisionGateObservation{Evidence: GoalSupervisionGateEvidence{Known: true}},
+		nil, nil,
+		duplicateLaunchProbe{
+			PIDAlive:         func(int) bool { return false },
+			ProcessMatch:     func(int, func(string) bool) bool { return false },
+			ProcessTTY:       func(int) (string, bool) { return "", false },
+			ProcessStartTime: func(int) (time.Time, bool) { return time.Time{}, false },
+			Now:              func() time.Time { return now },
+		},
+		now,
+	)
+	if malformed.Binding.Goal.StateKnown || malformed.Binding.Goal.Verified || malformed.Binding.Goal.ContentExact ||
+		!strings.Contains(strings.Join(malformed.Source.Errors, "\n"), "verify blocked native goal binding") {
+		t.Fatalf("malformed blocked binding did not fail source/content evidence: binding=%+v source=%+v", malformed.Binding.Goal, malformed.Source)
 	}
 }
 

@@ -279,7 +279,7 @@ func TestStartHelpDescribesSingleReconcileCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"reconcile one canonical team workstream", "Rerunning keeps verified live roles", "and rolls forward", "partial managed launches"} {
+	for _, want := range []string{"reconcile one canonical team workstream", "By default, start previews", "Rerunning keeps verified live roles", "and rolls forward", "partial managed launches"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("start help missing %q:\n%s", want, stderr)
 		}
