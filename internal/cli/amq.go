@@ -697,7 +697,7 @@ func runAMQPassthroughDurableReply(ctx amqContext, cmd, passthrough []string, st
 	if err := beginAMQBoundaryAudit(audit); err != nil {
 		return err
 	}
-	out, result, err := runOwnedAMQSend(ownedAMQSendOptions{WaitPosture: posture}, amqCommandRequest{Dir: ctx.ProjectDir, Env: amqCommandEnv(ctx), Arg: cmd, Stdin: stdin})
+	out, result, err := runOwnedAMQSend(ownedAMQSendOptions{WaitPosture: posture, ReplyRecipient: matches[0].From}, amqCommandRequest{Dir: ctx.ProjectDir, Env: amqCommandEnv(ctx), Arg: cmd, Stdin: stdin})
 	err = finishAMQBoundaryAudit(audit, result, err)
 	writeAMQPassthroughOutput(out)
 	return err

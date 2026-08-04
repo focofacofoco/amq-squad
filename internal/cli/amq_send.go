@@ -86,12 +86,13 @@ func directDurableInvocationBoundary() durableInvocationBoundary {
 	return boundary
 }
 
-// ownedAMQSendOptions contains only transport controls. AMQ is the durable
-// authority for accepted messages; amq-squad does not create a parallel local
-// delivery record.
+// ownedAMQSendOptions contains transport controls plus the recipient resolved
+// for an AMQ reply. Sends carry their recipient in --to; replies do not, so the
+// caller must supply the sender resolved from the original message.
 type ownedAMQSendOptions struct {
-	Invocation  durableInvocationBoundary
-	WaitPosture waitPostureRequest
+	Invocation     durableInvocationBoundary
+	WaitPosture    waitPostureRequest
+	ReplyRecipient string
 }
 
 type ownedAMQSendResult struct {
@@ -163,7 +164,7 @@ func runOwnedAMQSend(opts ownedAMQSendOptions, req amqCommandRequest) ([]byte, o
 	}
 
 	messageID := parseSentMessageID(string(out))
-	if evidence, ok := parseCommittedDeliveryEvidence(string(out), sendErr); ok {
+	if evidence, ok := parseCommittedDeliveryEvidence(string(out), sendErr); ok && committedDeliveryEvidenceMatchesRequest(opts, req, evidence) {
 		messageID = strings.TrimSpace(evidence.MessageID)
 	}
 	if sendErr == nil && messageID == "" {
@@ -253,6 +254,54 @@ func safeCommittedMessageID(id string) bool {
 		}
 	}
 	return true
+}
+
+func committedDeliveryEvidenceMatchesRequest(opts ownedAMQSendOptions, req amqCommandRequest, evidence committedDeliveryEvidence) bool {
+	if len(req.Arg) == 0 || !safeCommittedMessageID(evidence.MessageID) {
+		return false
+	}
+	if committedDeliveryEvidenceEchoedByRequestBody(req, evidence) {
+		return false
+	}
+	root := amqFlagValue(req.Arg, "root")
+	if root == "" || strings.TrimSpace(root) != root || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return false
+	}
+
+	var recipient string
+	switch req.Arg[0] {
+	case "send":
+		recipient = amqFlagValue(req.Arg, "to")
+	case "reply":
+		recipient = opts.ReplyRecipient
+	default:
+		return false
+	}
+	if !safeCommittedRecipient(recipient) {
+		return false
+	}
+
+	expected := filepath.Join(root, "agents", recipient, "inbox", "new", evidence.MessageID+".md")
+	return evidence.FinalPath == expected && filepath.Clean(evidence.FinalPath) == expected
+}
+
+func safeCommittedRecipient(recipient string) bool {
+	return recipient != "" && strings.TrimSpace(recipient) == recipient && recipient != "." && recipient != ".." && filepath.Base(recipient) == recipient
+}
+
+func committedDeliveryEvidenceEchoedByRequestBody(req amqCommandRequest, evidence committedDeliveryEvidence) bool {
+	body := amqFlagValue(req.Arg, "body")
+	if body == "" {
+		return req.Stdin != nil
+	}
+	if body == "-" || body == "@-" || strings.HasPrefix(body, "@") {
+		// The transport owns these body sources. Without independently trusted
+		// provenance for an error line, fail closed instead of treating body
+		// content as proof that delivery committed.
+		return true
+	}
+	return strings.Contains(body, "message "+evidence.MessageID+" has a committed delivery;") &&
+		strings.Contains(body, " committed at "+evidence.FinalPath+", but durability is indeterminate:")
 }
 
 func firstJSONObject(data []byte) []byte {
