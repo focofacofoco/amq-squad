@@ -313,36 +313,6 @@ func TestRunNextHelpIncludesNextSubcommand(t *testing.T) {
 	}
 }
 
-func TestNextAppearsInTopLevelHelp(t *testing.T) {
-	_, _, _ = captureOutput(t, func() error {
-		printUsage()
-		return nil
-	})
-	// Verify commandCatalog entry exists.
-	found := false
-	for _, cmd := range commandCatalog {
-		if cmd.Name == "next" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("'next' missing from commandCatalog")
-	}
-}
-
-func TestNextAppearsInCompletionOutput(t *testing.T) {
-	stdout, _, err := captureOutput(t, func() error {
-		return runCompletion([]string{"bash"})
-	})
-	if err != nil {
-		t.Fatalf("completion bash: %v", err)
-	}
-	if !strings.Contains(stdout, "next") {
-		t.Errorf("bash completion output missing 'next': %q", stdout[:min(len(stdout), 200)])
-	}
-}
-
 // --- Helper ---
 
 func probeForNext() state.Probe {

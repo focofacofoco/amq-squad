@@ -62,10 +62,6 @@ without the norm. Regenerate deliberately:
 amq-squad team rules init --force
 ```
 
-A brief can be seeded for an existing session, which is a different command from the
-launch-time `--seed-from`:
-
-```sh
-amq-squad brief seed --session S --seed-from issue:96 --force
-```
-
+For an existing session, edit the resolved active brief directly before running
+`start`; brief classification and missing-stub diagnosis belong to `doctor` and the
+launch preview rather than a parallel top-level command.

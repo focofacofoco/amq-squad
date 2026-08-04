@@ -533,7 +533,7 @@ func TestRunReviewWorktreeExecRequiresCommand(t *testing.T) {
 
 func TestRunReviewWorktreeUnknownSubcommandHelpEnumeratesCompleteSurface(t *testing.T) {
 	_, _, err := captureOutput(t, func() error {
-		return Run([]string{"review-worktree", "bogus", "--help"}, "test")
+		return runReviewWorktree([]string{"bogus", "--help"}, "test")
 	})
 	want := `unknown 'review-worktree' subcommand: "bogus". Try 'create', 'exec', 'shell', or 'remove'.`
 	if err == nil || err.Error() != want {

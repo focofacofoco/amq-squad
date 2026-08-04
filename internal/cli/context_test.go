@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"sort"
@@ -20,20 +22,17 @@ import (
 // do not select one live AMQ namespace and therefore must not consult ambient
 // launch identity.
 var contextCommandScopeInventory = map[string]string{
-	"activity": "canonical", "agent": "canonical", "amq": "canonical", "archive": "canonical",
-	"brief": "canonical", "broadcast": "canonical", "collect": "canonical", "console": "canonical", "context": "canonical",
-	"dispatch": "canonical", "doctor": "canonical", "evidence": "canonical_task_selection", "focus": "canonical", "fork": "canonical",
-	"gate": "canonical", "goal": "canonical_except_draft", "lead": "canonical", "monitor": "canonical_multi_session",
-	"next": "canonical", "notifications": "canonical", "notify": "canonical", "open": "canonical",
+	"agent": "canonical", "amq": "canonical", "broadcast": "canonical",
+	"dispatch": "canonical", "doctor": "canonical", "evidence": "canonical_task_selection", "focus": "canonical",
+	"gate": "canonical", "goal": "canonical_except_draft", "lead": "canonical", "open": "canonical",
 	"namespace": "explicit_endpoint_pair",
-	"operator":  "canonical", "prune-panes": "canonical", "resume": "canonical", "rm": "canonical",
+	"operator":  "canonical", "resume": "canonical",
 	"down": "canonical", "send": "canonical", "status": "canonical", "task": "canonical",
 	"worktree": "canonical",
-	"team":     "canonical_except_init", "thread": "canonical", "threads": "canonical",
-	"verify": "canonical", "bootstrap": "launch_record_bound",
-	"new": "configuration_creation", "roles": "context_free",
-	"start": "canonical", "history": "multi_project_scan",
-	"review-worktree": "git_object_scope", "tmux-harness": "isolated_harness",
+	"team":     "canonical_except_init",
+	"verify":   "canonical",
+	"new":      "configuration_creation", "roles": "context_free",
+	"start":      "canonical",
 	"completion": "context_free",
 }
 
@@ -56,7 +55,7 @@ func TestContextCommandScopeInventoryCoversEveryPublicCommand(t *testing.T) {
 	if len(missing) > 0 || len(stale) > 0 {
 		t.Fatalf("context command inventory drift: missing=%v stale=%v", missing, stale)
 	}
-	for _, required := range []string{"start", "status", "task", "amq", "agent", "resume", "fork", "team", "thread", "brief", "down", "notify", "doctor", "rm", "console", "verify", "activity", "collect", "dispatch", "operator", "goal", "lead"} {
+	for _, required := range []string{"start", "status", "task", "amq", "agent", "resume", "team", "down", "doctor", "verify", "dispatch", "operator", "goal", "lead"} {
 		if !strings.HasPrefix(contextCommandScopeInventory[required], "canonical") {
 			t.Errorf("context-bearing command %q is classified %q", required, contextCommandScopeInventory[required])
 		}
@@ -845,12 +844,12 @@ func TestResolveAMQContextUsesCanonicalCustomRoot(t *testing.T) {
 	}
 }
 
-func TestContextExplainJSONHumanHelpAndCompletion(t *testing.T) {
+func TestContextExplainJSONAndHumanHelp(t *testing.T) {
 	project := t.TempDir()
 	isolateCanonicalContextTest(t, project)
 
 	stdout, stderr, err := captureOutput(t, func() error {
-		return Run([]string{"context", "explain", "--project", project, "--session", "issue-463", "--json"}, "test")
+		return runContext([]string{"explain", "--project", project, "--session", "issue-463", "--json"})
 	})
 	if err != nil {
 		t.Fatalf("context explain json: %v\nstderr:\n%s", err, stderr)
@@ -877,14 +876,9 @@ func TestContextExplainJSONHumanHelpAndCompletion(t *testing.T) {
 		}
 	}
 
-	_, stderr, err = captureOutput(t, func() error { return Run([]string{"context", "explain", "--help"}, "test") })
-	if err != nil || !strings.Contains(stderr, "amq-squad context explain") {
+	_, stderr, err = captureOutput(t, func() error { return runContext([]string{"explain", "--help"}) })
+	if !errors.Is(err, flag.ErrHelp) || !strings.Contains(stderr, "amq-squad context explain") {
 		t.Fatalf("context help err=%v stderr=%q", err, stderr)
-	}
-	for shell, script := range map[string]string{"bash": bashCompletionScript, "zsh": zshCompletionScript, "fish": fishCompletionScript} {
-		if !strings.Contains(script, "context") || !strings.Contains(script, "explain") {
-			t.Errorf("%s completion missing context explain", shell)
-		}
 	}
 }
 

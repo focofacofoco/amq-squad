@@ -299,18 +299,15 @@ func TestRunConsoleRootFlagUnsupported(t *testing.T) {
 	}
 }
 
-// TestConsoleVerbWiredIntoDispatch proves `console` is reachable through the
-// top-level dispatcher (a bad flag returns a UsageError, proving dispatch found
-// the verb rather than reporting "unknown command").
-func TestConsoleVerbWiredIntoDispatch(t *testing.T) {
+func TestConsoleVerbRemovedFromPublicDispatch(t *testing.T) {
 	_, _, err := captureOutput(t, func() error {
 		return dispatch([]string{"console", "--definitely-not-a-flag"}, "")
 	})
 	if err == nil {
-		t.Fatal("an unknown console flag should error")
+		t.Fatal("removed console command should error")
 	}
-	if strings.Contains(err.Error(), "unknown command") {
-		t.Fatalf("console should be dispatched, not reported as unknown: %v", err)
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("console should be removed from public dispatch: %v", err)
 	}
 }
 

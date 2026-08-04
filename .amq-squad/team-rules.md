@@ -49,8 +49,7 @@ Shared working agreement for this project's agent squad. Template: `custom`. Eve
 ## Workspace Safety and Cleanup
 
 - Never use `rm -rf`. It is outside the standing safety contract even when a narrow permission allowlist could technically permit it.
-- For disposable reviews, prefer the shipped `amq-squad review-worktree` helper and its printed cleanup command.
-- If the helper is unsuitable, create an isolated directory with `mktemp -d`, attach it with `git worktree add --detach <path> <ref>`, and clean it up with `git worktree remove --force <path>`.
+- For disposable reviews, create an isolated directory with `mktemp -d`, attach it with `git worktree add --detach <path> <ref>`, and clean it up with `git worktree remove --force <path>`.
 - Keep scratch files under the session scratchpad. Leave harness-owned cleanup to the harness instead of manually deleting its paths.
 
 ## Communication

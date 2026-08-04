@@ -22,8 +22,7 @@ var teamRulesTemplates = []teamRulesTemplate{
 
 const workspaceSafetySection = "## Workspace Safety and Cleanup\n\n" +
 	"- Never use `rm -rf`. It is outside the standing safety contract even when a narrow permission allowlist could technically permit it.\n" +
-	"- For disposable reviews, prefer the shipped `amq-squad review-worktree` helper and its printed cleanup command.\n" +
-	"- If the helper is unsuitable, create an isolated directory with `mktemp -d`, attach it with `git worktree add --detach <path> <ref>`, and clean it up with `git worktree remove --force <path>`.\n" +
+	"- For disposable reviews, create an isolated directory with `mktemp -d`, attach it with `git worktree add --detach <path> <ref>`, and clean it up with `git worktree remove --force <path>`.\n" +
 	"- Keep scratch files under the session scratchpad. Leave harness-owned cleanup to the harness instead of manually deleting its paths.\n\n"
 
 func renderTeamRules(t team.Team) (string, error) {
@@ -386,7 +385,7 @@ func writeWorktreeIsolationPolicy(b *strings.Builder, t team.Team) {
 	b.WriteString("- The lead/integration checkout stays stable and is never used as an ad hoc shared implementation surface.\n")
 	b.WriteString("- Before editing, report worktree path, branch, accepted base SHA, task ID, dependency boundary, and expected file/module scope on the durable task thread.\n")
 	b.WriteString("- Shared hotspots (generated files, schemas, manifests, central registries, dependency locks) have one explicit integrator; do not edit them from two branches concurrently.\n")
-	b.WriteString("- Review uses an exact-commit detached review worktree (`amq-squad review-worktree`), never the lead's live checkout.\n")
+	b.WriteString("- Review uses an exact-commit detached Git worktree, never the lead's live checkout.\n")
 	b.WriteString("- Integration proceeds in dependency order from committed handoffs. Workers do not merge peer branches unless the task explicitly assigns integration.\n")
 	b.WriteString("- Cleanup happens only after the branch is accepted/rejected, the worktree is proven clean, and Git confirms its registration. Never delete an unknown path to make room.\n")
 	if reason := strings.TrimSpace(t.SharedCwdException); reason != "" {
