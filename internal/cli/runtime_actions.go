@@ -528,8 +528,7 @@ Examples:
 	}
 	sendErr := sendPromptToPane(paneID, prompt)
 	status := dispatchSubmitConfirmed
-	if sendErr == nil {
-	} else {
+	if sendErr != nil {
 		var queued *tmuxpane.QueuedInputError
 		var unconfirmed *tmuxpane.SubmitUnconfirmedError
 		switch {

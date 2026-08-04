@@ -215,8 +215,12 @@ func TestRealAMQWakeCompatibility(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &envelope); err != nil {
 			t.Fatalf("parse real dispatch JSON: %v\n%s", err, out)
 		}
-		if envelope.Data.Status != "queued_and_nudged" || envelope.Data.MessageID == "" || envelope.Data.TaskID == "" || envelope.Data.Root == "" {
+		statusAccepted := envelope.Data.Status == "queued_and_nudged" || envelope.Data.Status == "queued_nudge_submit_unconfirmed"
+		if !statusAccepted || envelope.Data.MessageID == "" || envelope.Data.Root == "" {
 			t.Fatalf("real dispatch transport result = %+v", envelope.Data)
+		}
+		if envelope.Data.TaskID != "" {
+			t.Fatalf("taskless real dispatch unexpectedly created task %q", envelope.Data.TaskID)
 		}
 		if strings.Contains(out, `"delivery_receipt"`) {
 			t.Fatalf("real dispatch exposed deleted delivery receipt: %s", out)
