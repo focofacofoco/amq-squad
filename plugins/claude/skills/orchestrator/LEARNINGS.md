@@ -13,8 +13,8 @@ notifier wakes the recorded pane when durable AMQ work is pending.
 
 Per-iteration context refills are the same waste in a different shape: re-reading brief,
 rules, role contract, goal binding, task store and namespace every tick is five to six
-file reads per loop. Read the status projection once and re-read the brief only when its
-digest changes.
+file reads per loop. Read the status projection once and re-read the brief only when a
+scope change, task update, or status projection says it changed.
 
 ---
 

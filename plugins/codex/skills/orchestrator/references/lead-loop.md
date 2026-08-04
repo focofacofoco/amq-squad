@@ -13,7 +13,8 @@ amq-squad status --session S --json
 `status` returns one record-first runtime and coordination projection. Select one
 bounded action from live records, claimed work, inbox state, and open gates. Act,
 push the durable update, then park/end the turn so the session notifier can wake
-new AMQ work. Re-read the active brief only when its digest changes.
+new AMQ work. Re-read the active brief when scope, tasks, or status indicate an
+update.
 
 ## Dispatch
 

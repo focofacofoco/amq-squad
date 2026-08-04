@@ -3,7 +3,7 @@ name: "cli"
 description: "Direct amq-squad operations and diagnostics against an existing profile. Use when you need to inspect state, claim or complete a task, record command evidence, read or answer AMQ threads, raise or close a gate, diagnose namespace selection, or plan a release action. Triggers include \"what is the status\", \"claim this task\", \"record evidence\", \"why is my profile ambiguous\", \"read that thread\", \"is this safe to merge\". NOT for preparing or launching a squad (use amq-squad:wizard) and NOT for the live lead loop (use amq-squad:orchestrator)."
 version: "2.27.0"  # x-release-please-version
 allowed-tools: "Bash, Read, Write, Edit, MultiEdit, Glob, Grep"
-argument-hint: "[status | doctor | task | activity | gate | resume | stop | archive | context | amq]"
+argument-hint: "[status | doctor | task | gate | resume | down | amq]"
 user-invocable: true
 trigger: "/cli"
 ---
@@ -153,5 +153,5 @@ mention later.
 - `references/troubleshooting.md` — extended symptom, cause and fix table, including
   the namespace and evidence lifecycle traps
 
-Use `amq-squad:wizard` for goal-to-launch preparation and `amq-squad:orchestrator` for
+Use `amq-squad:wizard` for team setup and launch preview and `amq-squad:orchestrator` for
 the live lead protocol.

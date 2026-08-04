@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +9,6 @@ import (
 
 	squadnamespace "github.com/omriariav/amq-squad/v2/internal/namespace"
 	"github.com/omriariav/amq-squad/v2/internal/state"
-	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
 // nextActionData is the kind="next" payload: a single canonical action object
@@ -43,60 +41,6 @@ type nextExecution struct {
 	ResolveBaseRoot func(string) (string, error)
 	Probe           state.Probe
 	Now             func() time.Time
-}
-
-func runNext(args []string) error {
-	fs := flag.NewFlagSet("next", flag.ContinueOnError)
-	projectFlag := fs.String("project", "", "project/team-home directory (default: cwd)")
-	profileFlag := fs.String("profile", "", "team profile (default: default profile)")
-	sessionFlag := fs.String("session", "", "AMQ workstream/session to inspect")
-	registerScopedFlagAliases(fs, projectFlag, sessionFlag, profileFlag)
-	jsonOut := fs.Bool("json", false, "emit a schema-versioned next envelope with a canonical action object")
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `amq-squad next - get the highest-priority operator action for this session
-
-Usage:
-  amq-squad next [--project DIR] [--profile NAME] [--session NAME] [--json]
-
-Returns the single most important action for the operator to take now. Checks,
-in order: open operator gates, operator inbox backlog, unacknowledged directives,
-and stale operator poll loops. Exits 0 when an action is ready; exits 1 when
-the system is idle and no action is pending.
-
-In JSON mode, emits a schema-versioned envelope whose data is a canonical action
-object conforming to the action-object contract (docs/action-object-contract.md).
-
-Examples:
-  amq-squad next
-  amq-squad next --session issue-96 --json
-  amq-squad next --project ~/Code/app --profile review --json
-`)
-	}
-	if err := parseFlags(fs, args); err != nil {
-		return err
-	}
-	if fs.NArg() > 0 {
-		return usageErrorf("next takes no positional arguments")
-	}
-	ctx, err := resolveScopedCommandContext(*projectFlag, *profileFlag, *sessionFlag, "", fs)
-	if err != nil {
-		return err
-	}
-	emitContextDiagnostics(ctx)
-	if !team.ExistsProfile(ctx.ProjectDir, ctx.Profile) {
-		return fmt.Errorf("no team configured for profile %q. Run '%s' first.", ctx.Profile, profileInitCommand(ctx.Profile))
-	}
-	return executeNext(nextExecution{
-		ProjectDir:      ctx.ProjectDir,
-		Profile:         ctx.Profile,
-		Session:         ctx.Session,
-		BaseRoot:        ctx.BaseRoot,
-		JSON:            *jsonOut,
-		Out:             os.Stdout,
-		ResolveBaseRoot: scanBaseRootForProject,
-		Probe:           state.DefaultProbe,
-		Now:             time.Now,
-	})
 }
 
 func executeNext(ne nextExecution) error {

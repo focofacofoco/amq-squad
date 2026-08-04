@@ -149,5 +149,5 @@ mention later.
 - `references/troubleshooting.md` — extended symptom, cause and fix table, including
   the namespace and evidence lifecycle traps
 
-Use `amq-squad:wizard` for goal-to-launch preparation and `amq-squad:orchestrator` for
+Use `amq-squad:wizard` for team setup and launch preview and `amq-squad:orchestrator` for
 the live lead protocol.

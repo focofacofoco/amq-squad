@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -110,93 +109,6 @@ type notifyStateRecord struct {
 	Active         bool                          `json:"active"`
 	LastObserved   time.Time                     `json:"last_observed,omitempty"`
 	Deliveries     map[string]attention.Delivery `json:"deliveries,omitempty"`
-}
-
-func runNotify(args []string) error {
-	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
-	projectFlag := fs.String("project", "", "project/team-home directory to inspect (default: cwd)")
-	profileFlag := fs.String("profile", "", "team profile to inspect (default: default profile)")
-	sessionFlag := fs.String("session", "", "scope notifications to one AMQ workstream")
-	renotifyAfter := fs.Duration("renotify-after", defaultOperatorRenotifyAfter, "re-notify unchanged operator gates after this duration (0 disables repeats)")
-	dryRun := fs.Bool("dry-run", false, "print notifications without updating the de-duplication state file")
-	deliver := fs.Bool("deliver", false, "deliver selected events to configured sinks (default: off)")
-	forceResend := fs.Bool("force-resend", false, "re-deliver active selected events; requires --deliver")
-	jsonOut := fs.Bool("json", false, "emit a schema-versioned notification envelope instead of text")
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, `amq-squad notify - emit operator attention notifications
-
-Usage:
-  amq-squad notify [--project DIR] [--profile NAME] [--session NAME]
-                   [--renotify-after 30m] [--dry-run] [--json]
-                   [--deliver [--force-resend]]
-
-Scans AMQ state for live needs-you threads addressed to the configured operator
-handle, prints only new or stale-threshold notifications, and records what was
-shown under .amq-squad/notify-state.json. It is an event/hook-friendly attention
-primitive: it does not approve, answer, clear, or poll in a loop.
-
-Examples:
-  amq-squad notify
-  amq-squad notify --project ~/Code/app --profile review
-  amq-squad notify --session issue-96 --renotify-after 1h
-  amq-squad notify --json | jq '.data.notifications[]'
-`)
-	}
-	if err := parseFlags(fs, args); err != nil {
-		return err
-	}
-	if fs.NArg() > 0 {
-		return usageErrorf("notify takes no positional arguments; got %d", fs.NArg())
-	}
-	if *dryRun && *deliver {
-		return usageErrorf("--dry-run and --deliver are mutually exclusive")
-	}
-	if *forceResend && !*deliver {
-		return usageErrorf("--force-resend requires --deliver")
-	}
-	ctx, err := resolveScopedCommandContext(*projectFlag, *profileFlag, *sessionFlag, "", fs)
-	if err != nil {
-		return err
-	}
-	emitContextDiagnostics(ctx)
-	var admission *namespaceAdmissionLocks
-	if !*dryRun {
-		if strings.TrimSpace(*sessionFlag) == "" {
-			ctx, admission, err = acquireRevalidatedContextWriter(ctx, true, func() (contextResolution, error) {
-				return resolveScopedCommandContext(*projectFlag, *profileFlag, *sessionFlag, "", fs)
-			})
-			if err != nil {
-				return err
-			}
-			defer admission.close()
-			if err := ensureNoNamespaceMigrationForProfile("notify", ctx.ProjectDir, ctx.Profile); err != nil {
-				return err
-			}
-		} else {
-			ctx, admission, err = acquireRevalidatedContextWriter(ctx, false, func() (contextResolution, error) {
-				return resolveScopedCommandContext(*projectFlag, *profileFlag, *sessionFlag, "", fs)
-			})
-			if err != nil {
-				return err
-			}
-			defer admission.close()
-			if err := ensureNoNamespaceMigration("notify", ctx.ProjectDir, ctx.Profile, ctx.Session); err != nil {
-				return err
-			}
-		}
-	}
-	return executeNotify(notifyExecution{
-		ProjectDir:    ctx.ProjectDir,
-		Profile:       ctx.Profile,
-		Session:       strings.TrimSpace(*sessionFlag),
-		BaseRoot:      ctx.BaseRoot,
-		RenotifyAfter: *renotifyAfter,
-		DryRun:        *dryRun,
-		JSON:          *jsonOut,
-		Deliver:       *deliver,
-		ForceResend:   *forceResend,
-		Out:           os.Stdout,
-	})
 }
 
 func executeNotify(n notifyExecution) error {
@@ -1293,7 +1205,7 @@ func notifyInspectCommand(projectDir, profile, session, thread string) string {
 	if profile != team.DefaultProfile {
 		profileArg = " --profile " + notifyShellQuote(profile)
 	}
-	return fmt.Sprintf("amq-squad thread --project %s%s --session %s --id %s --include-body", notifyShellQuote(projectDir), profileArg, notifyShellQuote(session), notifyShellQuote(thread))
+	return fmt.Sprintf("amq-squad operator status --project %s%s --session %s --json", notifyShellQuote(projectDir), profileArg, notifyShellQuote(session))
 }
 
 func notifyRespondCommand(operatorHandle, to, thread string, reason state.AttnReason) string {

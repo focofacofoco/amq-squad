@@ -8,8 +8,8 @@ version: "2.27.0"  # x-release-please-version
 This legacy skill name remains during the v2.22 migration. Route the request to
 one authoritative namespaced skill and follow that skill completely:
 
-- Goal intake, team design, custom roles, artifact preparation, readiness, or
-  launch preview: `amq-squad:wizard`.
+- Goal intake, team design, custom roles, team/profile setup, or launch preview:
+  `amq-squad:wizard`.
 - Status, doctor, task, gate, AMQ inspection, lifecycle
   commands, verification, or evidence: `amq-squad:cli`.
 - A verified visible lead coordinating an already-launched squad:

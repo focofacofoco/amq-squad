@@ -150,6 +150,16 @@ func TestV228PublicSurfacePrunesFoldedCommandsAndHidesAgent(t *testing.T) {
 	if strings.Contains(help, "\n  agent ") {
 		t.Fatalf("internal agent child route leaked into root help:\n%s", help)
 	}
+
+	for _, path := range []string{
+		"context.go", "activity.go", "bootstrap_ack.go", "brief.go", "threads.go", "thread.go",
+		"collect.go", "prune_panes.go", "console.go", "monitor.go", "notify.go", "notifications.go",
+		"history.go", "fork.go", "review_worktree.go", "tmux_harness.go", "rm.go", "next.go",
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("removed command implementation %q still exists (stat error: %v)", path, err)
+		}
+	}
 }
 
 func TestRunRolesListsMarketNumbers(t *testing.T) {

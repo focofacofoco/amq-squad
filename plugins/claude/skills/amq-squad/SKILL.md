@@ -3,7 +3,7 @@ name: "amq-squad"
 description: "Compatibility intent router for the amq-squad plugin. Routes goal preparation to wizard, direct operations to cli, and live lead work to orchestrator."
 version: "2.27.0"  # x-release-please-version
 allowed-tools: "Bash, Read, Write, Edit, MultiEdit, Glob, Grep"
-argument-hint: "[drain | review | handoff | status | console | up | focus | send | resume | fork | rm | doctor]"
+argument-hint: "[drain | review | handoff | status | start | focus | send | resume | down | doctor]"
 user-invocable: true
 trigger: "/amq-squad"
 ---
@@ -12,8 +12,8 @@ trigger: "/amq-squad"
 This legacy skill name remains during the v2.22 migration. Route the request to
 one authoritative namespaced skill and follow that skill completely:
 
-- Goal intake, team design, custom roles, artifact preparation, readiness, or
-  launch preview: `amq-squad:wizard`.
+- Goal intake, team design, custom roles, team/profile setup, or launch preview:
+  `amq-squad:wizard`.
 - Status, doctor, task, gate, AMQ inspection, lifecycle
   commands, verification, or evidence: `amq-squad:cli`.
 - A verified visible lead coordinating an already-launched squad:

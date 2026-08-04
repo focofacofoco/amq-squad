@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"errors"
-	"flag"
 	"strings"
 	"testing"
 )
@@ -174,21 +172,6 @@ func TestStatusHelpDocumentsProject(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("status --help should mention %q, got:\n%s", want, stderr)
 		}
-	}
-}
-
-func TestConsoleImplementationHelpDocumentsProject(t *testing.T) {
-	_, stderr, err := captureOutput(t, func() error { return runConsole([]string{"--help"}) })
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("console --help: %v", err)
-	}
-	for _, want := range []string{"--project DIR", "--filter EXPR", "amq-squad console --project ~/Code/app --once"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("console --help should mention %q, got:\n%s", want, stderr)
-		}
-	}
-	if strings.Contains(stderr, "amq-noc") || strings.Contains(stderr, "NOC") {
-		t.Fatalf("console --help should not mention NOC, got:\n%s", stderr)
 	}
 }
 

@@ -7,6 +7,42 @@ session state does **not** need to be migrated.
 
 This guide covers everything you have to change.
 
+## What's new in 2.28.0: Simple Mode
+
+2.28 removes the preparation, readiness, digest, receipt, bootstrap-ack, and
+parallel-observation command layers. Launch has one command and one default-No
+approval: run `amq-squad start` to inspect the complete plan, then repeat the
+same coordinates with `--yes` only after approval. Rerun `start` after an
+interruption; it keeps verified live roles and reconciles missing or stopped
+ones without deleting the namespace.
+
+The nine core workflows are `start`, `status`, `send`, `task`, `goal`, `gate`,
+`verify`, `down`, and `doctor`. The public CLI also retains census-approved
+setup, restore, utility, and diagnostic exceptions. The complete retained list
+and rationale live in the
+[v2.28.0 release notes](docs/release-notes-v2.28.0.md).
+
+Removed commands have no aliases. Update scripts and runbooks mechanically:
+
+| Removed v2.27 surface | v2.28 replacement |
+|---|---|
+| `context`, `history`, `console`, `monitor`, `activity` | Use scoped `status --json` and `doctor`; inspect durable mail with exact-root raw AMQ commands. |
+| `collect`, `threads`, `thread` | Use `amq drain/list/read/thread --root <exact-root> --me <handle> ...`. |
+| `notify`, `notifications` | Use `status`, `operator status`, and typed `gate` workflows. |
+| `bootstrap ack` | Removed with no replacement; process/pane liveness and actual work are the launch evidence. |
+| `brief` | Edit the resolved active workstream brief directly, then rerun `start`. |
+| `prune-panes`, `rm`, `archive` | Use `down` and inspect with `status`/`doctor`; durable session data is not deleted automatically. |
+| `fork` | Select a fresh explicit session in the roster and run `start`. |
+| `review-worktree` | Use the retained `worktree` workflow and repository workspace-safety rules. |
+| `tmux-harness` | Run the relevant project test directly in an operator-created disposable tmux server. |
+| `next` | Use `status --json` or `operator status --json` action projections. |
+
+Task automation must use the flat `task add`, `task claim`, `task done`, and
+`task list` lifecycle. Progress, blockers, review requests, and completion are
+ordinary AMQ messages, not a second delivery or reconciliation state machine.
+Existing v2.27 launch records remain compatibility input; old prepared and
+receipt directories are ignored and are not auto-deleted.
+
 ## What's new in 2.26.0: AMQ 0.51.1 floor
 
 **Action required.** Upgrade AMQ to 0.51.1 or newer before upgrading

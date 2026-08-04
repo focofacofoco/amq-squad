@@ -51,8 +51,8 @@ gates. Act on one bounded item, push the durable update, then park/end the turn.
 The session notifier wakes pending AMQ work; do not replace it with a polling
 loop.
 
-**Re-read the brief only when its digest changes.** A digest match is proof
-nothing moved; re-reading unchanged files to "stay oriented" buys nothing.
+Re-read the brief when a scope change, task update, or status projection says it
+changed. Re-reading unchanged files every turn buys nothing.
 
 ## Watching without burning turns
 
@@ -64,7 +64,7 @@ durable AMQ work is pending. Operator attention is projected by `status`, while
 
 ## Gates are exact targets, not re-derivations
 
-A typed gate binds one action, target, request generation, and integrity digest.
+A typed gate binds one durable request to an exact action and target.
 Do not helpfully re-summarise or broaden the proposal before asking: only the
 matching durable operator answer can authorize that exact subject.
 
@@ -111,4 +111,4 @@ only then escalate.
   multi-workstream board
 
 Use `amq-squad:cli` for direct status/doctor/task/gate/AMQ commands, and
-`amq-squad:wizard` for a new goal-to-launch preparation flow.
+`amq-squad:wizard` for a new team setup or `start` flow.

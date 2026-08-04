@@ -24,7 +24,7 @@ Keep only active roster entries in the final file. `.amq-squad/team.json` is aut
 
 ## Skills
 
-- Use `amq-squad:wizard` for goal intake, brief/rules/roles/profile preparation, readiness, and the separate launch approval.
+- Use `amq-squad:wizard` for goal intake, brief/rules/roles/profile setup, and the default-No `start` approval.
 - Use `amq-squad:cli` for direct status, doctor, task, gate, AMQ, recovery, and lifecycle operations.
 - Use `amq-squad:orchestrator` only as the verified live lead for dispatch, status review, review convergence, recovery, and final evidence. The old `amq-squad` and `amq-squad-orchestrator` names are compatibility redirects only.
 - Use raw `amq-cli` only for AMQ debugging outside the squad.

@@ -995,7 +995,7 @@ func executeNotificationWatcher(w notificationWatcherExecution) (returnErr error
 			if result.Err != nil {
 				amqDegraded = result.Err.Error()
 				if result.Exhausted {
-					amqDegraded += "; managed AMQ watch exhausted; fsnotify/rescan fallback remains active; use bounded amq-squad monitor for manual backstop"
+					amqDegraded += "; managed AMQ watch exhausted; fsnotify/rescan fallback remains active; inspect amq-squad status --json and amq-squad doctor for manual backstop"
 				}
 			} else {
 				amqDegraded = ""
