@@ -260,6 +260,9 @@ rename — `amq-squad version` still reports the same way.
 
 ## 2. Removed verbs
 
+This table records the 2.0 migration as shipped. Commands named here may have
+been removed since; see the v2.28 table above for current replacements.
+
 Six verbs that were deprecated through the 1.x line are removed. Invoking one
 now returns a **usage error (exit 1)** — a clear "unknown command", not a
 silent success and no migration hint. Switch to the replacement:
@@ -268,9 +271,9 @@ silent success and no migration hint. Switch to the replacement:
 | --- | --- |
 | `amq-squad down` | `amq-squad stop` |
 | `amq-squad launch <binary>` | `amq-squad agent up <binary>` |
-| `amq-squad restore` (print mode) | `amq-squad status --json` |
+| `amq-squad restore` (print mode) | `amq-squad history` |
 | `amq-squad restore --exec --role R` | `amq-squad agent resume R` |
-| `amq-squad list` | `amq-squad status --json` for recorded/runtime state, or `amq-squad doctor` for diagnostics |
+| `amq-squad list` | `amq-squad status` (live) or `amq-squad history` (records) |
 | `amq-squad team show` | `amq-squad up --dry-run` |
 | `amq-squad team launch` | `amq-squad up` |
 | `amq-squad team launch --fresh --session X` | `amq-squad fork --from <current> --as X` |

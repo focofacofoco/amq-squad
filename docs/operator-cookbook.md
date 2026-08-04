@@ -385,5 +385,5 @@ scoped stop command from status JSON when available:
 
 ```sh
 amq-squad status --project <project> --profile <profile> --session <session> --json
-amq-squad stop --project <project> --profile <profile> --session <session> --all --close-panes
+amq-squad down --project <project> --profile <profile> --session <session> --all --close-panes
 ```
