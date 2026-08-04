@@ -268,9 +268,9 @@ silent success and no migration hint. Switch to the replacement:
 | --- | --- |
 | `amq-squad down` | `amq-squad stop` |
 | `amq-squad launch <binary>` | `amq-squad agent up <binary>` |
-| `amq-squad restore` (print mode) | `amq-squad history` |
+| `amq-squad restore` (print mode) | `amq-squad status --json` |
 | `amq-squad restore --exec --role R` | `amq-squad agent resume R` |
-| `amq-squad list` | `amq-squad status` (live) or `amq-squad history` (records) |
+| `amq-squad list` | `amq-squad status --json` for recorded/runtime state, or `amq-squad doctor` for diagnostics |
 | `amq-squad team show` | `amq-squad up --dry-run` |
 | `amq-squad team launch` | `amq-squad up` |
 | `amq-squad team launch --fresh --session X` | `amq-squad fork --from <current> --as X` |

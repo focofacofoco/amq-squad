@@ -38,7 +38,6 @@ type notifyExecution struct {
 	StatePath       string
 	RenotifyAfter   time.Duration
 	DryRun          bool
-	JSON            bool
 	Out             io.Writer
 	ResolveBaseRoot func(projectDir string) (string, error)
 	Probe           state.Probe
@@ -137,11 +136,7 @@ func executeNotify(n notifyExecution) error {
 			OperatorGates: false,
 			Message:       "operator gates disabled for this profile",
 		}
-		if n.JSON {
-			return writeJSONEnvelope(out, "notify", data)
-		}
-		fmt.Fprintln(out, "amq-squad notify: operator gates disabled for this profile.")
-		return nil
+		return writeJSONEnvelope(out, "notify", data)
 	}
 	if n.RenotifyAfter < 0 {
 		return usageErrorf("--renotify-after must be >= 0")
@@ -230,10 +225,7 @@ func executeNotify(n notifyExecution) error {
 		SinkResults:     sinkResults,
 		DeliverySummary: deliverySummary,
 	}
-	if n.JSON {
-		return writeJSONEnvelope(out, "notify", data)
-	}
-	return renderNotify(out, data)
+	return writeJSONEnvelope(out, "notify", data)
 }
 
 func deliverNotificationSinksPersisted(ctx context.Context, projectDir, path string, items []operatorAttention, policy team.OperatorNotificationPolicy, renotify time.Duration, now time.Time, force bool) ([]notifier.Result, notifyDeliverySummary, error) {
@@ -1017,35 +1009,6 @@ func operatorAttentionEscalated(item operatorAttention, rec notifyStateRecord) b
 	currentRank := state.OperatorGateEscalationRank(current)
 	return currentRank >= state.OperatorGateEscalationRank(state.OperatorGateEscalationReminder) &&
 		currentRank > state.OperatorGateEscalationRank(previous)
-}
-
-func renderNotify(out io.Writer, data notifyEnvelopeData) error {
-	if len(data.Notifications) == 0 {
-		if data.Suppressed > 0 {
-			fmt.Fprintf(out, "amq-squad notify: no new operator attention items (%d suppressed by throttle).\n", data.Suppressed)
-		} else {
-			fmt.Fprintln(out, "amq-squad notify: no operator attention items.")
-		}
-		return nil
-	}
-	fmt.Fprintf(out, "amq-squad notify: %d operator attention %s for %s\n", len(data.Notifications), pluralize(len(data.Notifications), "item", "items"), data.Operator.Handle)
-	for _, n := range data.Notifications {
-		reason := string(n.Reason)
-		if reason == "" {
-			reason = "generic"
-		}
-		escalation := ""
-		if n.Escalation != "" {
-			escalation = ", " + n.Escalation
-		}
-		fmt.Fprintf(out, "- %s %s %s (%s%s, age %s)\n", n.Session, n.Thread, n.Subject, reason, escalation, n.Age)
-		fmt.Fprintf(out, "  inspect: %s\n", n.Inspect)
-		fmt.Fprintf(out, "  respond: %s\n", n.Respond)
-	}
-	if data.Suppressed > 0 {
-		fmt.Fprintf(out, "%d unchanged %s suppressed by throttle.\n", data.Suppressed, pluralize(data.Suppressed, "item", "items"))
-	}
-	return nil
 }
 
 func defaultNotifyStatePath(projectDir string) string {

@@ -821,7 +821,7 @@ func executeNotificationWatcher(w notificationWatcherExecution) (returnErr error
 	if deliver == nil {
 		deliver = func(ctx context.Context, now time.Time) (notifyDeliverySummary, error) {
 			var out bytes.Buffer
-			err := executeNotify(notifyExecution{Context: ctx, ProjectDir: w.ProjectDir, Profile: profile, Session: w.Session, BaseRoot: w.BaseRoot, RenotifyAfter: defaultOperatorRenotifyAfter, Deliver: true, JSON: true, Out: &out, Now: func() time.Time { return now }, Probe: state.DefaultProbe})
+			err := executeNotify(notifyExecution{Context: ctx, ProjectDir: w.ProjectDir, Profile: profile, Session: w.Session, BaseRoot: w.BaseRoot, RenotifyAfter: defaultOperatorRenotifyAfter, Deliver: true, Out: &out, Now: func() time.Time { return now }, Probe: state.DefaultProbe})
 			if err != nil {
 				return notifyDeliverySummary{}, err
 			}

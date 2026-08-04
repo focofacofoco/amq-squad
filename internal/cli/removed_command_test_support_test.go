@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,13 @@ import (
 var notifyNow = time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
 
 func executeNotifyForTest(t *testing.T, n notifyExecution) string {
+	t.Helper()
+	raw := executeNotifyJSONForTest(t, n)
+	data := decodeJSONEnvelope[notifyEnvelopeData](t, raw).Data
+	return renderNotifyForTest(data)
+}
+
+func executeNotifyJSONForTest(t *testing.T, n notifyExecution) string {
 	t.Helper()
 	var buf bytes.Buffer
 	n.Out = &buf
@@ -34,6 +42,39 @@ func executeNotifyForTest(t *testing.T, n notifyExecution) string {
 		t.Fatalf("executeNotify: %v", err)
 	}
 	return buf.String()
+}
+
+func renderNotifyForTest(data notifyEnvelopeData) string {
+	if !data.OperatorGates {
+		return "amq-squad notify: " + data.Message + ".\n"
+	}
+	var out strings.Builder
+	if len(data.Notifications) == 0 {
+		if data.Suppressed > 0 {
+			fmt.Fprintf(&out, "amq-squad notify: no new operator attention items (%d suppressed by throttle).\n", data.Suppressed)
+		} else {
+			fmt.Fprintln(&out, "amq-squad notify: no operator attention items.")
+		}
+		return out.String()
+	}
+	fmt.Fprintf(&out, "amq-squad notify: %d operator attention %s for %s\n", len(data.Notifications), pluralize(len(data.Notifications), "item", "items"), data.Operator.Handle)
+	for _, n := range data.Notifications {
+		reason := string(n.Reason)
+		if reason == "" {
+			reason = "generic"
+		}
+		escalation := ""
+		if n.Escalation != "" {
+			escalation = ", " + n.Escalation
+		}
+		fmt.Fprintf(&out, "- %s %s %s (%s%s, age %s)\n", n.Session, n.Thread, n.Subject, reason, escalation, n.Age)
+		fmt.Fprintf(&out, "  inspect: %s\n", n.Inspect)
+		fmt.Fprintf(&out, "  respond: %s\n", n.Respond)
+	}
+	if data.Suppressed > 0 {
+		fmt.Fprintf(&out, "%d unchanged %s suppressed by throttle.\n", data.Suppressed, pluralize(data.Suppressed, "item", "items"))
+	}
+	return out.String()
 }
 
 func seedNotifyProject(t *testing.T, op team.OperatorConfig) (project, base, statePath string) {
