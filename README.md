@@ -45,8 +45,9 @@ v2.28.0 "Simple Mode" removes the ceremony layer (#646). The launch failures
 investigated across recent releases traced to the verification machinery, not
 the coordination it guarded — so the prepared-launch state machine, digests,
 generation tokens, readiness rows, drift detection, local send receipts,
-bootstrap acknowledgements, and custom AMQ roots are gone. Net: **361 files,
-−39,191 lines** against v2.27.0.
+bootstrap acknowledgements, and custom AMQ roots are gone. Net at the
+feature-complete main (before release packaging): **361 files, −39,191 lines**
+against v2.27.0.
 
 - **One-step launch.** `start` shows the roster and briefs, asks once, and
   brings the team up. The brief travels with the spawn, so there is nothing to
