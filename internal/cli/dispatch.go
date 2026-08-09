@@ -250,13 +250,12 @@ Examples:
 		}
 	}
 
-	// Resolve the workstream root for the SENDER. The durable message lands in
-	// .agent-mail/<workstream> regardless of which session the lead runs from,
-	// so an external lead (no AM_ROOT injected) reaches the child's real mailbox
-	// instead of the default .agent-mail (#152's misroute, the root cause #153
-	// builds on).
-	cwd := member.EffectiveCWD(t.Project)
-	ctx, err := resolveAMQContextForNamespace(cwd, profile, workstream, from)
+	// Resolve the workstream root from the canonical TEAM HOME, not the
+	// recipient's execution cwd. Implementation members commonly run from an
+	// isolated worktree whose project-local .agent-mail is not the squad's
+	// durable namespace. Route and status both treat projectDir/t.Project as the
+	// namespace authority; dispatch must do the same.
+	ctx, err := resolveAMQContextForNamespace(projectDir, profile, workstream, from)
 	if err != nil {
 		return fmt.Errorf("resolve amq root for dispatch: %w", err)
 	}
@@ -310,7 +309,7 @@ Examples:
 	waitPosture := waitPostureForContext("dispatch", "amq_delivery", ctx, waitTimeout, waitFor != "" && waitTimeout == 0, waitFor != "", *overrideWaitPosture, *waitPostureReason)
 	out, sendResult, err := runOwnedAMQSend(ownedAMQSendOptions{
 		WaitPosture: waitPosture,
-	}, amqCommandRequest{Dir: cwd, Env: amqCommandEnv(ctx), Arg: sendCmd})
+	}, amqCommandRequest{Dir: projectDir, Env: amqCommandEnv(ctx), Arg: sendCmd})
 	msgID := sendResult.MessageID
 	if err != nil {
 		if !dispatchSendWaitTimedOut(out, err, waitFor) {
@@ -699,7 +698,7 @@ func teamMemberByRole(t team.Team, role string) (team.Member, bool) {
 // uncertain (no record, no root, dead sidecar) returns false so dispatch falls
 // back to the explicit last-resort pane nudge. Read-only.
 func defaultDispatchRecipientWakeLive(projectDir, profile, session string, explicitSession bool, role string) bool {
-	mr, workstream, err := resolveMemberRuntime(projectDir, profile, session, explicitSession, role)
+	mr, workstream, err := resolveDispatchMemberRuntime(projectDir, profile, session, explicitSession, role)
 	if err != nil || !mr.HasRecord {
 		return false
 	}
@@ -712,7 +711,7 @@ func defaultDispatchRecipientWakeLive(projectDir, profile, session string, expli
 }
 
 func defaultDispatchWakePane(projectDir, profile, session string, explicitSession bool, role string, force bool) (dispatchOutcome, error) {
-	mr, workstream, err := resolveMemberRuntime(projectDir, profile, session, explicitSession, role)
+	mr, workstream, err := resolveDispatchMemberRuntime(projectDir, profile, session, explicitSession, role)
 	if err != nil {
 		return dispatchOutcome{}, err
 	}
@@ -738,7 +737,7 @@ func defaultDispatchWakePane(projectDir, profile, session string, explicitSessio
 		// Don't talk over a working agent: a prompt pushed into a busy pane lands
 		// in a tool-result buffer and is lost. The durable task is still queued,
 		// so skipping is safe — the agent drains it between turns.
-		if busy, berr := tmuxpane.PaneBusy(paneID); berr == nil && busy {
+		if busy, berr := paneBusyForSend(paneID); berr == nil && busy {
 			return dispatchOutcome{Skipped: fmt.Sprintf("pane %s is busy (mid-turn); the agent drains the task when idle, or re-dispatch with --force", paneID)}, nil
 		}
 	}
@@ -746,8 +745,52 @@ func defaultDispatchWakePane(projectDir, profile, session string, explicitSessio
 	if strings.TrimSpace(root) == "" || root == "." {
 		return dispatchOutcome{}, fmt.Errorf("resolve exact AMQ root for dispatch nudge from agent dir %q", mr.AgentDir)
 	}
-	err = tmuxpane.SendPromptToPane(paneID, dispatchNudgePrompt(root))
-	return classifyNudgeResult(paneID, err, tmuxpane.PaneBusy)
+	err = sendPromptToPane(paneID, dispatchNudgePrompt(root))
+	return classifyNudgeResult(paneID, err, paneBusyForSend)
+}
+
+// resolveDispatchMemberRuntime selects the recipient launch record through the
+// same team-home scan and profile/session/team-home/handle authority used by
+// status. Falling back to the legacy runtime resolver preserves support for
+// members with no launch record, while recorded worktree-cwd members no longer
+// get looked up beneath their worktree-local .agent-mail directory.
+func resolveDispatchMemberRuntime(projectDir, profile, session string, explicitSession bool, role string) (memberRuntime, string, error) {
+	t, err := team.ReadProfile(projectDir, profile)
+	if err != nil {
+		return memberRuntime{}, "", fmt.Errorf("read team: %w", err)
+	}
+	workstream, err := resolveTeamWorkstreamName(t, session, explicitSession)
+	if err != nil {
+		return memberRuntime{}, "", err
+	}
+	member, ok := teamMemberByRole(t, role)
+	if !ok {
+		return memberRuntime{}, workstream, fmt.Errorf("no team member with role %q in this team", strings.ToLower(strings.TrimSpace(role)))
+	}
+	entries, scanErr := launch.ScanEntries(t.Project)
+	if scanErr != nil {
+		return memberRuntime{}, workstream, fmt.Errorf("scan launch records: %w", scanErr)
+	}
+	selection := selectStatusLaunchRecord(t, profile, member, workstream, defaultDuplicateLaunchProbe, entries)
+	if len(selection.DuplicatePaths) > 0 {
+		return memberRuntime{}, workstream, fmt.Errorf("multiple authoritative live launch records for %s: %s", memberHandle(member), strings.Join(selection.DuplicatePaths, ", "))
+	}
+	if !selection.Found {
+		return resolveMemberRuntime(projectDir, profile, session, explicitSession, role)
+	}
+	rec := selection.Entry.Record
+	handle := strings.TrimSpace(rec.Handle)
+	if handle == "" {
+		handle = memberHandle(member)
+	}
+	cwd := member.EffectiveCWD(t.Project)
+	if strings.TrimSpace(rec.CWD) != "" {
+		cwd = rec.CWD
+	}
+	return memberRuntime{
+		Member: member, Profile: profile, Handle: handle, CWD: cwd,
+		AgentDir: selection.Entry.AgentDir, HasRecord: true, Record: rec,
+	}, workstream, nil
 }
 
 // classifyNudgeResult maps a pane-nudge result to a dispatchOutcome. A
