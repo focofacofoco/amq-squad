@@ -71,9 +71,12 @@ type dispatchEnvelopeData struct {
 	Nudge     dispatchOutcome `json:"nudge"`
 }
 
-// dispatchWakePane delivers a rooted dispatchNudgePrompt to a member's live pane. It is a
-// package var so tests can drive runDispatch without a tmux server.
-var dispatchWakePane = defaultDispatchWakePane
+// dispatchWakePane delivers a rooted dispatchNudgePrompt to a member's live
+// pane. dispatchRoot is the already-resolved durable-send root; carrying it
+// across the nudge boundary prevents fallback runtime discovery from selecting
+// a different mailbox below a worktree cwd. It is a package var so tests can
+// drive runDispatch without a tmux server.
+var dispatchWakePane = defaultDispatchWakePaneAtRoot
 
 // dispatchRecipientWakeLive reports whether the dispatch recipient currently has
 // a positively-live wake sidecar, so dispatch can rely on durable AMQ + wake
@@ -446,7 +449,7 @@ Examples:
 		return nil
 	}
 
-	outcome, werr := dispatchWakePane(projectDir, profile, *sessionFlag, flagWasSet(fs, "session"), *roleFlag, *forceFlag)
+	outcome, werr := dispatchWakePane(projectDir, profile, *sessionFlag, flagWasSet(fs, "session"), *roleFlag, *forceFlag, ctx.Root)
 	if werr != nil {
 		// The durable task is already queued; a wake failure is advisory, not a
 		// dispatch failure. Surface it (warnings bypass quietNotice) so the
@@ -710,11 +713,30 @@ func defaultDispatchRecipientWakeLive(projectDir, profile, session string, expli
 	return live.Signals.WakeAlive
 }
 
+// defaultDispatchWakePane is retained for direct runtime-control callers and
+// tests. Production dispatch already owns the authoritative durable-send root
+// and calls defaultDispatchWakePaneAtRoot so send and nudge cannot diverge.
 func defaultDispatchWakePane(projectDir, profile, session string, explicitSession bool, role string, force bool) (dispatchOutcome, error) {
 	mr, workstream, err := resolveDispatchMemberRuntime(projectDir, profile, session, explicitSession, role)
 	if err != nil {
 		return dispatchOutcome{}, err
 	}
+	ctx, err := resolveAMQContextForNamespace(projectDir, profile, workstream, mr.Handle)
+	if err != nil {
+		return dispatchOutcome{}, fmt.Errorf("resolve exact AMQ root for dispatch nudge: %w", err)
+	}
+	return dispatchWakePaneForRuntime(mr, workstream, force, ctx.Root)
+}
+
+func defaultDispatchWakePaneAtRoot(projectDir, profile, session string, explicitSession bool, role string, force bool, dispatchRoot string) (dispatchOutcome, error) {
+	mr, workstream, err := resolveDispatchMemberRuntime(projectDir, profile, session, explicitSession, role)
+	if err != nil {
+		return dispatchOutcome{}, err
+	}
+	return dispatchWakePaneForRuntime(mr, workstream, force, dispatchRoot)
+}
+
+func dispatchWakePaneForRuntime(mr memberRuntime, workstream string, force bool, dispatchRoot string) (dispatchOutcome, error) {
 	if reason, disabled := mr.nativePromptInjectionDisabledReason(); disabled {
 		return dispatchOutcome{Skipped: reason + "; durable AMQ dispatch was queued"}, nil
 	}
@@ -741,13 +763,13 @@ func defaultDispatchWakePane(projectDir, profile, session string, explicitSessio
 			return dispatchOutcome{Skipped: fmt.Sprintf("pane %s is busy (mid-turn); the agent drains the task when idle, or re-dispatch with --force", paneID)}, nil
 		}
 	}
-	// Status's launch scan can preserve the lexical team-home path (for example
-	// /var/... on Darwin) even when AMQ resolved the durable root through that
-	// symlink (/private/var/...). Keep the fallback prompt on the same canonical
-	// root as the durable send so the receiving shell drains the exact namespace.
-	root := canonicalFilesystemPath(filepath.Dir(filepath.Dir(mr.AgentDir)))
+	// Canonicalize the authoritative durable-send root (for example /var/... to
+	// /private/var/... on Darwin). Never derive it from mr.AgentDir: the no-record
+	// fallback may construct AgentDir below a worktree-local .agent-mail even
+	// though the durable message was sent to the canonical team-home namespace.
+	root := canonicalFilesystemPath(dispatchRoot)
 	if strings.TrimSpace(root) == "" || root == "." {
-		return dispatchOutcome{}, fmt.Errorf("resolve exact AMQ root for dispatch nudge from agent dir %q", mr.AgentDir)
+		return dispatchOutcome{}, fmt.Errorf("resolve exact AMQ root for dispatch nudge from durable-send root %q", dispatchRoot)
 	}
 	err = sendPromptToPane(paneID, dispatchNudgePrompt(root))
 	return classifyNudgeResult(paneID, err, paneBusyForSend)

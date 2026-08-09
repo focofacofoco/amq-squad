@@ -590,6 +590,78 @@ func TestRunDispatchWorktreeMemberUsesCanonicalTeamRoot(t *testing.T) {
 	}
 }
 
+func TestRunDispatchWorktreeMemberWithoutLaunchRecordNudgesCanonicalSendRoot(t *testing.T) {
+	teamHome := t.TempDir()
+	worktree := t.TempDir()
+	const session = "issue-96"
+	if err := team.WriteProfile(teamHome, team.DefaultProfile, team.Team{
+		Project:      teamHome,
+		Workstream:   session,
+		Orchestrated: true,
+		Lead:         "cto",
+		Members: []team.Member{
+			{Role: "cto", Binary: "codex", Handle: "cto", Session: session},
+			{Role: "qa", Binary: "codex", Handle: "qa", Session: session, CWD: worktree},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := withAMQCommandSeams(t, amqEnv{Root: ".agent-mail/{session}", BaseRoot: ".agent-mail"}, "Sent msg-worktree-no-record to qa\n")
+	pane := tmuxpane.TmuxPane{
+		Session: "amq-squad", Window: "7", Pane: "0", WindowID: "@7", PaneID: "%7",
+		CWD: worktree, Title: paneTitleToken(session, "qa"),
+	}
+	oldLister, oldBusy, oldSend := statusPaneLister, paneBusyForSend, sendPromptToPane
+	statusPaneLister = func() ([]tmuxpane.TmuxPane, error) { return []tmuxpane.TmuxPane{pane}, nil }
+	paneBusyForSend = func(string) (bool, error) { return false, nil }
+	var sentPane, sentPrompt string
+	sendPromptToPane = func(paneID, prompt string) error {
+		sentPane, sentPrompt = paneID, prompt
+		return nil
+	}
+	t.Cleanup(func() {
+		statusPaneLister, paneBusyForSend, sendPromptToPane = oldLister, oldBusy, oldSend
+	})
+
+	stdout, _, err := captureOutput(t, func() error {
+		return runDispatch([]string{
+			"--project", teamHome,
+			"--session", session,
+			"--role", "qa",
+			"--subject", "worktree no-record nudge root regression",
+			"--body", "run",
+			"--json",
+		})
+	})
+	if err != nil {
+		t.Fatalf("dispatch worktree member without launch record: %v\n%s", err, stdout)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("amq calls = %d, want 1", len(*calls))
+	}
+	sendRoot := amqFlagValue((*calls)[0].Arg, "root")
+	wantRoot := filepath.Join(teamHome, ".agent-mail", session)
+	if sendRoot != wantRoot {
+		t.Fatalf("durable send root = %q, want canonical team root %q", sendRoot, wantRoot)
+	}
+	if sentPane != "%7" {
+		t.Fatalf("nudge pane = %q, want %%7 live title/cwd match", sentPane)
+	}
+	canonicalSendRoot := canonicalFilesystemPath(sendRoot)
+	if !strings.Contains(sentPrompt, "--root "+shellQuote(canonicalSendRoot)) {
+		t.Fatalf("nudge prompt root must equal canonical durable-send root %q: %q", canonicalSendRoot, sentPrompt)
+	}
+	worktreeRoot := filepath.Join(worktree, ".agent-mail", session)
+	if strings.Contains(sentPrompt, worktreeRoot) {
+		t.Fatalf("nudge prompt leaked no-record worktree-local root %q: %q", worktreeRoot, sentPrompt)
+	}
+	result := decodeJSONEnvelope[mutationResult](t, stdout)
+	if result.Data.Root != sendRoot || result.Data.Status != "queued_and_nudged" {
+		t.Fatalf("dispatch result = %+v, want root %q and queued_and_nudged", result.Data, sendRoot)
+	}
+}
+
 func TestDefaultDispatchWakePaneUsesStatusRecordForWorktreeMember(t *testing.T) {
 	teamHome := t.TempDir()
 	worktree := t.TempDir()
@@ -682,7 +754,7 @@ func withDispatchWakeSeam(t *testing.T, outcome dispatchOutcome, err error) *[]s
 	t.Helper()
 	var calls []string
 	prev := dispatchWakePane
-	dispatchWakePane = func(projectDir, profile, session string, explicitSession bool, role string, force bool) (dispatchOutcome, error) {
+	dispatchWakePane = func(projectDir, profile, session string, explicitSession bool, role string, force bool, dispatchRoot string) (dispatchOutcome, error) {
 		calls = append(calls, role)
 		return outcome, err
 	}
