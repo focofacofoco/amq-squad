@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -22,6 +23,31 @@ type recordingTerminator struct {
 	name   string // signal label this fake reports via SignalName; defaults to SIGTERM
 	calls  []int
 	failOn map[int]error
+}
+
+// selfCleaningTerminator models AMQ's signal handler: the process exits and
+// removes its own lock. Production raw-wake teardown succeeds only after both
+// effects are observable; tests that exercise that success path must model
+// them explicitly.
+type selfCleaningTerminator struct {
+	recordingTerminator
+	alive     map[int]bool
+	wakeLocks map[int]string
+}
+
+func (r *selfCleaningTerminator) Terminate(pid int) error {
+	if err := r.recordingTerminator.Terminate(pid); err != nil {
+		return err
+	}
+	if r.alive != nil {
+		r.alive[pid] = false
+	}
+	if path := r.wakeLocks[pid]; path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *recordingTerminator) Terminate(pid int) error {
@@ -55,7 +81,26 @@ func TestRetireWakeWithAMQUsesExactPersistedInjectorIdentity(t *testing.T) {
 	if err != nil || result.PID != 4242 {
 		t.Fatalf("retire result=%+v err=%v", result, err)
 	}
-	want := []string{"wake", "retire", "--root", root, "--me", "qa", "--inject-via", "/usr/bin/tmux", "--inject-arg", "load-buffer", "--inject-arg", "-", "--json"}
+	want := []string{"wake", "retire", "--root", root, "--me", "qa", "--inject-via", "/usr/bin/tmux", "--inject-arg", "load-buffer", "--inject-arg", "-", "--retry-until", "drained", "--json"}
+	if !reflect.DeepEqual(got.Arg, want) {
+		t.Fatalf("wake retire args=%q want=%q", got.Arg, want)
+	}
+}
+
+func TestRetireWakeWithAMQReplaysInjectedRetryPolicy(t *testing.T) {
+	previous := runExactWakeRetire
+	t.Cleanup(func() { runExactWakeRetire = previous })
+	root := filepath.Join(t.TempDir(), ".agent-mail", "s")
+	var got amqCommandRequest
+	runExactWakeRetire = func(req amqCommandRequest) ([]byte, error) {
+		got = req
+		return []byte(fmt.Sprintf(`{"status":"retired","agent":"qa","root":%q,"pid":4242}`, root)), nil
+	}
+	rec := launch.Record{CWD: t.TempDir(), WakePID: 4242, WakeInjectVia: "/opt/inject", WakeRetryUntil: wakeRetryUntilInjected}
+	if _, err := retireWakeWithAMQ(rec, root, "qa"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"wake", "retire", "--root", root, "--me", "qa", "--inject-via", "/opt/inject", "--retry-until", "injected", "--json"}
 	if !reflect.DeepEqual(got.Arg, want) {
 		t.Fatalf("wake retire args=%q want=%q", got.Arg, want)
 	}
@@ -85,10 +130,48 @@ func TestReapRawWakeRetirementFallbackIsReported(t *testing.T) {
 	agentDir := t.TempDir()
 	root := filepath.Dir(agentDir)
 	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
-	term := &recordingTerminator{}
-	result := reapStaleArtifacts(agentDir, "qa", root, false, launch.Record{AMQVersion: doctorMinAMQVersion}, term, downFakeProbe(map[int]bool{4242: true}, map[int]bool{4242: true}))
-	if result.WakeRetirement != "raw_signal_fallback" || !strings.Contains(result.summary(), "raw or has no persisted inject-via identity") || len(term.calls) != 1 || term.calls[0] != 4242 {
+	alive := map[int]bool{4242: true}
+	term := &selfCleaningTerminator{alive: alive, wakeLocks: map[int]string{4242: wakeLockPath(agentDir)}}
+	result := reapStaleArtifacts(agentDir, "qa", root, false, launch.Record{AMQVersion: doctorMinAMQVersion}, term, downFakeProbe(alive, map[int]bool{4242: true}))
+	if result.WakeRetirement != "raw_self_cleaned" || !strings.Contains(result.summary(), "verified wake self-cleanup") || len(term.calls) != 1 || term.calls[0] != 4242 || !result.LockRemoved {
 		t.Fatalf("raw retirement result=%+v calls=%v", result, term.calls)
+	}
+}
+
+func TestReapRawCorruptWakeFailsClosedAndPreservesLock(t *testing.T) {
+	agentDir := t.TempDir()
+	path := wakeLockPath(agentDir)
+	if err := os.WriteFile(path, []byte(`{"pid":4242,"PID":5252}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := reapStaleArtifacts(agentDir, "qa", filepath.Dir(agentDir), false, launch.Record{}, &recordingTerminator{}, downFakeProbe(nil, nil))
+	if !result.failed() || result.WakeRetirement != "raw_unverified_lock_preserved" || result.PresenceFlip || result.LockRemoved {
+		t.Fatalf("corrupt raw retirement result=%+v", result)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("corrupt raw lock must be preserved: %v", err)
+	}
+}
+
+func TestReapExactWakeRetirementAcceptsResidueAfterLockRemoval(t *testing.T) {
+	previous := runExactWakeRetire
+	t.Cleanup(func() { runExactWakeRetire = previous })
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root})
+	stubOwnerlessWakeRecovery(t, root, "qa", 4242)
+	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
+		if err := os.Remove(wakeLockPath(agentDir)); err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf(`{"status":"retired_with_residue","agent":"qa","root":%q,"pid":4242,"reason":"state cleanup remains"}`, root)), nil
+	}
+	result := reapStaleArtifacts(agentDir, "qa", root, false, launch.Record{WakePID: 4242, WakeInjectVia: "/opt/inject", WakeRetryUntil: wakeRetryUntilInjected}, &recordingTerminator{}, downFakeProbe(map[int]bool{4242: false}, nil))
+	if result.failed() || result.WakeRetirement != "amq_exact_with_residue" || !result.LockRemoved {
+		t.Fatalf("residue retirement result=%+v", result)
 	}
 }
 
@@ -220,6 +303,35 @@ func TestReapOwnerBoundWakeUsesRecoverOwnerWithoutOwnerlessRetire(t *testing.T) 
 	)
 	if result.failed() || result.WakeRetirement != "amq_owner_recovered" || !result.LockRemoved || recoverCalls != 2 {
 		t.Fatalf("owner-bound recovery result=%+v calls=%d", result, recoverCalls)
+	}
+}
+
+func TestReapResumeOwnerWakeUsesRecoverOwnerWithoutPersistedInjector(t *testing.T) {
+	previousRecover := runExactWakeRecoverOwner
+	previousRetire := runExactWakeRetire
+	t.Cleanup(func() {
+		runExactWakeRecoverOwner = previousRecover
+		runExactWakeRetire = previousRetire
+	})
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root, ResumeOwner: json.RawMessage(`{"pid":5151}`)})
+	runExactWakeRecoverOwner = func(amqCommandRequest) ([]byte, error) {
+		if err := os.Remove(wakeLockPath(agentDir)); err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf(`{"status":"recovered","agent":"qa","root":%q,"pid":4242,"owner_pid":5151,"reason":"exact resume owner released"}`, root)), nil
+	}
+	runExactWakeRetire = func(amqCommandRequest) ([]byte, error) {
+		t.Fatal("resume-owner recovery must not require ownerless inject-via retirement")
+		return nil, nil
+	}
+	result := reapStaleArtifacts(agentDir, "qa", root, false, launch.Record{AgentPID: 5151, WakePID: 4242}, &recordingTerminator{}, downFakeProbe(map[int]bool{4242: false}, nil))
+	if result.failed() || result.WakeRetirement != "amq_owner_recovered" || !result.LockRemoved {
+		t.Fatalf("resume-owner recovery result=%+v", result)
 	}
 }
 
@@ -974,7 +1086,8 @@ func TestExecuteDownReapsOrphanWakeOnDeadAgent(t *testing.T) {
 		LastSeen: time.Now().Add(-5 * time.Second),
 	})
 
-	term := &recordingTerminator{}
+	alive := map[int]bool{1111: false, 3476: true}
+	term := &selfCleaningTerminator{alive: alive, wakeLocks: map[int]string{3476: wakeLockPath(agentDir)}}
 	out, err := runDownExec(t, downExecution{
 		ProjectDir:       dir,
 		RequestedSession: "issue-96",
@@ -983,7 +1096,7 @@ func TestExecuteDownReapsOrphanWakeOnDeadAgent(t *testing.T) {
 		Terminator:       term,
 		// Agent pid dead, wake pid alive; both pass process-match.
 		Probe: downFakeProbe(
-			map[int]bool{1111: false, 3476: true},
+			alive,
 			map[int]bool{1111: false, 3476: true},
 		),
 	})
@@ -1093,7 +1206,8 @@ func TestExecuteDownReapDoesNotTouchForeignPresence(t *testing.T) {
 }
 
 // TestExecuteDownReapsLockOnPIDReuse covers a stale .wake.lock whose PID
-// has been recycled by an unrelated process. The lock must be removed but
+// has been recycled by an unrelated process. The lock must be preserved for
+// AMQ's guarded cleanup but
 // the reused-PID process must not be SIGTERMed.
 func TestExecuteDownReapsLockOnPIDReuse(t *testing.T) {
 	base := setupFakeAMQSessionRoots(t)
@@ -1124,8 +1238,8 @@ func TestExecuteDownReapsLockOnPIDReuse(t *testing.T) {
 	if len(term.calls) != 0 {
 		t.Fatalf("reused PID must not receive SIGTERM; got %v", term.calls)
 	}
-	if _, statErr := os.Stat(filepath.Join(agentDir, ".wake.lock")); !os.IsNotExist(statErr) {
-		t.Errorf("stale lock should still be removed even on PID reuse; stat err = %v", statErr)
+	if _, statErr := os.Stat(filepath.Join(agentDir, ".wake.lock")); statErr != nil {
+		t.Errorf("stale lock must be preserved for AMQ cleanup; stat err = %v", statErr)
 	}
 }
 
@@ -1210,7 +1324,7 @@ func TestExecuteDownReapKeepsLockOnSignalFailure(t *testing.T) {
 
 // TestExecuteDownReapRejectsForeignRootWake covers PID reuse where the
 // live PID belongs to a wake for a different workstream root. The lock
-// must be removed (stale for this dir) and the foreign wake must NOT be
+// must be preserved for AMQ cleanup and the foreign wake must NOT be
 // signaled. Uses the real wakeProcessMatcher predicate via synthetic ps
 // args so a future refactor that calls the wrong matcher is caught here.
 func TestExecuteDownReapRejectsForeignRootWake(t *testing.T) {
@@ -1248,8 +1362,8 @@ func TestExecuteDownReapRejectsForeignRootWake(t *testing.T) {
 	if len(term.calls) != 0 {
 		t.Fatalf("foreign-root wake must not be signaled; got %v", term.calls)
 	}
-	if _, statErr := os.Stat(filepath.Join(agentDir, ".wake.lock")); !os.IsNotExist(statErr) {
-		t.Errorf("foreign-root lock should be removed as stale; stat err = %v", statErr)
+	if _, statErr := os.Stat(filepath.Join(agentDir, ".wake.lock")); statErr != nil {
+		t.Errorf("foreign-root lock must be preserved for AMQ cleanup; stat err = %v", statErr)
 	}
 }
 

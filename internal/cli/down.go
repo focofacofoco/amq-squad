@@ -74,6 +74,8 @@ var (
 	runExactWakeRecoverOwner = runAMQCommand
 	wakeOwnerRecoveryTimeout = 2 * time.Second
 	wakeOwnerRecoveryPoll    = 50 * time.Millisecond
+	wakeSelfCleanupTimeout   = 2 * time.Second
+	wakeSelfCleanupPoll      = 50 * time.Millisecond
 )
 
 // newSignalTerminator returns a terminator that sends SIGTERM by default, or
@@ -824,7 +826,9 @@ func (r reapResult) failed() bool {
 	case "amq_exact_refused",
 		"amq_exact_lock_remaining",
 		"amq_owner_recovery_refused",
-		"amq_owner_recovery_lock_remaining":
+		"amq_owner_recovery_lock_remaining",
+		"raw_unverified_lock_preserved",
+		"raw_cleanup_unverified":
 		return true
 	default:
 		return r.WakeSignalFailed > 0
@@ -861,9 +865,8 @@ func (r reapResult) summary() string {
 // reapStaleArtifacts cleans up the runtime side-effects an agent leaves
 // behind when its process dies but its wake sidecar and/or presence file
 // survive. Returns a reapResult describing what was done so the caller can
-// include it in user-visible reports. Errors during cleanup are best-effort
-// and do not propagate: the goal is to unblock the next launch, not to
-// guarantee atomicity.
+// include it in user-visible reports. AMQ-owned wake locks are preserved unless
+// native exact retirement or the wake's own signal handler removes them.
 func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec launch.Record, term processTerminator, probe duplicateLaunchProbe) reapResult {
 	var result reapResult
 	if agentDir == "" {
@@ -872,8 +875,14 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 
 	lockPath := wakeLockPath(agentDir)
 	lockData, lockErr := os.ReadFile(lockPath)
+	var parsedLock wakeLockFile
+	var lockDecodeErr error
+	if lockErr == nil {
+		parsedLock, lockDecodeErr = decodeWakeLockFile(lockData)
+	}
 	exactRetired := false
-	if lockErr == nil && strings.TrimSpace(rec.WakeInjectVia) != "" {
+	hasPersistedInjector := strings.TrimSpace(rec.WakeInjectVia) != ""
+	if lockErr == nil && (hasPersistedInjector || lockDecodeErr == nil && wakeLockHasOwnerBinding(parsedLock)) {
 		recovered, ownerless, recoverErr := recoverManagedWakeWithAMQ(rec, root, handle)
 		if recoverErr != nil {
 			result.WakeSignalFailed = recovered.PID
@@ -903,7 +912,7 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				result.RetirementDetail = result.WakeSignalError
 			}
 		}
-		if ownerless {
+		if ownerless && hasPersistedInjector {
 			retired, retireErr := retireWakeWithAMQ(rec, root, handle)
 			if retireErr != nil {
 				// AMQ can race a gracefully SIGTERMed wake that removes
@@ -930,6 +939,9 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				result.WakeKilled = retired.PID
 				result.WakeSignalName = "amq wake retire"
 				result.WakeRetirement = "amq_exact"
+				if retired.Status == "retired_with_residue" {
+					result.WakeRetirement = "amq_exact_with_residue"
+				}
 				result.RetirementDetail = retired.Reason
 				exactRetired = true
 				if _, statErr := os.Stat(lockPath); os.IsNotExist(statErr) {
@@ -942,46 +954,61 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				}
 			}
 		}
+		if ownerless && !hasPersistedInjector {
+			result.WakeRetirement = "raw_signal_fallback"
+			result.RetirementDetail = "AMQ verified the wake is ownerless and no persisted inject-via identity is available"
+		}
 	} else if lockErr == nil {
 		result.WakeRetirement = "raw_signal_fallback"
 		result.RetirementDetail = "wake is raw or has no persisted inject-via identity"
 	}
-	// canRemoveLock tracks whether we've confirmed the lock is safe to
-	// remove: confirmed stale (dead PID / PID-reused / corrupt), or we
-	// successfully signaled the live matching wake. If a matching wake is
-	// live and we FAIL to signal it, leaving the lock in place keeps the
-	// next preflight honest — operators must not be told the system is
-	// clean when a foreign-uid wake is still running.
-	canRemoveLock := false
+	// AMQ 0.53+ owns wake-lock quarantine, state binding, and exact-object
+	// removal. The raw compatibility path may signal a verified live process,
+	// but it never unlinks the lock itself. Stale valid locks are preserved for
+	// AMQ's guarded next acquisition; corrupt or ambiguous locks fail closed.
 	if !exactRetired && lockErr == nil {
-		var lock wakeLockFile
-		switch jsonErr := json.Unmarshal(lockData, &lock); {
-		case jsonErr != nil:
-			// Corrupt lock: no PID to verify, safe to remove.
-			canRemoveLock = true
+		lock, decodeErr := parsedLock, lockDecodeErr
+		switch {
+		case decodeErr != nil:
+			result.WakeRetirement = "raw_unverified_lock_preserved"
+			result.RetirementDetail = "unverified wake lock preserved for AMQ inspection: " + decodeErr.Error()
+			result.WakeSignalError = result.RetirementDetail
+			return result
 		case lock.PID <= 0:
-			canRemoveLock = true
+			result.WakeRetirement = "raw_stale_preserved"
+			result.RetirementDetail = "wake lock has no usable pid; preserved for AMQ guarded cleanup"
 		case strictRoot && strings.TrimSpace(lock.Root) != "" && !rootsMatch(lock.Root, root):
 			// The exact named-profile stop exception trusts only the selected
 			// root. A lock copied or poisoned with an explicit legacy/foreign
 			// root is stale for this named agent dir; never inspect or signal
 			// the PID it names. Empty roots retain the historical selected-root
 			// fallback for older locks.
-			canRemoveLock = true
+			result.WakeRetirement = "raw_stale_preserved"
+			result.RetirementDetail = "foreign-root wake lock preserved for AMQ guarded cleanup"
 		case !probe.PIDAlive(lock.PID):
-			canRemoveLock = true
+			result.WakeRetirement = "raw_stale_preserved"
+			result.RetirementDetail = "dead-pid wake lock preserved for AMQ guarded cleanup"
 		default:
 			expectedRoot := root
 			if lock.Root != "" {
 				expectedRoot = lock.Root
 			}
 			if !probe.ProcessMatch(lock.PID, wakeProcessMatcher(handle, expectedRoot)) {
-				// PID-reuse by an unrelated process: lock is stale.
-				canRemoveLock = true
+				result.WakeRetirement = "raw_stale_preserved"
+				result.RetirementDetail = "unrelated-pid wake lock preserved for AMQ guarded cleanup"
 			} else if termErr := term.Terminate(lock.PID); termErr == nil {
 				result.WakeKilled = lock.PID
 				result.WakeSignalName = signalNameOf(term)
-				canRemoveLock = true
+				if wakeSelfCleanedAfterRetire(lockPath, lock.PID, probe) {
+					result.LockRemoved = true
+					result.WakeRetirement = "raw_self_cleaned"
+					result.RetirementDetail = "verified wake self-cleanup after signal: pid dead, lock absent"
+				} else {
+					result.WakeSignalError = "wake accepted signal but exact self-cleanup was not verified; lock and presence preserved"
+					result.WakeRetirement = "raw_cleanup_unverified"
+					result.RetirementDetail = result.WakeSignalError
+					return result
+				}
 			} else {
 				// Live matching wake we could not signal. Surface the
 				// failure and leave both lock and presence intact so
@@ -989,11 +1016,6 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				result.WakeSignalFailed = lock.PID
 				result.WakeSignalError = termErr.Error()
 				return result
-			}
-		}
-		if canRemoveLock {
-			if rmErr := os.Remove(lockPath); rmErr == nil {
-				result.LockRemoved = true
 			}
 		}
 	}
@@ -1184,6 +1206,11 @@ func retireWakeWithAMQ(rec launch.Record, root, handle string) (nativeWakeRetire
 	for _, arg := range rec.WakeInjectArgs {
 		args = append(args, "--inject-arg", arg)
 	}
+	retryUntil, retryErr := normalizeWakeRetryUntil(rec.WakeRetryUntil)
+	if retryErr != nil {
+		return nativeWakeRetireResult{}, fmt.Errorf("amq exact wake retirement: %w", retryErr)
+	}
+	args = append(args, "--retry-until", retryUntil)
 	args = append(args, "--json")
 	out, err := runExactWakeRetire(amqCommandRequest{Dir: rec.CWD, Env: os.Environ(), Arg: args})
 	var result nativeWakeRetireResult
@@ -1196,7 +1223,7 @@ func retireWakeWithAMQ(rec launch.Record, root, handle string) (nativeWakeRetire
 	if err != nil {
 		return result, fmt.Errorf("amq exact wake retirement status %s: %w", result.Status, err)
 	}
-	if result.Status != "retired" || result.Agent != handle || !rootsMatch(result.Root, root) {
+	if (result.Status != "retired" && result.Status != "retired_with_residue") || result.Agent != handle || !rootsMatch(result.Root, root) {
 		return result, fmt.Errorf("amq exact wake retirement returned mismatched result status=%s agent=%s root=%s", result.Status, result.Agent, result.Root)
 	}
 	if rec.WakePID <= 0 || result.PID != rec.WakePID {
@@ -1208,7 +1235,7 @@ func retireWakeWithAMQ(rec launch.Record, root, handle string) (nativeWakeRetire
 // wakeSelfCleanedAfterRetire polls briefly because the SIGTERMed wake may
 // still be mid-exit when exact retirement returns refused.
 func wakeSelfCleanedAfterRetire(lockPath string, wakePID int, probe duplicateLaunchProbe) bool {
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(wakeSelfCleanupTimeout)
 	for {
 		_, statErr := os.Stat(lockPath)
 		if os.IsNotExist(statErr) && !probe.PIDAlive(wakePID) {
@@ -1217,7 +1244,7 @@ func wakeSelfCleanedAfterRetire(lockPath string, wakePID int, probe duplicateLau
 		if time.Now().After(deadline) {
 			return false
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(wakeSelfCleanupPoll)
 	}
 }
 
