@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -84,6 +85,75 @@ func TestStopPanePrepareSignalCloseOrdering(t *testing.T) {
 	}
 	if inspections != 2 || report.Status != downStatusStopped || report.Pane.Outcome != PaneCleanupClosed {
 		t.Fatalf("report=%+v inspections=%d", report, inspections)
+	}
+}
+
+func TestStopFailsClosedWhenWakeLockReappearsAfterPaneTeardown(t *testing.T) {
+	previousTimeout, previousPoll := wakeSelfCleanupTimeout, wakeSelfCleanupPoll
+	wakeSelfCleanupTimeout = 50 * time.Millisecond
+	wakeSelfCleanupPoll = time.Millisecond
+	t.Cleanup(func() {
+		wakeSelfCleanupTimeout, wakeSelfCleanupPoll = previousTimeout, previousPoll
+	})
+
+	configured, member, record, pane, project := completeDownPaneFixture(t)
+	record.WakePID = 4343
+	if err := launch.Write(filepath.Join(record.Root, "agents", record.Handle), record); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(record.Root, "agents", record.Handle)
+	lockPath := wakeLockPath(agentDir)
+
+	paneClosed := false
+	wakeChecks := 0
+	probe := downFakeProbe(map[int]bool{record.AgentPID: true}, map[int]bool{record.AgentPID: true})
+	basePIDAlive := probe.PIDAlive
+	probe.PIDAlive = func(pid int) bool {
+		if pid != record.WakePID {
+			return basePIDAlive(pid)
+		}
+		if !paneClosed {
+			t.Fatal("recorded wake was verified before pane teardown completed")
+		}
+		wakeChecks++
+		if wakeChecks == 1 {
+			// The one-shot reap observed no lock. Model the exiting wake
+			// publishing it immediately before its PID becomes observably dead.
+			writeWakeLock(t, agentDir, wakeLockFile{PID: record.WakePID, Root: record.Root})
+		}
+		return false
+	}
+
+	report := terminateMember(
+		configured, project, team.DefaultProfile, member, record.Session,
+		&recordingTerminator{}, probe, nil, true,
+		PaneCleanupDependencies{
+			Inspect: func(string) tmuxpane.PaneInspection {
+				return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionFound, Pane: pane}
+			},
+			ChildrenIndex: func() (func(int) []int, error) {
+				return func(parent int) []int {
+					if parent == pane.PID {
+						return []int{record.AgentPID}
+					}
+					return nil
+				}, nil
+			},
+			Close: func(string) error {
+				paneClosed = true
+				return nil
+			},
+		},
+	)
+
+	if report.Status != downStatusFailed || !strings.Contains(report.Detail, "wake retirement=raw_cleanup_unverified") || !strings.Contains(report.Detail, "post-teardown verification timed out") {
+		t.Fatalf("report=%+v, want fail-closed post-teardown wake verification", report)
+	}
+	if wakeChecks == 0 {
+		t.Fatal("post-teardown wake verification did not inspect the recorded wake pid")
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("reappeared wake lock was not preserved for inspection: %v", err)
 	}
 }
 

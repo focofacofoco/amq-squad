@@ -792,6 +792,21 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 	// without this, the per-member detail says "wake survived" but the summary
 	// still reads as a clean success.
 	cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe)
+	if !cleaned.failed() && rec.WakePID > 0 {
+		if !wakeSelfCleanedAfterRetire(wakeLockPath(report.AgentDir), rec.WakePID, probe) {
+			priorRetirement := cleaned.WakeRetirement
+			cleaned.LockRemoved = false
+			cleaned.WakeRetirement = "raw_cleanup_unverified"
+			cleaned.RetirementDetail = fmt.Sprintf("post-teardown verification timed out waiting for recorded wake pid %d to be dead and .wake.lock to be absent", rec.WakePID)
+			if priorRetirement != "" {
+				cleaned.RetirementDetail += "; prior retirement=" + priorRetirement
+			}
+		} else if flipFreshActivePresenceOffline(report.AgentDir, handle, probe) {
+			// The final wake exit may have landed a late active presence write
+			// after reapStaleArtifacts' earlier bounded re-assertion.
+			cleaned.PresenceFlip = true
+		}
+	}
 	if cleaned.failed() {
 		report.Status = downStatusFailed
 		report.Detail = fmt.Sprintf("%s sent to pid %d; %s", sigName, rec.AgentPID, cleaned.summary())
@@ -1237,13 +1252,17 @@ func retireWakeWithAMQ(rec launch.Record, root, handle string) (nativeWakeRetire
 }
 
 // wakeSelfCleanedAfterRetire polls briefly because the SIGTERMed wake may
-// still be mid-exit when exact retirement returns refused.
+// still be mid-exit when exact retirement returns refused. PID death must be
+// observed before lock absence: checking the lock first could sample a
+// transient absence immediately before the still-live wake rematerializes it.
 func wakeSelfCleanedAfterRetire(lockPath string, wakePID int, probe duplicateLaunchProbe) bool {
 	deadline := time.Now().Add(wakeSelfCleanupTimeout)
 	for {
-		_, statErr := os.Stat(lockPath)
-		if os.IsNotExist(statErr) && !probe.PIDAlive(wakePID) {
-			return true
+		if !probe.PIDAlive(wakePID) {
+			_, statErr := os.Stat(lockPath)
+			if os.IsNotExist(statErr) {
+				return true
+			}
 		}
 		if time.Now().After(deadline) {
 			return false
