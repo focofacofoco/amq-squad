@@ -296,6 +296,55 @@ func TestSessionNotifierVerifiedWakeOwnsInput(t *testing.T) {
 	}
 }
 
+func TestSessionNotifierForeignRootWakeFallsBackBeforeReservationBecomesPermanent(t *testing.T) {
+	project := canonicalFilesystemPath(t.TempDir())
+	const (
+		profile = "review"
+		session = "wake"
+		handle  = "dev"
+		paneID  = "%81"
+		wakePID = 4281
+	)
+	root := filepath.Join(project, ".agent-mail", profile, session)
+	foreignRoot := filepath.Join(project, ".agent-mail", profile, "foreign")
+	agentDir := filepath.Join(root, "agents", handle)
+	if err := os.MkdirAll(filepath.Join(agentDir, "inbox", "new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := launch.Write(agentDir, launch.Record{
+		Schema: launch.SchemaVersion, Role: handle, Handle: handle, Binary: "codex",
+		Session: session, TeamProfile: profile, TeamHome: project, CWD: project,
+		Root: root, BaseRoot: filepath.Dir(root), Tmux: &launch.TmuxInfo{PaneID: paneID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLock(t, agentDir, wakeLockFile{PID: wakePID, Root: foreignRoot, Agent: handle, Started: time.Now()})
+
+	previousProbe := defaultDuplicateLaunchProbe
+	defaultDuplicateLaunchProbe = duplicateLaunchProbe{
+		PIDAlive: func(pid int) bool { return pid == wakePID },
+		ProcessMatch: func(pid int, predicate func(string) bool) bool {
+			return pid == wakePID && predicate("amq wake --me "+handle+" --root "+foreignRoot)
+		},
+		Now: time.Now,
+	}
+	t.Cleanup(func() { defaultDuplicateLaunchProbe = previousProbe })
+
+	message := filepath.Join(agentDir, "inbox", "new", "foreign-root.md")
+	writeSessionNotifierMessage(t, message, "foreign-root")
+	sends := 0
+	nudged, err := notifySessionInboxArrival(root, profile, session, message, newSessionNotifierAttemptLedger(nil), nil, func(gotPane, _ string) error {
+		if gotPane != paneID {
+			t.Fatalf("fallback pane = %q, want %q", gotPane, paneID)
+		}
+		sends++
+		return nil
+	})
+	if err != nil || !nudged || sends != 1 {
+		t.Fatalf("foreign-root wake fallback nudged=%t sends=%d err=%v, want exactly one fallback", nudged, sends, err)
+	}
+}
+
 func TestSessionNotifierPersistentReservationSurvivesFailedSend(t *testing.T) {
 	project := canonicalFilesystemPath(t.TempDir())
 	const (

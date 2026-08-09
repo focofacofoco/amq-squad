@@ -649,16 +649,25 @@ func resolveExternalWakeInjectConfig(requested wakeInjectConfig, modeExplicit, v
 		Args:       append([]string(nil), requested.Args...),
 		RetryUntil: strings.TrimSpace(requested.RetryUntil),
 	}
-	inheritedInjector := false
-	if !modeExplicit && existingErr == nil && existing.External && launchRecordMatchesSamePaneIdentity(existing, role, handle, profile, session, root, paneID) {
+	samePaneIdentity := existingErr == nil && existing.External && launchRecordMatchesSamePaneIdentity(existing, role, handle, profile, session, root, paneID)
+	if !modeExplicit && samePaneIdentity {
 		resolved.Mode = strings.TrimSpace(existing.WakeInjectMode)
 		if !viaExplicit && !argsExplicit {
 			resolved.Via = strings.TrimSpace(existing.WakeInjectVia)
 			resolved.Args = append([]string(nil), existing.WakeInjectArgs...)
 			resolved.RetryUntil = strings.TrimSpace(existing.WakeRetryUntil)
 			resolved.RetryTransition = cloneWakeRetryTransition(existing.WakeRetryTransition)
-			inheritedInjector = true
 		}
+	}
+	sameInjector := samePaneIdentity && resolved.Via != "" && strings.TrimSpace(existing.WakeInjectVia) != "" &&
+		resolved.Via == strings.TrimSpace(existing.WakeInjectVia) && equalWakeInjectArgs(resolved.Args, existing.WakeInjectArgs)
+	if sameInjector {
+		// Flag explicitness does not create a new injector. Preserve the live
+		// target's policy and audit when via/args were repeated verbatim.
+		if resolved.RetryUntil == "" {
+			resolved.RetryUntil = strings.TrimSpace(existing.WakeRetryUntil)
+		}
+		resolved.RetryTransition = cloneWakeRetryTransition(existing.WakeRetryTransition)
 	}
 	mode, err := normalizeWakeInjectMode(resolved.Mode)
 	if err != nil {
@@ -675,14 +684,15 @@ func resolveExternalWakeInjectConfig(requested wakeInjectConfig, modeExplicit, v
 		resolved.RetryUntil = ""
 		return resolved, nil
 	}
-	if inheritedInjector && (resolved.RetryUntil == "" || strings.EqualFold(resolved.RetryUntil, wakeRetryUntilDrained)) {
+	existingRetryUntil := strings.TrimSpace(existing.WakeRetryUntil)
+	if sameInjector && (existingRetryUntil == "" || strings.EqualFold(existingRetryUntil, wakeRetryUntilDrained)) {
 		// Active re-registration is the upgrade boundary for legacy external
 		// injectors. AMQ treated both an omitted value and explicit drained as
 		// reannounce-until-inbox-progress; migrate that live target to the
 		// presentation acknowledgement introduced in 0.54. Passive record reads
 		// never call this resolver and therefore never rewrite policy at rest.
 		source := "persisted"
-		if strings.TrimSpace(resolved.RetryUntil) == "" {
+		if existingRetryUntil == "" {
 			source = "legacy_omitted"
 		}
 		resolved.RetryUntil = wakeRetryUntilInjected
@@ -701,6 +711,18 @@ func resolveExternalWakeInjectConfig(requested wakeInjectConfig, modeExplicit, v
 		return wakeInjectConfig{}, fmt.Errorf("stored external wake config: %w", err)
 	}
 	return resolved, nil
+}
+
+func equalWakeInjectArgs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func cloneWakeRetryTransition(in *launch.WakeRetryTransition) *launch.WakeRetryTransition {
