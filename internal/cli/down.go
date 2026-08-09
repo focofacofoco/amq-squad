@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -68,18 +69,22 @@ type signalTerminator struct {
 }
 
 type downTerminatorFactory func(force bool) processTerminator
+type wakeCheckRunner = amqCommandRunner
 
 var (
 	runExactWakeRetire       = runAMQCommand
 	runExactWakeRecoverOwner = runAMQCommand
 	wakeOwnerRecoveryTimeout = 2 * time.Second
 	wakeOwnerRecoveryPoll    = 50 * time.Millisecond
-	// A SIGTERMed wake can take several seconds to finish its locked teardown on
-	// a loaded Darwin runner. Keep the verification bounded, but align it with
-	// the real wake lifecycle deadline so success still requires both a dead PID
-	// and an absent lock rather than treating signal delivery as completion.
-	wakeSelfCleanupTimeout = 8 * time.Second
-	wakeSelfCleanupPoll    = 50 * time.Millisecond
+	// A wake can take well beyond the old 8s filesystem-poll window to finish
+	// its locked teardown on a loaded Darwin runner. AMQ owns that lifecycle, so
+	// down polls its authoritative wake-check classification through a bounded
+	// deadline aligned with the real teardown path. Filesystem fallback is only
+	// for an unavailable check command and needs several consecutive samples.
+	wakeQuiescenceTimeout       = 20 * time.Second
+	wakeQuiescenceCheckTimeout  = 2 * time.Second
+	wakeQuiescencePoll          = 100 * time.Millisecond
+	wakeQuiescenceStableSamples = 5
 )
 
 // newSignalTerminator returns a terminator that sends SIGTERM by default, or
@@ -137,16 +142,16 @@ func signalNameOf(term processTerminator) string {
 func runDown(args []string) error {
 	return runDownWithDeps(args, func(force bool) processTerminator {
 		return newSignalTerminator(force)
-	}, defaultDuplicateLaunchProbe)
+	}, defaultDuplicateLaunchProbe, runAMQCommand)
 }
 
 // runDownWithDeps keeps the production stop dependencies immutable while
 // allowing parser-to-execution tests to supply inert process controls.
-func runDownWithDeps(args []string, terminatorForForce downTerminatorFactory, probe duplicateLaunchProbe) error {
-	return runDownWithPaneDeps(args, terminatorForForce, probe, PaneCleanupDependencies{})
+func runDownWithDeps(args []string, terminatorForForce downTerminatorFactory, probe duplicateLaunchProbe, wakeCheck wakeCheckRunner) error {
+	return runDownWithPaneDeps(args, terminatorForForce, probe, PaneCleanupDependencies{}, wakeCheck)
 }
 
-func runDownWithPaneDeps(args []string, terminatorForForce downTerminatorFactory, probe duplicateLaunchProbe, paneDeps PaneCleanupDependencies) error {
+func runDownWithPaneDeps(args []string, terminatorForForce downTerminatorFactory, probe duplicateLaunchProbe, paneDeps PaneCleanupDependencies, wakeCheck wakeCheckRunner) error {
 	fs := flag.NewFlagSet("down", flag.ContinueOnError)
 	sessionName := fs.String("session", "", "AMQ workstream session name (default: team workstream)")
 	role := fs.String("role", "", "narrow to a single configured role")
@@ -200,6 +205,7 @@ func runDownWithPaneDeps(args []string, terminatorForForce downTerminatorFactory
 		JSON:       *jsonOut,
 		DryRun:     *dryRun,
 		PaneDeps:   paneDeps,
+		WakeCheck:  wakeCheck,
 	})
 }
 
@@ -257,12 +263,17 @@ type downExecution struct {
 	JSON       bool
 	DryRun     bool
 	PaneDeps   PaneCleanupDependencies
+	WakeCheck  wakeCheckRunner
 }
 
 func executeDown(d downExecution) error {
 	verb := d.Verb
 	if verb == "" {
 		verb = "down"
+	}
+	wakeCheck := d.WakeCheck
+	if wakeCheck == nil {
+		wakeCheck = runAMQCommand
 	}
 	t, err := team.ReadProfile(d.ProjectDir, d.Profile)
 	if err != nil {
@@ -370,7 +381,7 @@ func executeDown(d downExecution) error {
 		if d.DryRun {
 			report = previewDownMember(t, d.ProjectDir, d.Profile, m, workstream, d.Terminator, d.Probe)
 		} else {
-			report = terminateMember(t, d.ProjectDir, d.Profile, m, workstream, d.Terminator, d.Probe, exceptionScope, d.ClosePanes, d.PaneDeps)
+			report = terminateMember(t, d.ProjectDir, d.Profile, m, workstream, d.Terminator, d.Probe, exceptionScope, d.ClosePanes, d.PaneDeps, wakeCheck)
 			switch report.Status {
 			case downStatusStopped, downStatusCleaned, downStatusNotLive:
 				if err := markDownLaunchRecordStopped(report, time.Now().UTC()); err != nil {
@@ -653,7 +664,7 @@ func previewDownMember(t team.Team, projectDir, profile string, m team.Member, w
 	return report
 }
 
-func terminateMember(t team.Team, projectDir, profile string, m team.Member, workstream string, term processTerminator, probe duplicateLaunchProbe, exactDownScope *exactDownNamespaceScope, closePanes bool, paneDeps PaneCleanupDependencies) downReport {
+func terminateMember(t team.Team, projectDir, profile string, m team.Member, workstream string, term processTerminator, probe duplicateLaunchProbe, exactDownScope *exactDownNamespaceScope, closePanes bool, paneDeps PaneCleanupDependencies, wakeCheck wakeCheckRunner) downReport {
 	report, rec, ok := resolveDownMemberRecord(t, projectDir, profile, m, workstream, probe, closePanes)
 	if !ok {
 		return report
@@ -705,7 +716,7 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 			report.Detail = fmt.Sprintf("no pid captured at launch — may still be live (fresh presence, last seen %s); cannot signal", lastSeen.UTC().Format(time.RFC3339))
 			return report
 		}
-		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe)
+		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe, wakeCheck)
 		if cleaned.failed() {
 			report.Status = downStatusFailed
 			report.Detail = "no pid captured at launch; " + cleaned.summary()
@@ -727,7 +738,7 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 	runtimeIdentity := classifyLaunchPIDRuntimeIdentity(rec, binary, probe)
 	if !runtimeIdentity.PIDAlive {
 		report.Pane = prepare(PaneCleanupAgentAttestation{PID: rec.AgentPID, Binary: rec.Binary, Live: false}).Result
-		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe)
+		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe, wakeCheck)
 		if cleaned.failed() {
 			report.Status = downStatusFailed
 			report.Detail = fmt.Sprintf("recorded pid %d is not alive; %s", rec.AgentPID, cleaned.summary())
@@ -744,7 +755,7 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 	}
 	if !runtimeIdentity.PIDLive {
 		report.Pane = prepare(PaneCleanupAgentAttestation{PID: rec.AgentPID, Binary: binary, Live: true, BinaryMatch: runtimeIdentity.BinaryMatch}).Result
-		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe)
+		cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe, wakeCheck)
 		if cleaned.failed() {
 			report.Status = downStatusFailed
 			report.Detail = fmt.Sprintf("pid %d does not match recorded runtime identity (PID reuse); %s", rec.AgentPID, cleaned.summary())
@@ -791,16 +802,17 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 	// that as downStatusFailed so renderDownReports counts it correctly;
 	// without this, the per-member detail says "wake survived" but the summary
 	// still reads as a clean success.
-	cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe)
-	if !cleaned.failed() && rec.WakePID > 0 {
-		if !wakeSelfCleanedAfterRetire(wakeLockPath(report.AgentDir), rec.WakePID, probe) {
-			priorRetirement := cleaned.WakeRetirement
+	cleaned := reapStaleArtifacts(report.AgentDir, handle, report.Root, strictWakeRoot, rec, term, probe, wakeCheck)
+	if !cleaned.failed() {
+		wakePID := rec.WakePID
+		if wakePID <= 0 {
+			wakePID = cleaned.WakeKilled
+		}
+		quiescence := waitForWakeQuiescence(report.AgentDir, report.Root, handle, wakePID, probe, wakeCheck)
+		cleaned.WakeQuiescence = quiescence.Status
+		cleaned.QuiescenceDetail = quiescence.Detail
+		if !quiescence.Verified {
 			cleaned.LockRemoved = false
-			cleaned.WakeRetirement = "raw_cleanup_unverified"
-			cleaned.RetirementDetail = fmt.Sprintf("post-teardown verification timed out waiting for recorded wake pid %d to be dead and .wake.lock to be absent", rec.WakePID)
-			if priorRetirement != "" {
-				cleaned.RetirementDetail += "; prior retirement=" + priorRetirement
-			}
 		} else if flipFreshActivePresenceOffline(report.AgentDir, handle, probe) {
 			// The final wake exit may have landed a late active presence write
 			// after reapStaleArtifacts' earlier bounded re-assertion.
@@ -814,7 +826,7 @@ func terminateMember(t team.Team, projectDir, profile string, m team.Member, wor
 	}
 	report.Status = downStatusStopped
 	report.Detail = fmt.Sprintf("%s sent to pid %d", sigName, rec.AgentPID)
-	if cleaned.any() {
+	if cleaned.reportable() {
 		report.Detail += "; " + cleaned.summary()
 	}
 	return report
@@ -834,10 +846,16 @@ type reapResult struct {
 	PresenceFlip     bool
 	WakeRetirement   string
 	RetirementDetail string
+	WakeQuiescence   string
+	QuiescenceDetail string
 }
 
 func (r reapResult) any() bool {
 	return r.WakeKilled > 0 || r.LockRemoved || r.PresenceFlip
+}
+
+func (r reapResult) reportable() bool {
+	return r.any() || r.WakeRetirement != "" || r.WakeQuiescence != ""
 }
 
 func (r reapResult) failed() bool {
@@ -850,7 +868,7 @@ func (r reapResult) failed() bool {
 		"raw_cleanup_unverified":
 		return true
 	default:
-		return r.WakeSignalFailed > 0
+		return r.WakeSignalFailed > 0 || r.WakeQuiescence == "unverified"
 	}
 }
 
@@ -865,6 +883,9 @@ func (r reapResult) summary() string {
 	}
 	if r.WakeRetirement != "" {
 		parts = append(parts, fmt.Sprintf("wake retirement=%s (%s)", r.WakeRetirement, r.RetirementDetail))
+	}
+	if r.WakeQuiescence != "" {
+		parts = append(parts, fmt.Sprintf("wake quiescence=%s (%s)", r.WakeQuiescence, r.QuiescenceDetail))
 	}
 	if r.WakeSignalFailed > 0 {
 		parts = append(parts, fmt.Sprintf("failed to signal wake pid %d (%s); lock and presence left intact", r.WakeSignalFailed, r.WakeSignalError))
@@ -886,7 +907,7 @@ func (r reapResult) summary() string {
 // survive. Returns a reapResult describing what was done so the caller can
 // include it in user-visible reports. AMQ-owned wake locks are preserved unless
 // native exact retirement or the wake's own signal handler removes them.
-func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec launch.Record, term processTerminator, probe duplicateLaunchProbe) reapResult {
+func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec launch.Record, term processTerminator, probe duplicateLaunchProbe, wakeCheck wakeCheckRunner) reapResult {
 	var result reapResult
 	if agentDir == "" {
 		return result
@@ -922,13 +943,16 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 			result.WakeRetirement = "amq_owner_recovered"
 			result.RetirementDetail = recovered.Reason
 			exactRetired = true
-			if _, statErr := os.Stat(lockPath); os.IsNotExist(statErr) {
+			quiescence := waitForWakeQuiescence(agentDir, root, handle, result.WakeKilled, probe, wakeCheck)
+			result.WakeQuiescence = quiescence.Status
+			result.QuiescenceDetail = quiescence.Detail
+			if quiescence.Verified {
 				result.LockRemoved = true
 			} else {
 				result.WakeSignalFailed = result.WakeKilled
-				result.WakeSignalError = "owner recovery returned success but the wake lock is still present; ownerless retirement and legacy signaling suppressed"
+				result.WakeSignalError = "owner recovery returned success but authoritative wake quiescence was not verified; ownerless retirement and legacy signaling suppressed"
 				result.WakeRetirement = "amq_owner_recovery_lock_remaining"
-				result.RetirementDetail = result.WakeSignalError
+				result.RetirementDetail = result.WakeSignalError + ": " + quiescence.Detail
 			}
 		}
 		if ownerless && hasPersistedInjector {
@@ -937,11 +961,14 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				// AMQ can race a gracefully SIGTERMed wake that removes
 				// its own lock before the retirer re-checks. Recognize that exact
 				// terminal state instead of reporting a spurious refusal.
-				if rec.WakePID > 0 && wakeSelfCleanedAfterRetire(lockPath, rec.WakePID, probe) {
+				quiescence := waitForWakeQuiescence(agentDir, root, handle, rec.WakePID, probe, wakeCheck)
+				result.WakeQuiescence = quiescence.Status
+				result.QuiescenceDetail = quiescence.Detail
+				if quiescence.Verified {
 					result.WakeKilled = rec.WakePID
 					result.WakeSignalName = "amq wake retire"
 					result.WakeRetirement = nativeWakeRetireSelfCleaned
-					result.RetirementDetail = "wake removed its own lock after graceful termination; end state verified: pid dead, lock absent"
+					result.RetirementDetail = "wake removed its own lock after graceful termination; " + quiescence.Detail
 					result.LockRemoved = true
 					exactRetired = true
 				} else {
@@ -963,13 +990,16 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				}
 				result.RetirementDetail = retired.Reason
 				exactRetired = true
-				if _, statErr := os.Stat(lockPath); os.IsNotExist(statErr) {
+				quiescence := waitForWakeQuiescence(agentDir, root, handle, retired.PID, probe, wakeCheck)
+				result.WakeQuiescence = quiescence.Status
+				result.QuiescenceDetail = quiescence.Detail
+				if quiescence.Verified {
 					result.LockRemoved = true
 				} else {
 					result.WakeSignalFailed = retired.PID
-					result.WakeSignalError = "native retirement returned success but the wake lock is still present; legacy signaling suppressed"
+					result.WakeSignalError = "native retirement returned success but authoritative wake quiescence was not verified; legacy signaling suppressed"
 					result.WakeRetirement = "amq_exact_lock_remaining"
-					result.RetirementDetail = result.WakeSignalError
+					result.RetirementDetail = result.WakeSignalError + ": " + quiescence.Detail
 				}
 			}
 		}
@@ -1018,14 +1048,17 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 			} else if termErr := term.Terminate(lock.PID); termErr == nil {
 				result.WakeKilled = lock.PID
 				result.WakeSignalName = signalNameOf(term)
-				if wakeSelfCleanedAfterRetire(lockPath, lock.PID, probe) {
+				quiescence := waitForWakeQuiescence(agentDir, root, handle, lock.PID, probe, wakeCheck)
+				result.WakeQuiescence = quiescence.Status
+				result.QuiescenceDetail = quiescence.Detail
+				if quiescence.Verified {
 					result.LockRemoved = true
 					result.WakeRetirement = "raw_self_cleaned"
-					result.RetirementDetail = "verified wake self-cleanup after signal: pid dead, lock absent"
+					result.RetirementDetail = "verified wake self-cleanup after signal: " + quiescence.Detail
 				} else {
-					result.WakeSignalError = "wake accepted signal but exact self-cleanup was not verified; lock and presence preserved"
+					result.WakeSignalError = "wake accepted signal but authoritative quiescence was not verified; lock and presence preserved"
 					result.WakeRetirement = "raw_cleanup_unverified"
-					result.RetirementDetail = result.WakeSignalError
+					result.RetirementDetail = result.WakeSignalError + ": " + quiescence.Detail
 					return result
 				}
 			} else {
@@ -1251,29 +1284,161 @@ func retireWakeWithAMQ(rec launch.Record, root, handle string) (nativeWakeRetire
 	return result, nil
 }
 
-// wakeSelfCleanedAfterRetire polls briefly because the SIGTERMed wake may
-// still be mid-exit when exact retirement returns refused. PID death must be
-// observed before lock absence: checking the lock first could sample a
-// transient absence immediately before the still-live wake rematerializes it.
-func wakeSelfCleanedAfterRetire(lockPath string, wakePID int, probe duplicateLaunchProbe) bool {
-	deadline := time.Now().Add(wakeSelfCleanupTimeout)
+type wakeQuiescenceResult struct {
+	Verified bool
+	Status   string
+	Detail   string
+}
+
+// waitForWakeQuiescence asks AMQ, the owner of wake lifecycle state, whether
+// the exact handle/root has reached the stable no-wake classification. A
+// missing or undecodable command surface is the only condition that enables
+// the compatibility fallback. Valid-but-live, stale, or unverified AMQ state
+// remains authoritative and must converge to missing before the deadline.
+func waitForWakeQuiescence(agentDir, root, handle string, wakePID int, probe duplicateLaunchProbe, wakeCheck wakeCheckRunner) wakeQuiescenceResult {
+	deadline := time.Now().Add(wakeQuiescenceTimeout)
+	lastStatus := "unknown"
+	for {
+		// A wake-check subprocess can itself block while the wake is inside its
+		// teardown critical section. Do not let one blocked observation consume
+		// the entire quiescence budget: command unavailability must leave enough
+		// time for the consecutive-sample compatibility proof.
+		checkDeadline := time.Now().Add(wakeQuiescenceCheckTimeout)
+		if checkDeadline.After(deadline) {
+			checkDeadline = deadline
+		}
+		checkContext, cancelCheck := context.WithDeadline(context.Background(), checkDeadline)
+		checked, available, err := inspectWakeQuiescence(checkContext, root, handle, wakeCheck)
+		cancelCheck()
+		if !available {
+			return waitForStableWakeFilesystem(agentDir, wakePID, probe, deadline, err)
+		}
+		if err != nil {
+			return wakeQuiescenceResult{Status: "unverified", Detail: err.Error()}
+		}
+		lastStatus = checked.WakeStatus
+		if checked.WakeStatus == "missing" && !checked.LiveWake && checked.WakePID == 0 {
+			return wakeQuiescenceResult{
+				Verified: true,
+				Status:   "amq_missing",
+				Detail:   "authoritative amq wake check confirmed wake_status=missing for the exact handle/root",
+			}
+		}
+		if time.Now().After(deadline) {
+			return wakeQuiescenceResult{
+				Status: "unverified",
+				Detail: fmt.Sprintf(
+					"authoritative amq wake check did not converge to missing within %s (last status=%s live=%t pid=%d)",
+					wakeQuiescenceTimeout,
+					lastStatus,
+					checked.LiveWake,
+					checked.WakePID,
+				),
+			}
+		}
+		time.Sleep(wakeQuiescencePoll)
+	}
+}
+
+func inspectWakeQuiescence(ctx context.Context, root, handle string, wakeCheck wakeCheckRunner) (wakeCheckBindingResult, bool, error) {
+	if wakeCheck == nil {
+		return wakeCheckBindingResult{}, false, errors.New("authoritative amq wake check is unavailable")
+	}
+	out, err := wakeCheck(amqCommandRequest{
+		Context: ctx,
+		Dir:     filepath.Dir(root),
+		Env:     os.Environ(),
+		Arg:     []string{"wake", "check", "--root", root, "--me", handle, "--json", "--json-schema", "1"},
+	})
+	if err != nil {
+		return wakeCheckBindingResult{}, false, fmt.Errorf("authoritative amq wake check unavailable: %w", err)
+	}
+	var checked wakeCheckBindingResult
+	if err := json.Unmarshal(out, &checked); err != nil {
+		return wakeCheckBindingResult{}, false, fmt.Errorf("authoritative amq wake check JSON unavailable: %w", err)
+	}
+	if checked.Schema != 1 || checked.Agent != handle || !rootsMatch(checked.Root, root) {
+		return checked, true, fmt.Errorf(
+			"authoritative amq wake check identity mismatch: schema=%d agent=%s root=%s status=%s pid=%d",
+			checked.Schema,
+			checked.Agent,
+			checked.Root,
+			checked.WakeStatus,
+			checked.WakePID,
+		)
+	}
+	if checked.WakeStatus == "missing" && (checked.LiveWake || checked.WakePID != 0) {
+		return checked, true, fmt.Errorf(
+			"authoritative amq wake check returned inconsistent missing state: live=%t pid=%d",
+			checked.LiveWake,
+			checked.WakePID,
+		)
+	}
+	return checked, true, nil
+}
+
+// waitForStableWakeFilesystem is a bounded compatibility fallback for an
+// unavailable AMQ command/JSON surface. Unlike the former single snapshot, it
+// requires the same PID-dead + lock-absent terminal state on N consecutive
+// samples. With no authoritative or recorded/observed PID it cannot prove
+// quiescence and fails closed.
+func waitForStableWakeFilesystem(agentDir string, wakePID int, probe duplicateLaunchProbe, deadline time.Time, unavailableErr error) wakeQuiescenceResult {
+	if wakePID <= 0 {
+		if lock, err := readWakeLock(agentDir); err == nil {
+			wakePID = lock.PID
+		}
+	}
+	if wakePID <= 0 {
+		return wakeQuiescenceResult{
+			Status: "unverified",
+			Detail: fmt.Sprintf(
+				"%v; filesystem fallback cannot verify PID death because no persisted or observed wake pid exists",
+				unavailableErr,
+			),
+		}
+	}
+	lockPath := wakeLockPath(agentDir)
+	stable := 0
 	for {
 		if !probe.PIDAlive(wakePID) {
 			_, statErr := os.Stat(lockPath)
 			if os.IsNotExist(statErr) {
-				return true
+				stable++
+			} else {
+				stable = 0
+			}
+		} else {
+			stable = 0
+		}
+		if stable >= wakeQuiescenceStableSamples {
+			return wakeQuiescenceResult{
+				Verified: true,
+				Status:   "stable_samples",
+				Detail: fmt.Sprintf(
+					"authoritative amq wake check unavailable; observed recorded wake pid %d dead and .wake.lock absent for %d consecutive samples",
+					wakePID,
+					wakeQuiescenceStableSamples,
+				),
 			}
 		}
 		if time.Now().After(deadline) {
-			return false
+			return wakeQuiescenceResult{
+				Status: "unverified",
+				Detail: fmt.Sprintf(
+					"%v; filesystem fallback did not observe wake pid %d dead and .wake.lock absent for %d consecutive samples within %s",
+					unavailableErr,
+					wakePID,
+					wakeQuiescenceStableSamples,
+					wakeQuiescenceTimeout,
+				),
+			}
 		}
-		time.Sleep(wakeSelfCleanupPoll)
+		time.Sleep(wakeQuiescencePoll)
 	}
 }
 
-// wakeConfirmedDeadWithinDeadline polls briefly for the wake PID to exit,
-// mirroring wakeSelfCleanedAfterRetire's poll style and deadline: bounded so
-// a wake stuck mid-exit cannot hang `down` indefinitely.
+// wakeConfirmedDeadWithinDeadline polls briefly for the wake PID to exit so a
+// wake stuck mid-exit cannot hang the presence re-assertion indefinitely.
 func wakeConfirmedDeadWithinDeadline(wakePID int, probe duplicateLaunchProbe) bool {
 	deadline := time.Now().Add(2 * time.Second)
 	for {

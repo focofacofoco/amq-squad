@@ -28,13 +28,13 @@ type legacyTreeEntry struct {
 
 func downRunnerForTest(term processTerminator, probe duplicateLaunchProbe) func([]string) error {
 	return func(args []string) error {
-		return runDownWithDeps(args, func(bool) processTerminator { return term }, probe)
+		return runDownWithDeps(args, func(bool) processTerminator { return term }, probe, fakeMissingWakeCheck)
 	}
 }
 
 func downRunnerForPaneTest(term processTerminator, probe duplicateLaunchProbe, paneDeps PaneCleanupDependencies) func([]string) error {
 	return func(args []string) error {
-		return runDownWithPaneDeps(args, func(bool) processTerminator { return term }, probe, paneDeps)
+		return runDownWithPaneDeps(args, func(bool) processTerminator { return term }, probe, paneDeps, fakeMissingWakeCheck)
 	}
 }
 
