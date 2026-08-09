@@ -946,7 +946,7 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 			quiescence := waitForWakeQuiescence(agentDir, root, handle, result.WakeKilled, probe, wakeCheck)
 			result.WakeQuiescence = quiescence.Status
 			result.QuiescenceDetail = quiescence.Detail
-			if quiescence.Verified {
+			if quiescence.LockAbsent {
 				result.LockRemoved = true
 			} else {
 				result.WakeSignalFailed = result.WakeKilled
@@ -964,7 +964,7 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				quiescence := waitForWakeQuiescence(agentDir, root, handle, rec.WakePID, probe, wakeCheck)
 				result.WakeQuiescence = quiescence.Status
 				result.QuiescenceDetail = quiescence.Detail
-				if quiescence.Verified {
+				if quiescence.LockAbsent {
 					result.WakeKilled = rec.WakePID
 					result.WakeSignalName = "amq wake retire"
 					result.WakeRetirement = nativeWakeRetireSelfCleaned
@@ -993,7 +993,7 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				quiescence := waitForWakeQuiescence(agentDir, root, handle, retired.PID, probe, wakeCheck)
 				result.WakeQuiescence = quiescence.Status
 				result.QuiescenceDetail = quiescence.Detail
-				if quiescence.Verified {
+				if quiescence.LockAbsent {
 					result.LockRemoved = true
 				} else {
 					result.WakeSignalFailed = retired.PID
@@ -1052,9 +1052,14 @@ func reapStaleArtifacts(agentDir, handle, root string, strictRoot bool, rec laun
 				result.WakeQuiescence = quiescence.Status
 				result.QuiescenceDetail = quiescence.Detail
 				if quiescence.Verified {
-					result.LockRemoved = true
-					result.WakeRetirement = "raw_self_cleaned"
-					result.RetirementDetail = "verified wake self-cleanup after signal: " + quiescence.Detail
+					if quiescence.LockAbsent {
+						result.LockRemoved = true
+						result.WakeRetirement = "raw_self_cleaned"
+						result.RetirementDetail = "verified wake self-cleanup after signal: " + quiescence.Detail
+					} else {
+						result.WakeRetirement = "raw_stale_preserved"
+						result.RetirementDetail = "signaled wake exited and its exact dead-pid lock remains preserved for AMQ guarded cleanup: " + quiescence.Detail
+					}
 				} else {
 					result.WakeSignalError = "wake accepted signal but authoritative quiescence was not verified; lock and presence preserved"
 					result.WakeRetirement = "raw_cleanup_unverified"
@@ -1285,16 +1290,19 @@ func retireWakeWithAMQ(rec launch.Record, root, handle string) (nativeWakeRetire
 }
 
 type wakeQuiescenceResult struct {
-	Verified bool
-	Status   string
-	Detail   string
+	Verified   bool
+	LockAbsent bool
+	Status     string
+	Detail     string
 }
 
 // waitForWakeQuiescence asks AMQ, the owner of wake lifecycle state, whether
 // the exact handle/root has reached the stable no-wake classification. A
-// missing or undecodable command surface is the only condition that enables
-// the compatibility fallback. Valid-but-live, stale, or unverified AMQ state
-// remains authoritative and must converge to missing before the deadline.
+// missing or undecodable command surface enables the compatibility proof. An
+// authoritative stale classification also enters that proof: quiescence means
+// no live wake, while AMQ's deliberately preserved exact dead-PID lock may
+// remain for guarded cleanup. Live, mismatched, or unverified state still fails
+// closed.
 func waitForWakeQuiescence(agentDir, root, handle string, wakePID int, probe duplicateLaunchProbe, wakeCheck wakeCheckRunner) wakeQuiescenceResult {
 	deadline := time.Now().Add(wakeQuiescenceTimeout)
 	lastStatus := "unknown"
@@ -1311,7 +1319,7 @@ func waitForWakeQuiescence(agentDir, root, handle string, wakePID int, probe dup
 		checked, available, err := inspectWakeQuiescence(checkContext, root, handle, wakeCheck)
 		cancelCheck()
 		if !available {
-			return waitForStableWakeFilesystem(agentDir, wakePID, probe, deadline, err)
+			return waitForStableWakeFilesystem(agentDir, root, handle, wakePID, probe, deadline, err)
 		}
 		if err != nil {
 			return wakeQuiescenceResult{Status: "unverified", Detail: err.Error()}
@@ -1319,10 +1327,36 @@ func waitForWakeQuiescence(agentDir, root, handle string, wakePID int, probe dup
 		lastStatus = checked.WakeStatus
 		if checked.WakeStatus == "missing" && !checked.LiveWake && checked.WakePID == 0 {
 			return wakeQuiescenceResult{
-				Verified: true,
-				Status:   "amq_missing",
-				Detail:   "authoritative amq wake check confirmed wake_status=missing for the exact handle/root",
+				Verified:   true,
+				LockAbsent: true,
+				Status:     "amq_missing",
+				Detail:     "authoritative amq wake check confirmed wake_status=missing for the exact handle/root",
 			}
+		}
+		if checked.WakeStatus == "stale" && !checked.LiveWake {
+			expectedPID := wakePID
+			if expectedPID <= 0 {
+				expectedPID = checked.WakePID
+			}
+			if expectedPID <= 0 || checked.WakePID != expectedPID {
+				return wakeQuiescenceResult{
+					Status: "unverified",
+					Detail: fmt.Sprintf(
+						"authoritative amq wake check reported stale with pid=%d, which does not match the recorded/observed wake pid %d",
+						checked.WakePID,
+						expectedPID,
+					),
+				}
+			}
+			return waitForStableWakeFilesystem(
+				agentDir,
+				root,
+				handle,
+				expectedPID,
+				probe,
+				deadline,
+				fmt.Errorf("authoritative amq wake check reported wake_status=stale for pid %d", expectedPID),
+			)
 		}
 		if time.Now().After(deadline) {
 			return wakeQuiescenceResult{
@@ -1377,12 +1411,12 @@ func inspectWakeQuiescence(ctx context.Context, root, handle string, wakeCheck w
 	return checked, true, nil
 }
 
-// waitForStableWakeFilesystem is a bounded compatibility fallback for an
-// unavailable AMQ command/JSON surface. Unlike the former single snapshot, it
-// requires the same PID-dead + lock-absent terminal state on N consecutive
-// samples. With no authoritative or recorded/observed PID it cannot prove
-// quiescence and fails closed.
-func waitForStableWakeFilesystem(agentDir string, wakePID int, probe duplicateLaunchProbe, deadline time.Time, unavailableErr error) wakeQuiescenceResult {
+// waitForStableWakeFilesystem is a bounded compatibility proof for an
+// unavailable AMQ command/JSON surface or an authoritative stale result. It
+// accepts either lock absence or an exact, cleanly decoded stale lock for the
+// same dead PID/root/agent on N consecutive samples. Live PIDs and every
+// identity/decode mismatch fail closed.
+func waitForStableWakeFilesystem(agentDir, root, handle string, wakePID int, probe duplicateLaunchProbe, deadline time.Time, observationErr error) wakeQuiescenceResult {
 	if wakePID <= 0 {
 		if lock, err := readWakeLock(agentDir); err == nil {
 			wakePID = lock.PID
@@ -1393,29 +1427,58 @@ func waitForStableWakeFilesystem(agentDir string, wakePID int, probe duplicateLa
 			Status: "unverified",
 			Detail: fmt.Sprintf(
 				"%v; filesystem fallback cannot verify PID death because no persisted or observed wake pid exists",
-				unavailableErr,
+				observationErr,
+			),
+		}
+	}
+	expectedAgentDir := filepath.Join(root, "agents", handle)
+	if canonicalFilesystemPath(agentDir) != canonicalFilesystemPath(expectedAgentDir) {
+		return wakeQuiescenceResult{
+			Status: "unverified",
+			Detail: fmt.Sprintf(
+				"%v; filesystem fallback agent directory identity mismatch: got %s, want %s",
+				observationErr,
+				agentDir,
+				expectedAgentDir,
 			),
 		}
 	}
 	lockPath := wakeLockPath(agentDir)
 	stable := 0
+	stableStatus := ""
+	lastDetail := "no terminal filesystem observation"
 	for {
-		if !probe.PIDAlive(wakePID) {
-			_, statErr := os.Stat(lockPath)
-			if os.IsNotExist(statErr) {
-				stable++
-			} else {
-				stable = 0
-			}
-		} else {
+		status, detail := inspectWakeFilesystemTerminal(lockPath, root, handle, wakePID, probe)
+		lastDetail = detail
+		if status == "" {
 			stable = 0
+			stableStatus = ""
+		} else if status == stableStatus {
+			stable++
+		} else {
+			stableStatus = status
+			stable = 1
 		}
 		if stable >= wakeQuiescenceStableSamples {
+			if status == "fs_stale_lock_preserved" {
+				return wakeQuiescenceResult{
+					Verified: true,
+					Status:   status,
+					Detail: fmt.Sprintf(
+						"%v; observed exact wake pid %d dead with a clean, identity-matched stale .wake.lock preserved for %d consecutive samples",
+						observationErr,
+						wakePID,
+						wakeQuiescenceStableSamples,
+					),
+				}
+			}
 			return wakeQuiescenceResult{
-				Verified: true,
-				Status:   "stable_samples",
+				Verified:   true,
+				LockAbsent: true,
+				Status:     "stable_samples",
 				Detail: fmt.Sprintf(
-					"authoritative amq wake check unavailable; observed recorded wake pid %d dead and .wake.lock absent for %d consecutive samples",
+					"%v; observed recorded/observed wake pid %d dead and .wake.lock absent for %d consecutive samples",
+					observationErr,
 					wakePID,
 					wakeQuiescenceStableSamples,
 				),
@@ -1425,16 +1488,69 @@ func waitForStableWakeFilesystem(agentDir string, wakePID int, probe duplicateLa
 			return wakeQuiescenceResult{
 				Status: "unverified",
 				Detail: fmt.Sprintf(
-					"%v; filesystem fallback did not observe wake pid %d dead and .wake.lock absent for %d consecutive samples within %s",
-					unavailableErr,
+					"%v; filesystem fallback did not observe wake pid %d in an exact no-live terminal state for %d consecutive samples within %s (last observation: %s)",
+					observationErr,
 					wakePID,
 					wakeQuiescenceStableSamples,
 					wakeQuiescenceTimeout,
+					lastDetail,
 				),
 			}
 		}
 		time.Sleep(wakeQuiescencePoll)
 	}
+}
+
+// inspectWakeFilesystemTerminal returns a non-empty status only for a
+// fail-closed terminal observation: the exact PID is dead and either the lock
+// is absent or its decoded PID/root/agent identity is exact. PID liveness is
+// checked on both sides of the filesystem read so a concurrently reused PID
+// cannot inherit a stale observation.
+func inspectWakeFilesystemTerminal(lockPath, root, handle string, wakePID int, probe duplicateLaunchProbe) (string, string) {
+	if probe.PIDAlive(wakePID) {
+		return "", fmt.Sprintf("wake pid %d is live", wakePID)
+	}
+	before, err := os.Lstat(lockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if probe.PIDAlive(wakePID) {
+				return "", fmt.Sprintf("wake pid %d became live while confirming lock absence", wakePID)
+			}
+			return "stable_samples", ".wake.lock is absent and the exact wake pid is dead"
+		}
+		return "", fmt.Sprintf("cannot inspect .wake.lock: %v", err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return "", fmt.Sprintf(".wake.lock is not a regular non-symlink file (mode=%s)", before.Mode())
+	}
+	raw, err := os.ReadFile(lockPath)
+	if err != nil {
+		return "", fmt.Sprintf("cannot read .wake.lock: %v", err)
+	}
+	after, err := os.Lstat(lockPath)
+	if err != nil {
+		return "", fmt.Sprintf("cannot re-inspect .wake.lock: %v", err)
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return "", ".wake.lock changed identity while being read"
+	}
+	lock, err := decodeWakeLockFile(raw)
+	if err != nil {
+		return "", fmt.Sprintf("cannot cleanly decode .wake.lock: %v", err)
+	}
+	if lock.PID != wakePID {
+		return "", fmt.Sprintf(".wake.lock pid %d does not match recorded/observed wake pid %d", lock.PID, wakePID)
+	}
+	if strings.TrimSpace(lock.Root) == "" || !rootsMatch(lock.Root, root) {
+		return "", fmt.Sprintf(".wake.lock root %q does not match exact root %q", lock.Root, root)
+	}
+	if strings.TrimSpace(lock.Agent) == "" || lock.Agent != handle {
+		return "", fmt.Sprintf(".wake.lock agent %q does not match exact handle %q", lock.Agent, handle)
+	}
+	if probe.PIDAlive(wakePID) {
+		return "", fmt.Sprintf("wake pid %d became live while confirming preserved stale lock", wakePID)
+	}
+	return "fs_stale_lock_preserved", "exact dead-pid .wake.lock remains preserved"
 }
 
 // wakeConfirmedDeadWithinDeadline polls briefly for the wake PID to exit so a

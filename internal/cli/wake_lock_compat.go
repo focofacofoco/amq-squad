@@ -16,6 +16,7 @@ type wakeLockFile struct {
 	PID             int             `json:"pid"`
 	TTY             string          `json:"tty,omitempty"`
 	Root            string          `json:"root,omitempty"`
+	Agent           string          `json:"agent,omitempty"`
 	Started         time.Time       `json:"started"`
 	WakeMode        string          `json:"wake_mode,omitempty"`
 	TargetDigest    string          `json:"target_digest,omitempty"`

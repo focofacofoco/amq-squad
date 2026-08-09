@@ -201,9 +201,13 @@ func TestWakeQuiescenceUnavailableFallsBackToConsecutiveStableSamples(t *testing
 		wakeQuiescenceTimeout, wakeQuiescencePoll = previousTimeout, previousPoll
 	})
 
-	agentDir := t.TempDir()
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	lockPath := wakeLockPath(agentDir)
-	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: filepath.Dir(agentDir)})
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root, Agent: "qa"})
 	checks := 0
 	probe := downFakeProbe(nil, nil)
 	probe.PIDAlive = func(pid int) bool {
@@ -223,7 +227,7 @@ func TestWakeQuiescenceUnavailableFallsBackToConsecutiveStableSamples(t *testing
 	}
 	result := waitForWakeQuiescence(
 		agentDir,
-		filepath.Dir(agentDir),
+		root,
 		"qa",
 		4242,
 		probe,
@@ -243,9 +247,12 @@ func TestWakeQuiescenceBlockedCheckLeavesFallbackBudget(t *testing.T) {
 		wakeQuiescenceTimeout, wakeQuiescenceCheckTimeout, wakeQuiescencePoll = previousTimeout, previousCheckTimeout, previousPoll
 	})
 
-	agentDir := t.TempDir()
-	lockPath := wakeLockPath(agentDir)
-	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: filepath.Dir(agentDir)})
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root, Agent: "qa"})
 	checks := 0
 	probe := downFakeProbe(nil, nil)
 	probe.PIDAlive = func(pid int) bool {
@@ -253,16 +260,11 @@ func TestWakeQuiescenceBlockedCheckLeavesFallbackBudget(t *testing.T) {
 			return false
 		}
 		checks++
-		if checks == 1 {
-			if err := os.Remove(lockPath); err != nil {
-				t.Fatal(err)
-			}
-		}
 		return false
 	}
 	result := waitForWakeQuiescence(
 		agentDir,
-		filepath.Dir(agentDir),
+		root,
 		"qa",
 		4242,
 		probe,
@@ -271,8 +273,91 @@ func TestWakeQuiescenceBlockedCheckLeavesFallbackBudget(t *testing.T) {
 			return nil, req.Context.Err()
 		},
 	)
-	if !result.Verified || result.Status != "stable_samples" || checks < wakeQuiescenceStableSamples {
+	if !result.Verified || result.LockAbsent || result.Status != "fs_stale_lock_preserved" || checks < 2*wakeQuiescenceStableSamples {
 		t.Fatalf("blocked-check fallback result=%+v checks=%d", result, checks)
+	}
+}
+
+func TestWakeQuiescenceUnavailableAcceptsStableExactDeadPIDStaleLock(t *testing.T) {
+	previousTimeout, previousPoll := wakeQuiescenceTimeout, wakeQuiescencePoll
+	wakeQuiescenceTimeout = 100 * time.Millisecond
+	wakeQuiescencePoll = time.Millisecond
+	t.Cleanup(func() {
+		wakeQuiescenceTimeout, wakeQuiescencePoll = previousTimeout, previousPoll
+	})
+
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root, Agent: "qa"})
+	result := waitForWakeQuiescence(
+		agentDir,
+		root,
+		"qa",
+		4242,
+		downFakeProbe(map[int]bool{4242: false}, nil),
+		func(amqCommandRequest) ([]byte, error) { return nil, errors.New("wake check unavailable") },
+	)
+	if !result.Verified || result.LockAbsent || result.Status != "fs_stale_lock_preserved" {
+		t.Fatalf("stable exact stale-lock result=%+v", result)
+	}
+	if _, err := os.Stat(wakeLockPath(agentDir)); err != nil {
+		t.Fatalf("verified stale lock must remain preserved: %v", err)
+	}
+}
+
+func TestWakeQuiescenceAcceptsAuthoritativeStaleWithStableExactLock(t *testing.T) {
+	previousTimeout, previousPoll := wakeQuiescenceTimeout, wakeQuiescencePoll
+	wakeQuiescenceTimeout = 100 * time.Millisecond
+	wakeQuiescencePoll = time.Millisecond
+	t.Cleanup(func() {
+		wakeQuiescenceTimeout, wakeQuiescencePoll = previousTimeout, previousPoll
+	})
+
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root, Agent: "qa"})
+	check := func(req amqCommandRequest) ([]byte, error) {
+		checkRoot, handle := wakeCheckRequestIdentity(req)
+		return []byte(fmt.Sprintf(
+			`{"schema":1,"agent":%q,"root":%q,"live_wake":false,"wake_status":"stale","wake_pid":4242}`,
+			handle,
+			checkRoot,
+		)), nil
+	}
+	result := waitForWakeQuiescence(
+		agentDir,
+		root,
+		"qa",
+		4242,
+		downFakeProbe(map[int]bool{4242: false}, nil),
+		check,
+	)
+	if !result.Verified || result.LockAbsent || result.Status != "fs_stale_lock_preserved" || !strings.Contains(result.Detail, "wake_status=stale") {
+		t.Fatalf("authoritative stale-lock result=%+v", result)
+	}
+}
+
+func TestWakeQuiescenceExactLivePIDLockFailsClosed(t *testing.T) {
+	previousTimeout, previousPoll := wakeQuiescenceTimeout, wakeQuiescencePoll
+	wakeQuiescenceTimeout = 30 * time.Millisecond
+	wakeQuiescencePoll = time.Millisecond
+	t.Cleanup(func() {
+		wakeQuiescenceTimeout, wakeQuiescencePoll = previousTimeout, previousPoll
+	})
+
+	root := t.TempDir()
+	agentDir := filepath.Join(root, "agents", "qa")
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: root, Agent: "qa"})
+	result := waitForWakeQuiescence(
+		agentDir,
+		root,
+		"qa",
+		4242,
+		downFakeProbe(map[int]bool{4242: true}, nil),
+		func(amqCommandRequest) ([]byte, error) { return nil, errors.New("wake check unavailable") },
+	)
+	if result.Verified || result.Status != "unverified" || !strings.Contains(result.Detail, "pid 4242 is live") {
+		t.Fatalf("live exact wake-lock result=%+v", result)
 	}
 }
 

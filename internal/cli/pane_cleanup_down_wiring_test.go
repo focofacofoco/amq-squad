@@ -166,7 +166,11 @@ func TestStopFallbackFailsClosedWhenWakeLockReappearsAfterPaneTeardown(t *testin
 		if wakeChecks == 1 {
 			// The one-shot reap observed no lock. Model the exiting wake
 			// publishing it immediately before its PID becomes observably dead.
-			writeWakeLock(t, agentDir, wakeLockFile{PID: record.WakePID, Root: record.Root})
+			writeWakeLock(t, agentDir, wakeLockFile{
+				PID:   record.WakePID,
+				Root:  filepath.Join(record.Root, "foreign"),
+				Agent: record.Handle,
+			})
 		}
 		return false
 	}
@@ -202,6 +206,62 @@ func TestStopFallbackFailsClosedWhenWakeLockReappearsAfterPaneTeardown(t *testin
 	}
 	if _, err := os.Stat(lockPath); err != nil {
 		t.Fatalf("reappeared wake lock was not preserved for inspection: %v", err)
+	}
+}
+
+func TestResumedSecondStopAcceptsPreservedDeadPIDStaleWakeLock(t *testing.T) {
+	previousTimeout, previousPoll := wakeQuiescenceTimeout, wakeQuiescencePoll
+	wakeQuiescenceTimeout = 100 * time.Millisecond
+	wakeQuiescencePoll = time.Millisecond
+	t.Cleanup(func() {
+		wakeQuiescenceTimeout, wakeQuiescencePoll = previousTimeout, previousPoll
+	})
+
+	configured, member, record, pane, project := completeDownPaneFixture(t)
+	record.WakePID = 4343
+	if err := launch.Write(filepath.Join(record.Root, "agents", record.Handle), record); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(record.Root, "agents", record.Handle)
+	lockPath := wakeLockPath(agentDir)
+	writeWakeLock(t, agentDir, wakeLockFile{
+		PID:   record.WakePID,
+		Root:  record.Root,
+		Agent: record.Handle,
+	})
+
+	report := terminateMember(
+		configured, project, team.DefaultProfile, member, record.Session,
+		&recordingTerminator{},
+		downFakeProbe(
+			map[int]bool{record.AgentPID: true, record.WakePID: false},
+			map[int]bool{record.AgentPID: true},
+		),
+		nil, true,
+		PaneCleanupDependencies{
+			Inspect: func(string) tmuxpane.PaneInspection {
+				return tmuxpane.PaneInspection{State: tmuxpane.PaneInspectionFound, Pane: pane}
+			},
+			ChildrenIndex: func() (func(int) []int, error) {
+				return func(parent int) []int {
+					if parent == pane.PID {
+						return []int{record.AgentPID}
+					}
+					return nil
+				}, nil
+			},
+			Close: func(string) error { return nil },
+		},
+		func(amqCommandRequest) ([]byte, error) { return nil, errors.New("wake check unavailable") },
+	)
+
+	if report.Status != downStatusStopped ||
+		!strings.Contains(report.Detail, "wake retirement=raw_stale_preserved") ||
+		!strings.Contains(report.Detail, "wake quiescence=fs_stale_lock_preserved") {
+		t.Fatalf("resumed second-stop report=%+v", report)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("verified stale wake lock must remain for AMQ guarded cleanup: %v", err)
 	}
 }
 
