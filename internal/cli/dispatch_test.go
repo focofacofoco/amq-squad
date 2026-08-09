@@ -668,7 +668,7 @@ func TestDefaultDispatchWakePaneUsesStatusRecordForWorktreeMember(t *testing.T) 
 	if sentPane != "%7" {
 		t.Fatalf("nudge pane = %q, want %%7", sentPane)
 	}
-	if !strings.Contains(sentPrompt, "--root "+shellQuote(canonicalRoot)) {
+	if !strings.Contains(sentPrompt, "--root "+shellQuote(canonicalFilesystemPath(canonicalRoot))) {
 		t.Fatalf("nudge prompt root is not canonical: %q", sentPrompt)
 	}
 	worktreeRoot := filepath.Join(worktree, ".agent-mail", profile, session)

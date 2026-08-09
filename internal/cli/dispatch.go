@@ -741,7 +741,11 @@ func defaultDispatchWakePane(projectDir, profile, session string, explicitSessio
 			return dispatchOutcome{Skipped: fmt.Sprintf("pane %s is busy (mid-turn); the agent drains the task when idle, or re-dispatch with --force", paneID)}, nil
 		}
 	}
-	root := filepath.Dir(filepath.Dir(mr.AgentDir))
+	// Status's launch scan can preserve the lexical team-home path (for example
+	// /var/... on Darwin) even when AMQ resolved the durable root through that
+	// symlink (/private/var/...). Keep the fallback prompt on the same canonical
+	// root as the durable send so the receiving shell drains the exact namespace.
+	root := canonicalFilesystemPath(filepath.Dir(filepath.Dir(mr.AgentDir)))
 	if strings.TrimSpace(root) == "" || root == "." {
 		return dispatchOutcome{}, fmt.Errorf("resolve exact AMQ root for dispatch nudge from agent dir %q", mr.AgentDir)
 	}
