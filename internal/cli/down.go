@@ -74,8 +74,12 @@ var (
 	runExactWakeRecoverOwner = runAMQCommand
 	wakeOwnerRecoveryTimeout = 2 * time.Second
 	wakeOwnerRecoveryPoll    = 50 * time.Millisecond
-	wakeSelfCleanupTimeout   = 2 * time.Second
-	wakeSelfCleanupPoll      = 50 * time.Millisecond
+	// A SIGTERMed wake can take several seconds to finish its locked teardown on
+	// a loaded Darwin runner. Keep the verification bounded, but align it with
+	// the real wake lifecycle deadline so success still requires both a dead PID
+	// and an absent lock rather than treating signal delivery as completion.
+	wakeSelfCleanupTimeout = 8 * time.Second
+	wakeSelfCleanupPoll    = 50 * time.Millisecond
 )
 
 // newSignalTerminator returns a terminator that sends SIGTERM by default, or

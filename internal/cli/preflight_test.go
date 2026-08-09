@@ -92,6 +92,9 @@ func TestPreflightLiveWakeLockBlocks(t *testing.T) {
 	if !strings.Contains(blocker.Error(), "wake") || !strings.Contains(blocker.Error(), "1234") {
 		t.Fatalf("blocker should name wake source and pid: %s", blocker.Error())
 	}
+	if !strings.Contains(blocker.Error(), "--force-duplicate") {
+		t.Fatalf("ordinary live blocker should retain force override guidance: %s", blocker.Error())
+	}
 }
 
 func TestPreflightLiveWakePIDReuseIsStale(t *testing.T) {
@@ -914,6 +917,15 @@ func TestPreflightCorruptWakeLockKeepsPresenceConservative(t *testing.T) {
 	forced, err := pf.check(probe)
 	if err != nil || forced == nil {
 		t.Fatalf("--force-duplicate must not override a fail-closed lock: blocker=%v err=%v", forced, err)
+	}
+	message := forced.Error()
+	for _, want := range []string{"amq wake check --root /r --me cto", "amq doctor --ops"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("fail-closed blocker omitted remediation %q: %s", want, message)
+		}
+	}
+	if strings.Contains(message, "--force-duplicate") {
+		t.Fatalf("fail-closed blocker suggested an impossible force override: %s", message)
 	}
 }
 

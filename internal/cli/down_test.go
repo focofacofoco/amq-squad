@@ -138,6 +138,50 @@ func TestReapRawWakeRetirementFallbackIsReported(t *testing.T) {
 	}
 }
 
+func TestWakeSelfCleanedAfterRetireWaitsForDelayedCleanup(t *testing.T) {
+	if wakeSelfCleanupTimeout < 8*time.Second {
+		t.Fatalf("wake self-cleanup timeout = %s, want at least 8s for loaded teardown", wakeSelfCleanupTimeout)
+	}
+	previousTimeout, previousPoll := wakeSelfCleanupTimeout, wakeSelfCleanupPoll
+	wakeSelfCleanupTimeout = 500 * time.Millisecond
+	wakeSelfCleanupPoll = 5 * time.Millisecond
+	t.Cleanup(func() {
+		wakeSelfCleanupTimeout, wakeSelfCleanupPoll = previousTimeout, previousPoll
+	})
+
+	agentDir := t.TempDir()
+	lockPath := wakeLockPath(agentDir)
+	writeWakeLock(t, agentDir, wakeLockFile{PID: 4242, Root: filepath.Dir(agentDir)})
+	exited := make(chan struct{})
+	cleanupDone := make(chan error, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		err := os.Remove(lockPath)
+		if err == nil {
+			close(exited)
+		}
+		cleanupDone <- err
+	}()
+	probe := downFakeProbe(nil, nil)
+	probe.PIDAlive = func(pid int) bool {
+		if pid != 4242 {
+			return false
+		}
+		select {
+		case <-exited:
+			return false
+		default:
+			return true
+		}
+	}
+	if !wakeSelfCleanedAfterRetire(lockPath, 4242, probe) {
+		t.Fatal("delayed pid exit and lock removal were not observed within the bounded window")
+	}
+	if err := <-cleanupDone; err != nil {
+		t.Fatalf("delayed wake cleanup: %v", err)
+	}
+}
+
 func TestReapRawCorruptWakeFailsClosedAndPreservesLock(t *testing.T) {
 	agentDir := t.TempDir()
 	path := wakeLockPath(agentDir)

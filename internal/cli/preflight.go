@@ -58,8 +58,25 @@ func (b *duplicateBlocker) Error() string {
 		lines = append(lines, "  agent dir: "+b.AgentDir)
 	}
 	lines = append(lines, "Next actions:")
-	lines = append(lines, "  - attach the existing terminal, or stop the old process")
-	lines = append(lines, "  - rerun with --force-duplicate to launch anyway")
+	failClosed := false
+	seenHints := map[string]bool{}
+	for _, reason := range b.Reasons {
+		if !reason.FailClosed {
+			continue
+		}
+		failClosed = true
+		hint := strings.TrimSpace(reason.Hint)
+		if hint != "" && !seenHints[hint] {
+			lines = append(lines, "  - "+hint)
+			seenHints[hint] = true
+		}
+	}
+	if !failClosed {
+		lines = append(lines, "  - attach the existing terminal, or stop the old process")
+		lines = append(lines, "  - rerun with --force-duplicate to launch anyway")
+	} else if len(seenHints) == 0 {
+		lines = append(lines, "  - inspect and repair the integrity blocker before retrying")
+	}
 	return strings.Join(lines, "\n")
 }
 
