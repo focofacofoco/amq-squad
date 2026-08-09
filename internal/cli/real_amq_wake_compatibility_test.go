@@ -380,21 +380,22 @@ func realAMQBusyWakeOwnershipCase(t *testing.T, tmux, amq, squad, recorder strin
 		t.Fatalf("stop real session notifier: %v", notifierErr)
 	}
 	h.releaseBusy()
-	wantLines := 1
-	if emulateLegacyNotifier {
-		wantLines = 2
-	}
 	deadline = time.Now().Add(8 * time.Second)
 	for {
 		b, readErr := os.ReadFile(h.capture)
-		if readErr == nil && len(nonemptyLines(string(b))) >= wantLines {
-			break
+		if readErr == nil {
+			if emulateLegacyNotifier && strings.Contains(string(b), realAMQCoopWakeDoorbell) && strings.Contains(string(b), dispatchNudgePrompt(h.root)) {
+				break
+			}
+			if !emulateLegacyNotifier && len(nonemptyLines(string(b))) >= 1 {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
 			cmd := exec.Command(tmux, "capture-pane", "-p", "-t", rec.Tmux.PaneID, "-S", "-120")
 			cmd.Env = h.env()
 			pane, captureErr := cmd.CombinedOutput()
-			t.Fatalf("timed out waiting for %d busy wake capture lines; read_err=%v capture=%q pane_err=%v\npane:\n%s", wantLines, readErr, string(b), captureErr, string(pane))
+			t.Fatalf("timed out waiting for busy wake prompt cohort; read_err=%v capture=%q pane_err=%v\npane:\n%s", readErr, string(b), captureErr, string(pane))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -409,18 +410,17 @@ func realAMQBusyWakeOwnershipCase(t *testing.T, tmux, amq, squad, recorder strin
 	for _, line := range lines {
 		assertMarkerFreeWake(t, line)
 	}
-	rawCount, fallbackCount := 0, 0
 	wantFallback := dispatchNudgePrompt(h.root)
-	for _, line := range lines {
-		switch line {
-		case realAMQCoopWakeDoorbell:
-			rawCount++
-		case wantFallback:
-			fallbackCount++
-		}
-	}
+	rawCount := strings.Count(string(b), realAMQCoopWakeDoorbell)
+	fallbackCount := strings.Count(string(b), wantFallback)
 	if emulateLegacyNotifier {
-		if len(lines) != 2 || rawCount != 1 || fallbackCount != 1 {
+		// A busy real PTY may deliver the two complete inputs as separate scanner
+		// lines or coalesce them before the recorder's first read. Count exact
+		// full prompt occurrences in the byte stream, then reject any residual
+		// non-whitespace content so both forms prove the same two-owner defect.
+		residual := strings.Replace(string(b), realAMQCoopWakeDoorbell, "", 1)
+		residual = strings.Replace(residual, wantFallback, "", 1)
+		if rawCount != 1 || fallbackCount != 1 || strings.TrimSpace(residual) != "" {
 			t.Fatalf("pre-fix control capture=%#v, want one AMQ doorbell plus one notifier fallback", lines)
 		}
 	} else if len(lines) != 1 || rawCount != 1 || fallbackCount != 0 {
