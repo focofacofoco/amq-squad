@@ -1,14 +1,16 @@
 [CmdletBinding()]
 param(
     [switch]$Uninstall,
-    [switch]$Check
+    [switch]$Check,
+    [string]$Commit = 'afac6fb9a47b423dee9729c5203c01098afc47c3'
 )
 
 $ErrorActionPreference = 'Stop'
 
 $RepositoryRoot = Split-Path $PSScriptRoot -Parent
-$CodexMarketplace = $RepositoryRoot
-$ClaudeMarketplace = $RepositoryRoot
+$InstallRoot = Join-Path $env:LOCALAPPDATA "amq-squad\$Commit"
+$CodexMarketplace = $InstallRoot
+$ClaudeMarketplace = $InstallRoot
 
 function Invoke-Checked {
     param([string]$Program, [string[]]$Arguments)
@@ -36,6 +38,18 @@ if ($Uninstall) {
     & claude plugin uninstall amq-squad
     & claude plugin marketplace remove amq-squad
     exit 0
+}
+
+if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot 'FORK.md'))) {
+    $archive = Join-Path $env:TEMP "amq-squad-$Commit.tar.gz"
+    $staging = Join-Path $env:TEMP "amq-squad-$Commit"
+    Invoke-WebRequest -Uri "https://codeload.github.com/focofacofoco/amq-squad/tar.gz/$Commit" -OutFile $archive
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    New-Item -ItemType Directory -Path $staging | Out-Null
+    & tar -xzf $archive -C $staging --strip-components=1
+    if ($LASTEXITCODE -ne 0) { throw 'extract fork archive failed' }
+    New-Item -ItemType Directory -Path (Split-Path $InstallRoot -Parent) -Force | Out-Null
+    Move-Item -LiteralPath $staging -Destination $InstallRoot
 }
 
 Invoke-Checked codex @('plugin', 'marketplace', 'add', $CodexMarketplace)
