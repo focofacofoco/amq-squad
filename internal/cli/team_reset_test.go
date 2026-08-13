@@ -67,7 +67,7 @@ func TestRemoveAMQResetRootIsIdempotentAndPreservesProjectFiles(t *testing.T) {
 	}
 }
 
-func TestResetSquadOperationalDataPreservesTeamConfiguration(t *testing.T) {
+func TestResetSquadRemovesTeamAndPreservesProjectFiles(t *testing.T) {
 	project := t.TempDir()
 	root := filepath.Join(project, ".amq-squad")
 	for _, path := range []string{
@@ -83,15 +83,17 @@ func TestResetSquadOperationalDataPreservesTeamConfiguration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := resetSquadOperationalData(root); err != nil {
+	keep := filepath.Join(project, "README.md")
+	if err := os.WriteFile(keep, []byte("project work"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "tasks")); !os.IsNotExist(err) {
-		t.Fatalf("tasks survived: %v", err)
+	if err := removeAMQResetRoot(root); err != nil {
+		t.Fatal(err)
 	}
-	for _, path := range []string{"team.json", "team-rules.md", filepath.Join("roles", "qa.md")} {
-		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
-			t.Fatalf("config %s removed: %v", path, err)
-		}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("team root survived: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("project work removed: %v", err)
 	}
 }

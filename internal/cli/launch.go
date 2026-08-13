@@ -711,8 +711,11 @@ Examples:
 	}
 
 	amqBin, err := exec.LookPath("amq")
-	if handled, platformErr := runPlatformAgent(target, trailing, rec, agentDir, &recordWrite); handled {
+	if handled, keepRecord, platformErr := runPlatformAgent(target, trailing, rec, agentDir, &recordWrite); handled {
 		if platformErr != nil {
+			if keepRecord {
+				return platformErr
+			}
 			return rollbackLaunchRecord(platformErr)
 		}
 		return nil

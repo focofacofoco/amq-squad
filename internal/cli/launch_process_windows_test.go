@@ -45,9 +45,9 @@ func TestRunPlatformAgentUpdatesRecordWithRealPID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handled, err := runPlatformAgent("cmd.exe", []string{"/d", "/c", "exit", "0"}, rec, agentDir, &snapshot)
-	if !handled || err != nil {
-		t.Fatalf("handled=%v err=%v", handled, err)
+	handled, keepRecord, err := runPlatformAgent("cmd.exe", []string{"/d", "/c", "exit", "0"}, rec, agentDir, &snapshot)
+	if !handled || !keepRecord || err != nil {
+		t.Fatalf("handled=%v keepRecord=%v err=%v", handled, keepRecord, err)
 	}
 	written, err := launch.Read(agentDir)
 	if err != nil {

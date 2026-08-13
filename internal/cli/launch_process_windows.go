@@ -17,10 +17,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func runPlatformAgent(target string, args []string, rec launch.Record, agentDir string, snapshot *launchRecordWriteSnapshot) (bool, error) {
+func runPlatformAgent(target string, args []string, rec launch.Record, agentDir string, snapshot *launchRecordWriteSnapshot) (bool, bool, error) {
 	path, err := exec.LookPath(target)
 	if err != nil {
-		return true, fmt.Errorf("resolve agent executable %s: %w", target, err)
+		return true, false, fmt.Errorf("resolve agent executable %s: %w", target, err)
 	}
 	cmd := exec.Command(path, args...)
 	cmd.Dir = rec.CWD
@@ -30,23 +30,23 @@ func runPlatformAgent(target string, args []string, rec launch.Record, agentDir 
 
 	job, err := newLaunchJob()
 	if err != nil {
-		return true, err
+		return true, false, err
 	}
 	defer windows.CloseHandle(job)
 	if err := cmd.Start(); err != nil {
-		return true, fmt.Errorf("start %s: %w", target, err)
+		return true, false, fmt.Errorf("start %s: %w", target, err)
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(cmd.Process.Pid))
 	if err != nil {
 		_ = cmd.Process.Kill()
-		return true, fmt.Errorf("open launched process %d: %w", cmd.Process.Pid, err)
+		return true, false, fmt.Errorf("open launched process %d: %w", cmd.Process.Pid, err)
 	}
 	assignErr := windows.AssignProcessToJobObject(job, process)
 	windows.CloseHandle(process)
 	if assignErr != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return true, fmt.Errorf("assign launched process %d to job: %w", cmd.Process.Pid, assignErr)
+		return true, false, fmt.Errorf("assign launched process %d to job: %w", cmd.Process.Pid, assignErr)
 	}
 
 	rec.AgentPID = cmd.Process.Pid
@@ -68,16 +68,16 @@ func runPlatformAgent(target string, args []string, rec launch.Record, agentDir 
 	if err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return true, fmt.Errorf("update launch record with child pid: %w", err)
+		return true, false, fmt.Errorf("update launch record with child pid: %w", err)
 	}
 
 	if err := cmd.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return true, fmt.Errorf("agent exited with code %d", exitErr.ExitCode())
+			return true, true, fmt.Errorf("agent exited with code %d", exitErr.ExitCode())
 		}
-		return true, fmt.Errorf("wait for agent: %w", err)
+		return true, true, fmt.Errorf("wait for agent: %w", err)
 	}
-	return true, nil
+	return true, true, nil
 }
 
 func windowsLaunchEnv(parent []string, rec launch.Record) []string {

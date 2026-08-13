@@ -63,9 +63,16 @@ func runTeamReset(args []string) error {
 		return err
 	}
 	for _, root := range plan.Roots {
-		if filepath.Base(root) == ".amq-squad" {
-			if err := resetSquadOperationalData(root); err != nil {
+		switch filepath.Base(root) {
+		case ".amq-squad", ".agent-mail":
+			if err := removeAMQResetRoot(root); err != nil {
 				return err
+			}
+		case "agent-mail":
+			if isAMQMailboxRoot(root) {
+				if err := os.RemoveAll(root); err != nil {
+					return fmt.Errorf("remove legacy AMQ root %s: %w", root, err)
+				}
 			}
 		}
 	}
@@ -256,26 +263,6 @@ func removeAMQResetRoot(path string) error {
 	}
 	if err := os.RemoveAll(path); err != nil {
 		return fmt.Errorf("remove %s: %w", path, err)
-	}
-	return nil
-}
-
-func resetSquadOperationalData(root string) error {
-	root = filepath.Clean(root)
-	if filepath.Base(root) != ".amq-squad" {
-		return fmt.Errorf("refuse unsafe squad reset target %s", root)
-	}
-	operational := []string{
-		"autonomous", "boundary-audit", "briefs", "collect-journal", "delivery-receipts",
-		"evidence", "goal-attempts", "layout-finalization", "locks", "namespace-admission",
-		"namespace-audit", "namespace-migrations", "noc", "notification-watchers", "notify-state.json",
-		"operator-loop", "operator-loop-audit", "pane-cleanup", "prepared", "receipts",
-		"reviews", "run-shell.log", "session-notifiers", "tasks", "worktrees",
-	}
-	for _, name := range operational {
-		if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
-			return fmt.Errorf("remove squad operational state %s: %w", name, err)
-		}
 	}
 	return nil
 }
