@@ -2,7 +2,7 @@
 param(
     [switch]$Uninstall,
     [switch]$Check,
-    [string]$Commit = '99aca5b335f07fb9500943cf13c8da21c90d1dbb'
+    [string]$Commit = '59d6cc11bb7b2aaa43579218425301356c71a8e5'
 )
 
 $ErrorActionPreference = 'Stop'
