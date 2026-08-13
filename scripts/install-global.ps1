@@ -2,7 +2,7 @@
 param(
     [switch]$Uninstall,
     [switch]$Check,
-    [string]$Commit = 'afac6fb9a47b423dee9729c5203c01098afc47c3'
+    [string]$Commit = '99aca5b335f07fb9500943cf13c8da21c90d1dbb'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +11,7 @@ $RepositoryRoot = Split-Path $PSScriptRoot -Parent
 $InstallRoot = Join-Path $env:LOCALAPPDATA "amq-squad\$Commit"
 $CodexMarketplace = $InstallRoot
 $ClaudeMarketplace = $InstallRoot
+$BinaryPath = Join-Path $HOME '.local\bin\amq-squad.exe'
 
 function Invoke-Checked {
     param([string]$Program, [string[]]$Arguments)
@@ -23,8 +24,8 @@ function Invoke-Checked {
 
 if ($Check) {
     $version = & amq-squad version --json | ConvertFrom-Json
-    if ($version.data.fork_owner -ne 'focofacofoco') {
-        throw 'amq-squad on PATH is not the Facode fork'
+    if ($version.data.fork_owner -ne 'focofacofoco' -or $version.data.fork_commit -ne $Commit) {
+        throw "amq-squad on PATH is not the expected Facode fork commit $Commit"
     }
     Invoke-Checked codex @('plugin', 'list')
     Invoke-Checked claude @('plugin', 'list')
@@ -33,7 +34,7 @@ if ($Check) {
 }
 
 if ($Uninstall) {
-    & codex plugin remove amq-squad
+    & codex plugin remove amq-squad@facode-amq-squad
     & codex plugin marketplace remove facode-amq-squad
     & claude plugin uninstall amq-squad
     & claude plugin marketplace remove amq-squad
@@ -51,6 +52,20 @@ if (-not (Test-Path -LiteralPath (Join-Path $InstallRoot 'FORK.md'))) {
     New-Item -ItemType Directory -Path (Split-Path $InstallRoot -Parent) -Force | Out-Null
     Move-Item -LiteralPath $staging -Destination $InstallRoot
 }
+
+New-Item -ItemType Directory -Path (Split-Path $BinaryPath -Parent) -Force | Out-Null
+Push-Location $InstallRoot
+try {
+    $linkFlags = "-X github.com/omriariav/amq-squad/v2/internal/forkinfo.Commit=$Commit -X github.com/omriariav/amq-squad/v2/internal/forkinfo.Modified=true"
+    Invoke-Checked go @('build', '-ldflags', $linkFlags, '-o', $BinaryPath, './cmd/amq-squad')
+} finally {
+    Pop-Location
+}
+
+& codex plugin remove amq-squad@facode-amq-squad
+& codex plugin marketplace remove facode-amq-squad
+& claude plugin uninstall amq-squad@amq-squad
+& claude plugin marketplace remove amq-squad
 
 Invoke-Checked codex @('plugin', 'marketplace', 'add', $CodexMarketplace)
 Invoke-Checked codex @('plugin', 'add', 'amq-squad@facode-amq-squad', '--json')
