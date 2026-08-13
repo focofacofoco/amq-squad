@@ -248,11 +248,14 @@ func TestReadLegacyRecordHasNilTmux(t *testing.T) {
 	// A pre-1.5 record (no "tmux" key) must read back with a nil Tmux pointer,
 	// so clients detect runtime-control availability by presence, not schema.
 	dir := t.TempDir()
-	legacy := `{"schema":1,"cwd":"/p","binary":"codex","handle":"cto","root":"` + dir + `","started_at":"2026-01-01T00:00:00Z"}`
+	legacy, err := json.Marshal(Record{Schema: 1, CWD: dir, Binary: "codex", Handle: "cto", Root: dir, StartedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Dir(Path(dir)), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(Path(dir), []byte(legacy), 0o600); err != nil {
+	if err := os.WriteFile(Path(dir), legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, err := Read(dir)

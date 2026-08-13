@@ -48,6 +48,8 @@ func runTeam(args []string) error {
 		return runTeamProfiles(args[1:])
 	case "rm", "delete":
 		return runTeamRemove(args[1:])
+	case "reset":
+		return runTeamReset(args[1:])
 	case "shared-cwd-exception":
 		return runTeamSharedCwdException(args[1:])
 	default:
@@ -56,7 +58,7 @@ func runTeam(args []string) error {
 		return unknownSubcommandError(
 			"team", args[0],
 			"init", "resume", "rules", "lead", "overlay", "member", "autonomous",
-			"operator", "sync", "profiles", "rm", "delete", "shared-cwd-exception",
+			"operator", "sync", "profiles", "rm", "delete", "reset", "shared-cwd-exception",
 		)
 	}
 }
@@ -1441,113 +1443,111 @@ func emitTeamCommand(in emitTeamCommandInput) string {
 }
 
 func emitTeamCommandWithPreview(in emitTeamCommandInput, preview teamCommandPreviewData) string {
-	m := in.Member
 	var b strings.Builder
 	b.WriteString("cd ")
 	b.WriteString(shellQuote(in.CWD))
 	b.WriteString(" && ")
 	b.WriteString(shellQuote(in.SquadBin))
+	for _, arg := range emitTeamArgvWithPreview(in, preview) {
+		b.WriteString(" ")
+		b.WriteString(shellQuoteTeamArg(arg))
+	}
+	return b.String()
+}
+
+func shellQuoteTeamArg(arg string) string {
+	if strings.HasPrefix(arg, "--") {
+		if i := strings.IndexByte(arg, '='); i > 2 {
+			return arg[:i+1] + shellQuote(arg[i+1:])
+		}
+	}
+	return shellQuote(arg)
+}
+
+func emitTeamArgv(in emitTeamCommandInput) []string {
+	return emitTeamArgvWithPreview(in, teamCommandPreview(in))
+}
+
+func emitTeamArgvWithPreview(in emitTeamCommandInput, preview teamCommandPreviewData) []string {
+	m := in.Member
+	args := []string{"agent", "up", m.Binary}
 	// Emit the modern single-agent surface: `agent up <binary> [flags] [-- child]`.
 	// Legacy `launch <binary>` still works with a deprecation warning, but
 	// generated team commands recommend the 1.0 shape.
-	b.WriteString(" agent up ")
-	b.WriteString(shellQuote(m.Binary))
 	if conversation := strings.TrimSpace(in.Conversation); conversation != "" {
-		b.WriteString(" --conversation ")
-		b.WriteString(shellQuote(conversation))
+		args = append(args, "--conversation", conversation)
 	}
-	b.WriteString(" --role ")
-	b.WriteString(shellQuote(m.Role))
-	b.WriteString(" --session ")
-	b.WriteString(shellQuote(in.Workstream))
+	args = append(args, "--role", m.Role, "--session", in.Workstream)
 	root := launchRootForProfile(in.TeamHome, in.Profile, in.Workstream)
 	if in.SimpleStart {
 		root = strings.TrimSpace(in.CanonicalRoot)
-		b.WriteString(" --simple-start")
+		args = append(args, "--simple-start")
 	}
 	if root != "" {
-		b.WriteString(" --root ")
-		b.WriteString(shellQuote(root))
+		args = append(args, "--root", root)
 	}
-	b.WriteString(" --team-workstream")
+	args = append(args, "--team-workstream")
 	if in.TrustMode != "" {
-		b.WriteString(" --trust ")
-		b.WriteString(shellQuote(in.TrustMode))
+		args = append(args, "--trust", in.TrustMode)
 	}
 	if in.Model != "" {
-		b.WriteString(" --model ")
-		b.WriteString(shellQuote(in.Model))
+		args = append(args, "--model", in.Model)
 	}
-	b.WriteString(" --tool-profile ")
-	b.WriteString(shellQuote(m.EffectiveToolProfile()))
+	args = append(args, "--tool-profile", m.EffectiveToolProfile())
 	if config := strings.TrimSpace(m.ToolConfig); config != "" {
-		b.WriteString(" --tool-config ")
-		b.WriteString(shellQuote(config))
+		args = append(args, "--tool-config", config)
 	}
 	if config := strings.TrimSpace(m.ToolMCPConfig); config != "" {
-		b.WriteString(" --tool-mcp-config ")
-		b.WriteString(shellQuote(config))
+		args = append(args, "--tool-mcp-config", config)
 	}
 	for _, entry := range m.ToolAllowlist {
-		b.WriteString(" --tool-allow ")
-		b.WriteString(shellQuote(entry))
+		args = append(args, "--tool-allow", entry)
 	}
 	for _, entry := range m.ToolBlocklist {
-		b.WriteString(" --tool-block ")
-		b.WriteString(shellQuote(entry))
+		args = append(args, "--tool-block", entry)
 	}
 	if in.TeamHome != "" {
-		b.WriteString(" --team-home ")
-		b.WriteString(shellQuote(in.TeamHome))
+		args = append(args, "--team-home", in.TeamHome)
 	}
 	if in.Profile != "" && (in.SimpleStart || in.ExplicitProfile || in.Profile != team.DefaultProfile) {
-		b.WriteString(" --team-profile ")
-		b.WriteString(shellQuote(in.Profile))
+		args = append(args, "--team-profile", in.Profile)
 	}
 	if in.NoBootstrap || strings.TrimSpace(in.Conversation) != "" {
-		b.WriteString(" --no-bootstrap")
+		args = append(args, "--no-bootstrap")
 	}
 	if in.ForceDuplicate {
-		b.WriteString(" --force-duplicate")
+		args = append(args, "--force-duplicate")
 	}
 	if in.NoGitignore {
-		b.WriteString(" --no-gitignore")
+		args = append(args, "--no-gitignore")
 	}
 	if in.Symphony && normalizedAgentBinary(m.Binary) == "codex" {
-		b.WriteString(" --symphony")
+		args = append(args, "--symphony")
 	}
 	if origin := strings.TrimSpace(m.SpawnOrigin); origin != "" {
-		b.WriteString(" --spawn-origin ")
-		b.WriteString(shellQuote(origin))
+		args = append(args, "--spawn-origin", origin)
 	}
 	if m.SpawnDepth > 0 {
-		b.WriteString(" --spawn-depth ")
-		b.WriteString(shellQuote(fmt.Sprintf("%d", m.SpawnDepth)))
+		args = append(args, "--spawn-depth", fmt.Sprintf("%d", m.SpawnDepth))
 	}
 	if via := strings.TrimSpace(in.WakeInjectVia); via != "" {
-		b.WriteString(" --wake-inject-via ")
-		b.WriteString(shellQuote(via))
+		args = append(args, "--wake-inject-via", via)
 		for _, arg := range in.WakeInjectArgs {
-			b.WriteString(" --wake-inject-arg=")
-			b.WriteString(shellQuote(arg))
+			args = append(args, "--wake-inject-arg="+arg)
 		}
 	}
 	if mode := resolveWakeInjectModeForBinary(in.WakeInjectMode, m.Binary); mode != "" {
-		b.WriteString(" --wake-inject-mode ")
-		b.WriteString(shellQuote(mode))
+		args = append(args, "--wake-inject-mode", mode)
 	}
 	if m.Handle != "" {
 		// Always explicit: a role-named handle avoids collisions when the
 		// same binary (e.g. codex) hosts multiple roles in one project.
-		b.WriteString(" --me ")
-		b.WriteString(shellQuote(m.Handle))
+		args = append(args, "--me", m.Handle)
 	}
 	if m.Launcher != "" {
-		b.WriteString(" --launcher ")
-		b.WriteString(shellQuote(m.Launcher))
+		args = append(args, "--launcher", m.Launcher)
 		if len(m.LauncherArgs) > 0 {
-			b.WriteString(" --launcher-args=")
-			b.WriteString(shellQuote(joinedAgentArgs(m.LauncherArgs)))
+			args = append(args, "--launcher-args="+joinedAgentArgs(m.LauncherArgs))
 		}
 	}
 	// Per-member native args (team.json claude_args/codex_args) come AFTER
@@ -1559,21 +1559,16 @@ func emitTeamCommandWithPreview(in emitTeamCommandInput, preview teamCommandPrev
 	if len(extraDefaultArgs) > 0 {
 		switch normalizedAgentBinary(m.Binary) {
 		case "codex":
-			b.WriteString(" --codex-args=")
-			b.WriteString(shellQuote(joinedAgentArgs(extraDefaultArgs)))
+			args = append(args, "--codex-args="+joinedAgentArgs(extraDefaultArgs))
 		case "claude":
-			b.WriteString(" --claude-args=")
-			b.WriteString(shellQuote(joinedAgentArgs(extraDefaultArgs)))
+			args = append(args, "--claude-args="+joinedAgentArgs(extraDefaultArgs))
 		}
 	}
 	if len(preview.ChildArgs) > 0 {
-		b.WriteString(" --")
-		for _, arg := range preview.ChildArgs {
-			b.WriteString(" ")
-			b.WriteString(shellQuote(arg))
-		}
+		args = append(args, "--")
+		args = append(args, preview.ChildArgs...)
 	}
-	return b.String()
+	return args
 }
 
 func teamCommandPreview(in emitTeamCommandInput) teamCommandPreviewData {

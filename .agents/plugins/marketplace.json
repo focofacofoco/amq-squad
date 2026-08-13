@@ -1,7 +1,7 @@
 {
-  "name": "amq-squad",
+  "name": "facode-amq-squad",
   "interface": {
-    "displayName": "amq-squad"
+    "displayName": "Facode AMQ Squad"
   },
   "plugins": [
     {
@@ -14,7 +14,7 @@
         "installation": "AVAILABLE",
         "authentication": "ON_USE"
       },
-      "category": "Productivity"
+      "category": "Development"
     }
   ]
 }

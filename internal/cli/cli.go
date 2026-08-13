@@ -10,6 +10,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/omriariav/amq-squad/v2/internal/forkinfo"
 	"github.com/omriariav/amq-squad/v2/internal/team"
 )
 
@@ -131,7 +132,14 @@ Examples:
 		return err
 	}
 	if *jsonOut {
-		return printJSONEnvelope("version", versionEnvelopeData{Version: version})
+		info := forkinfo.Current()
+		return printJSONEnvelope("version", versionEnvelopeData{
+			Version:      version,
+			ForkOwner:    info.Owner,
+			ForkCommit:   info.Commit,
+			UpstreamBase: info.UpstreamBase,
+			Modified:     info.Modified,
+		})
 	}
 	fmt.Println("amq-squad", version)
 	return nil
@@ -139,7 +147,11 @@ Examples:
 
 // versionEnvelopeData is the kind="version" payload.
 type versionEnvelopeData struct {
-	Version string `json:"version"`
+	Version      string `json:"version"`
+	ForkOwner    string `json:"fork_owner"`
+	ForkCommit   string `json:"fork_commit"`
+	UpstreamBase string `json:"upstream_base"`
+	Modified     bool   `json:"modified"`
 }
 
 // runBareDefault handles `amq-squad` with no arguments. In a project with ANY

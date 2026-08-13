@@ -227,18 +227,6 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	return syncDir(dir)
 }
 
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := f.Sync(); err != nil {
-		return err
-	}
-	return nil
-}
-
 // buildManagedBlock returns the canonical pointer-stub managed block. The
 // block intentionally does not embed team-rules.md; agents follow the
 // pointer at runtime so the root instruction file stays small and the

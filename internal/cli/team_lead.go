@@ -127,9 +127,7 @@ var externalLeadWakeReadyTimeout = 5 * time.Second
 var externalLeadWakePollInterval = 50 * time.Millisecond
 var externalLeadWakeStopTimeout = 2 * time.Second
 var externalLeadWakeProcessEvent = func(_ string, _ *exec.Cmd, _ error) {}
-var externalLeadWakeProcessGroupSignal = func(pgid int, signal syscall.Signal) error {
-	return syscall.Kill(-pgid, signal)
-}
+var externalLeadWakeProcessGroupSignal = signalExternalLeadWakeProcessGroup
 
 type teamLeadData struct {
 	Profile      string `json:"profile"`
@@ -989,16 +987,6 @@ func startExternalLeadWake(opts leadWakeOptions) (leadWakeResult, error) {
 		}
 		time.Sleep(externalLeadWakePollInterval)
 	}
-}
-
-func ownExternalLeadWakeProcessGroup(cmd *exec.Cmd) {
-	if cmd == nil {
-		return
-	}
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setpgid = true
 }
 
 func stopExternalLeadWakeProcess(cmd *exec.Cmd, done <-chan error) error {

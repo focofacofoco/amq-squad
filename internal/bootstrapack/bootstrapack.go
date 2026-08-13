@@ -123,12 +123,7 @@ func Write(agentDir string, marker Marker) error {
 	if err := os.Chmod(Path(agentDir), 0o600); err != nil {
 		return fmt.Errorf("chmod bootstrap marker: %w", err)
 	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open bootstrap marker dir: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
+	if err := syncMarkerDir(dir); err != nil {
 		return fmt.Errorf("sync bootstrap marker dir: %w", err)
 	}
 	return nil

@@ -3,9 +3,9 @@
   "description": "amq-squad agent-team coordination skills for Claude Code: live coordination (amq-squad), first-time team setup (amq-team-setup), custom role authoring (amq-squad-role-creator), and lead-agent orchestration (amq-squad-orchestrator).",
   "version": "2.29.5",
   "author": {
-    "name": "Omri Ariav"
+    "name": "Facode"
   },
-  "homepage": "https://github.com/omriariav/amq-squad",
-  "repository": "https://github.com/omriariav/amq-squad",
+  "homepage": "https://github.com/focofacofoco/amq-squad",
+  "repository": "https://github.com/focofacofoco/amq-squad",
   "license": "MIT"
 }

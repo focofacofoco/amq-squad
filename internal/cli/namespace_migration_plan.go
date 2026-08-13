@@ -13,8 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/omriariav/amq-squad/v2/internal/autonomy"
 	"github.com/omriariav/amq-squad/v2/internal/flock"
 	"github.com/omriariav/amq-squad/v2/internal/launch"
@@ -615,11 +613,11 @@ func migrationSpaceEvidence(project string, artifacts []namespaceMigrationArtifa
 			return 0, 0, fmt.Errorf("artifact %s is on another device; atomic rename would fail with EXDEV", artifact.Name)
 		}
 	}
-	var stat unix.Statfs_t
-	if err := unix.Statfs(project, &stat); err != nil {
+	free, err := migrationFreeBytes(project)
+	if err != nil {
 		return device, 0, fmt.Errorf("stat filesystem space: %w", err)
 	}
-	return device, uint64(stat.Bavail) * uint64(stat.Bsize), nil
+	return device, free, nil
 }
 
 func migrationDevice(info os.FileInfo) uint64 {

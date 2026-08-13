@@ -95,6 +95,8 @@ type teamLaunchResultPane struct {
 type teamLaunchPane struct {
 	Role    string
 	CWD     string
+	Program string
+	Args    []string
 	Command string
 	// Engine is the normalized agent binary expected to be the pane's current
 	// command once bootstrap succeeds. It is what lets the launcher tell "agent
@@ -722,32 +724,35 @@ func buildTeamLaunchPanes(t team.Team, opts teamLaunchOptions) []teamLaunchPane 
 		if conversation != "" {
 			startupPrompt = ""
 		}
+		input := emitTeamCommandInput{
+			CWD:            cwd,
+			SquadBin:       opts.SquadBin,
+			TeamHome:       t.Project,
+			Member:         m,
+			NoBootstrap:    opts.NoBootstrap,
+			Workstream:     opts.Workstream,
+			BinaryArgs:     binaryArgs,
+			TrustMode:      opts.Trust,
+			Model:          memberResolvedModel(m, opts.ModelOverrides, binaryArgs),
+			ForceDuplicate: opts.ForceDuplicate,
+			NoGitignore:    opts.NoGitignore,
+			Symphony:       opts.Symphony,
+			Profile:        opts.Profile,
+			WakeInjectVia:  opts.WakeInjectVia,
+			WakeInjectArgs: opts.WakeInjectArgs,
+			WakeInjectMode: opts.WakeInjectMode,
+			SimpleStart:    opts.SimpleStart,
+			CanonicalRoot:  opts.CanonicalRoot,
+			StartupPrompt:  startupPrompt,
+			Conversation:   conversation,
+		}
 		panes = append(panes, teamLaunchPane{
-			Role:   m.Role,
-			CWD:    cwd,
-			Engine: normalizedAgentBinary(m.Binary),
-			Command: emitTeamCommand(emitTeamCommandInput{
-				CWD:            cwd,
-				SquadBin:       opts.SquadBin,
-				TeamHome:       t.Project,
-				Member:         m,
-				NoBootstrap:    opts.NoBootstrap,
-				Workstream:     opts.Workstream,
-				BinaryArgs:     binaryArgs,
-				TrustMode:      opts.Trust,
-				Model:          memberResolvedModel(m, opts.ModelOverrides, binaryArgs),
-				ForceDuplicate: opts.ForceDuplicate,
-				NoGitignore:    opts.NoGitignore,
-				Symphony:       opts.Symphony,
-				Profile:        opts.Profile,
-				WakeInjectVia:  opts.WakeInjectVia,
-				WakeInjectArgs: opts.WakeInjectArgs,
-				WakeInjectMode: opts.WakeInjectMode,
-				SimpleStart:    opts.SimpleStart,
-				CanonicalRoot:  opts.CanonicalRoot,
-				StartupPrompt:  startupPrompt,
-				Conversation:   conversation,
-			}),
+			Role:    m.Role,
+			CWD:     cwd,
+			Program: opts.SquadBin,
+			Args:    emitTeamArgv(input),
+			Engine:  normalizedAgentBinary(m.Binary),
+			Command: emitTeamCommand(input),
 		})
 	}
 	return panes

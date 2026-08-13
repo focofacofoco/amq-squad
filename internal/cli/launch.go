@@ -611,7 +611,7 @@ Examples:
 		target = launcher
 		trailing = append(append([]string(nil), launcherArgs...), effectiveChildArgs...)
 	}
-	target, trailing = exactRootChildCommand(target, trailing)
+	target, trailing = platformLaunchChildCommand(target, trailing)
 	coopArgs = append(coopArgs, target)
 	if len(trailing) > 0 {
 		coopArgs = append(coopArgs, "--")
@@ -711,6 +711,12 @@ Examples:
 	}
 
 	amqBin, err := exec.LookPath("amq")
+	if handled, platformErr := runPlatformAgent(target, trailing, rec, agentDir, &recordWrite); handled {
+		if platformErr != nil {
+			return rollbackLaunchRecord(platformErr)
+		}
+		return nil
+	}
 	if err != nil {
 		return rollbackLaunchRecord(fmt.Errorf("amq not found in PATH: %w", err))
 	}

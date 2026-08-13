@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -113,13 +114,27 @@ type liveLaunchFlags struct {
 
 func registerLiveLaunchFlags(fs *flag.FlagSet) *liveLaunchFlags {
 	return &liveLaunchFlags{
-		terminal:        fs.String("terminal", "tmux", "terminal backend to use"),
-		target:          fs.String("target", "current-window", "terminal target, backend-specific"),
+		terminal:        fs.String("terminal", defaultLiveLaunchTerminal(), "terminal backend to use"),
+		target:          fs.String("target", defaultLiveLaunchTarget(), "terminal target, backend-specific"),
 		layout:          fs.String("layout", "vertical", "terminal layout, backend-specific"),
 		terminalSession: fs.String("terminal-session", "", "terminal session name when the backend creates one"),
 		stagger:         fs.Duration("stagger", 750*time.Millisecond, "delay between starting agent panes"),
 		noAttach:        fs.Bool("no-attach", false, "legacy no-op; new-session never attaches automatically"),
 	}
+}
+
+func defaultLiveLaunchTerminal() string {
+	if runtime.GOOS == "windows" {
+		return "windows-terminal"
+	}
+	return "tmux"
+}
+
+func defaultLiveLaunchTarget() string {
+	if runtime.GOOS == "windows" {
+		return "new-window"
+	}
+	return "current-window"
 }
 
 // buildLiveLaunchOptions composes a teamLaunchOptions from the shared preview

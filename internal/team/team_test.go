@@ -578,8 +578,8 @@ func TestValidateMemberLauncher(t *testing.T) {
 	base := Member{Role: "qa", Binary: "claude", Handle: "qa", Session: "issue-96"}
 
 	ok := base
-	ok.Launcher = "/opt/scripts/pm-os-dev.sh"
-	ok.LauncherArgs = []string{"--pull", "--workspace", "/x"}
+	ok.Launcher = filepath.Join(t.TempDir(), "pm-os-dev")
+	ok.LauncherArgs = []string{"--pull", "--workspace", t.TempDir()}
 	if err := Validate(Team{Members: []Member{ok}}); err != nil {
 		t.Errorf("absolute launcher with args should validate, got %v", err)
 	}

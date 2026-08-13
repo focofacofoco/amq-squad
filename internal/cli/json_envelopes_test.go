@@ -25,6 +25,9 @@ func TestRunVersionJSONEnvelope(t *testing.T) {
 	if env.Data.Version != "1.0.0-test" {
 		t.Errorf("version = %q, want 1.0.0-test", env.Data.Version)
 	}
+	if env.Data.ForkOwner != "focofacofoco" || env.Data.UpstreamBase == "" || env.Data.ForkCommit == "" {
+		t.Errorf("fork identity missing from version envelope: %+v", env.Data)
+	}
 }
 
 func TestRunVersionTextStillWorks(t *testing.T) {

@@ -249,15 +249,3 @@ func writeAtomic(path string, file File) error {
 	}
 	return nil
 }
-
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
-}

@@ -2,8 +2,8 @@
   "name": "amq-squad",
   "description": "Plugin marketplace for amq-squad: agent-team coordination skills for Claude Code, shipped from the amq-squad repo.",
   "owner": {
-    "name": "Omri Ariav",
-    "url": "https://github.com/omriariav"
+    "name": "Facode",
+    "url": "https://github.com/focofacofoco"
   },
   "plugins": [
     {
@@ -11,7 +11,7 @@
       "source": "./plugins/claude",
       "description": "amq-squad agent-team coordination skills for Claude Code: live coordination (amq-squad), first-time team setup (amq-team-setup), custom role authoring (amq-squad-role-creator), and lead-agent orchestration (amq-squad-orchestrator).",
       "category": "orchestration",
-      "homepage": "https://github.com/omriariav/amq-squad"
+      "homepage": "https://github.com/focofacofoco/amq-squad"
     }
   ]
 }
