@@ -44,6 +44,21 @@ func TestDiscoverAMQResetRootsOnlyReturnsOperationalDirectories(t *testing.T) {
 	}
 }
 
+func TestFindSquadRootForLegacyAMQRoot(t *testing.T) {
+	project := t.TempDir()
+	mail := filepath.Join(project, ".codex", "agent-mail")
+	squad := filepath.Join(project, ".amq-squad")
+	if err := os.MkdirAll(mail, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(squad, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findSquadRootForAMQRoot(mail); got != squad {
+		t.Fatalf("squad root = %q, want %q", got, squad)
+	}
+}
+
 func TestRemoveAMQResetRootIsIdempotentAndPreservesProjectFiles(t *testing.T) {
 	project := t.TempDir()
 	root := filepath.Join(project, ".agent-mail")

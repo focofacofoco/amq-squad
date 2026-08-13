@@ -95,6 +95,16 @@ func directProjectResetRoots(project string, discovered []string) []string {
 
 func discoverAllAMQResetRoots() ([]string, error) {
 	roots := []string{}
+	catalogRoots, err := discoverCatalogAMQResetRoots()
+	if err != nil {
+		return nil, err
+	}
+	for _, root := range catalogRoots {
+		roots = append(roots, root)
+		if squad := findSquadRootForAMQRoot(root); squad != "" {
+			roots = append(roots, squad)
+		}
+	}
 	for _, base := range resetSearchBases() {
 		found, err := discoverAMQResetRoots(base)
 		if err != nil {
@@ -103,6 +113,43 @@ func discoverAllAMQResetRoots() ([]string, error) {
 		roots = append(roots, found...)
 	}
 	return cleanResetTargets(roots), nil
+}
+
+func discoverCatalogAMQResetRoots() ([]string, error) {
+	cmd := exec.Command("amq", "reset", "--dry-run", "--json")
+	raw, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("inspect AMQ reset catalog: %w", err)
+	}
+	var report struct {
+		Roots []struct {
+			Root string `json:"root"`
+		} `json:"roots"`
+	}
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return nil, fmt.Errorf("decode AMQ reset catalog: %w", err)
+	}
+	roots := make([]string, 0, len(report.Roots))
+	for _, entry := range report.Roots {
+		roots = append(roots, entry.Root)
+	}
+	return cleanResetTargets(roots), nil
+}
+
+func findSquadRootForAMQRoot(root string) string {
+	current := filepath.Dir(filepath.Clean(root))
+	for range 4 {
+		candidate := filepath.Join(current, ".amq-squad")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	return ""
 }
 
 func resetSearchBases() []string {
